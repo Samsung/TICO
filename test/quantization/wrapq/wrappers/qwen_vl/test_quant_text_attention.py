@@ -685,9 +685,12 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
             (False, True),
             ("delta", "present"),
         ):
-            with self.subTest(
-                dtype=dtype, layout=layout, equal=equal_grids, mode=output_mode
-            ), torch.no_grad():
+            with (
+                self.subTest(
+                    dtype=dtype, layout=layout, equal=equal_grids, mode=output_mode
+                ),
+                torch.no_grad(),
+            ):
                 attention = self._prefill_calibrated(dtype=dtype, layout=layout)
                 storage_zp = 0 if dtype.signed else 113
                 compute_zp = storage_zp if equal_grids else (0 if dtype.signed else 91)
