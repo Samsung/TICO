@@ -224,11 +224,6 @@ class QuantLlamaAttention(QuantModuleBase):
         self.obs_scale = mk("scale")
         self.obs_logits_raw = mk("logits_raw")
 
-        # Optional calibration diagnostics for externally supplied cache tensors.
-        # These observers do not own a serialized cache or compute domain.
-        self.obs_past_key = mk("past_key")
-        self.obs_past_value = mk("past_value")
-
         # Persistent cache storage domain.
         self.obs_new_k = mk("new_k")  # (B, n_kv, S, H)
         self.obs_new_v = mk("new_v")  # (B, n_kv, S, H)
@@ -236,6 +231,48 @@ class QuantLlamaAttention(QuantModuleBase):
         # Attention compute domain used by both Concat operands and its output.
         self.obs_present_key = mk("present_key")  # (B, max_seq, H)
         self.obs_present_value = mk("present_value")  # (B, max_seq, H)
+
+    _OBSOLETE_CACHE_CHECKPOINT = (
+        "Llama checkpoint contains obsolete past-cache observer state; "
+        "reprepare the float model and recalibrate with cache generation "
+        "enabled (calibration.decode_steps=0 is supported)."
+    )
+
+    def __setstate__(self, state):
+        # Recipe checkpoints pickle full modules, bypassing state-dict loading.
+        if any(
+            name in state.get("_modules", {})
+            for name in ("obs_past_key", "obs_past_value")
+        ):
+            raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
+        super().__setstate__(state)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # Reject even non-strict loads: obsolete read-grid statistics cannot
+        # establish the shared prefill/decode storage ABI.
+        if any(
+            key.startswith((prefix + "obs_past_key.", prefix + "obs_past_value."))
+            for key in state_dict
+        ):
+            error_msgs.append(self._OBSOLETE_CACHE_CHECKPOINT)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def _rot(self, t: torch.Tensor, o_x1, o_x2, o_cat):
         """
@@ -308,15 +345,6 @@ class QuantLlamaAttention(QuantModuleBase):
             t = t.unsqueeze(1)
         return t
 
-    def _observe_past_cache(self, key_value: LayerKV) -> LayerKV:
-        """Collect past-cache diagnostics without defining a runtime grid."""
-        if self._mode is not Mode.CALIB:
-            return key_value
-        return (
-            self._fq(key_value[0], self.obs_past_key),
-            self._fq(key_value[1], self.obs_past_value),
-        )
-
     def _apply_storage_grid(self, key_value: LayerKV) -> LayerKV:
         """Apply the persistent cache grid without collecting duplicate data."""
         if self._mode is not Mode.QUANT:
@@ -357,27 +385,27 @@ class QuantLlamaAttention(QuantModuleBase):
 
         layer_idx = self.layer_idx
 
+        # StaticCache exposes its complete allocation. Only occupied slots are
+        # past tokens; padding must not enter attention or calibration statistics.
+        seq_length = None
+        get_seq_length = getattr(cache, "get_seq_length", None)
+        if callable(get_seq_length):
+            try:
+                seq_length = int(get_seq_length(layer_idx))
+            except TypeError:
+                seq_length = int(get_seq_length())
+            if seq_length == 0:
+                return None
+
         def maybe_quantize(k: torch.Tensor, v: torch.Tensor) -> LayerKV:
+            if seq_length is not None and not write_back:
+                k = k[..., :seq_length, :]
+                v = v[..., :seq_length, :]
             if k_obs is not None:
                 k = self._fq(k, k_obs)
             if v_obs is not None:
                 v = self._fq(v, v_obs)
             return k, v
-
-        # Empty cache should behave like no past KV.
-        get_seq_length = getattr(cache, "get_seq_length", None)
-        if callable(get_seq_length):
-            try:
-                if int(get_seq_length()) == 0:
-                    return None
-            except TypeError:
-                try:
-                    if int(get_seq_length(layer_idx)) == 0:
-                        return None
-                except Exception:
-                    pass
-            except Exception:
-                pass
 
         # 1) key_cache / value_cache layout
         key_cache = getattr(cache, "key_cache", None)
@@ -537,11 +565,10 @@ class QuantLlamaAttention(QuantModuleBase):
         if past_k is None or past_v is None:
             return None
 
-        # The external cache ABI is always the new_* storage domain. The
-        # past_* observers remain calibration diagnostics only, and the
-        # compute conversion is placed later on the attention branch.
-        storage_key_value = self._observe_past_cache((past_k, past_v))
-        return self._apply_storage_grid(storage_key_value)
+        # The external cache ABI uses new_* storage qparams. CALIB preserves
+        # the supplied values; QUANT enforces S here and converts S to C only
+        # on the subsequent attention branch.
+        return self._apply_storage_grid((past_k, past_v))
 
     def _get_past_len(
         self,
@@ -714,53 +741,18 @@ class QuantLlamaAttention(QuantModuleBase):
         new_k_parts: list[torch.Tensor],
         new_v_parts: list[torch.Tensor],
         cache_output_mode: CacheOutputMode,
+        cache_position: Optional[torch.Tensor] = None,
     ) -> Cache | LayerKV:
         """Finalize an unrolled cache output in the persistent storage domain."""
-        if cache_output_mode not in ("present", "delta"):
-            raise ValueError(f"Unsupported cache_output_mode: {cache_output_mode!r}")
-
         new_k = self._fq(torch.stack(new_k_parts, dim=1), self.obs_new_k)
         new_v = self._fq(torch.stack(new_v_parts, dim=1), self.obs_new_v)
-        new_key_value = (new_k, new_v)
-
-        if cache_output_mode == "delta":
-            if torch.compiler.is_compiling() and isinstance(past_key_value_in, Cache):
-                if self.layer_idx is None:
-                    raise RuntimeError(
-                        "layer_idx must be set to update an HF Cache object."
-                    )
-                past_key_value_in.layers[self.layer_idx] = type(
-                    past_key_value_in.layers[self.layer_idx]
-                )()  # reset layer cache
-                past_key_value_in.update(
-                    new_k, new_v, self.layer_idx, cache_kwargs=None
-                )  # set new cache
-                self._get_layer_kv_from_cache(
-                    past_key_value_in,
-                    k_obs=self.obs_new_k,
-                    v_obs=self.obs_new_v,
-                    write_back=True,
-                )
-            return new_key_value
-
-        if isinstance(past_key_value_in, Cache):
-            if self.layer_idx is None:
-                raise RuntimeError(
-                    "layer_idx must be set to update an HF Cache object."
-                )
-            past_key_value_in.update(new_k, new_v, self.layer_idx, cache_kwargs=None)
-            if self._mode is Mode.QUANT:
-                self._get_layer_kv_from_cache(
-                    past_key_value_in,
-                    k_obs=self.obs_new_k,
-                    v_obs=self.obs_new_v,
-                    write_back=True,
-                )
-            return past_key_value_in
-
-        return self._build_storage_cache(
+        return self._finalize_cache_output_batched(
+            past_key_value_in=past_key_value_in,
             past_key_value=past_key_value,
-            new_key_value=new_key_value,
+            new_k=new_k,
+            new_v=new_v,
+            cache_output_mode=cache_output_mode,
+            cache_position=cache_position,
         )
 
     def _finalize_cache_output_batched(
@@ -771,48 +763,31 @@ class QuantLlamaAttention(QuantModuleBase):
         new_k: torch.Tensor,
         new_v: torch.Tensor,
         cache_output_mode: CacheOutputMode,
+        cache_position: Optional[torch.Tensor] = None,
     ) -> Cache | LayerKV:
-        """Finalize a batched cache output in the persistent storage domain."""
+        """Update HF storage with the S delta, independently of return policy."""
         if cache_output_mode not in ("present", "delta"):
             raise ValueError(f"Unsupported cache_output_mode: {cache_output_mode!r}")
 
         new_key_value = (new_k, new_v)
-
-        if cache_output_mode == "delta":
-            if torch.compiler.is_compiling() and isinstance(past_key_value_in, Cache):
-                if self.layer_idx is None:
-                    raise RuntimeError(
-                        "layer_idx must be set to update an HF Cache object."
-                    )
-                past_key_value_in.layers[self.layer_idx] = type(
-                    past_key_value_in.layers[self.layer_idx]
-                )()
-                past_key_value_in.update(
-                    new_k, new_v, self.layer_idx, cache_kwargs=None
-                )
-                self._get_layer_kv_from_cache(
-                    past_key_value_in,
-                    k_obs=self.obs_new_k,
-                    v_obs=self.obs_new_v,
-                    write_back=True,
-                )
-            return new_key_value
-
         if isinstance(past_key_value_in, Cache):
             if self.layer_idx is None:
                 raise RuntimeError(
                     "layer_idx must be set to update an HF Cache object."
                 )
-            past_key_value_in.update(new_k, new_v, self.layer_idx, cache_kwargs=None)
-            if self._mode is Mode.QUANT:
-                self._get_layer_kv_from_cache(
-                    past_key_value_in,
-                    k_obs=self.obs_new_k,
-                    v_obs=self.obs_new_v,
-                    write_back=True,
-                )
-            return past_key_value_in
+            cache_kwargs = (
+                {"cache_position": cache_position}
+                if cache_position is not None
+                else None
+            )
+            past_key_value_in.update(
+                new_k, new_v, self.layer_idx, cache_kwargs=cache_kwargs
+            )
+            if cache_output_mode == "present":
+                return past_key_value_in
 
+        if cache_output_mode == "delta":
+            return new_key_value
         return self._build_storage_cache(
             past_key_value=past_key_value,
             new_key_value=new_key_value,
@@ -831,6 +806,7 @@ class QuantLlamaAttention(QuantModuleBase):
         past_key_value_in: Optional[Cache | LayerKV],
         use_cache: Optional[bool],
         cache_output_mode: CacheOutputMode,
+        cache_position: Optional[torch.Tensor] = None,
     ):
         """
         Run the NPU-export-friendly per-head unrolled attention path.
@@ -932,6 +908,7 @@ class QuantLlamaAttention(QuantModuleBase):
                 new_k_parts=new_k_parts,
                 new_v_parts=new_v_parts,
                 cache_output_mode=cache_output_mode,
+                cache_position=cache_position,
             )
             outputs += (cache_out,)  # type: ignore[assignment]
 
@@ -950,6 +927,7 @@ class QuantLlamaAttention(QuantModuleBase):
         past_key_value_in: Optional[Cache | LayerKV],
         use_cache: Optional[bool],
         cache_output_mode: CacheOutputMode,
+        cache_position: Optional[torch.Tensor] = None,
     ):
         """
         Run a HF-like batched attention path optimized for GPU evaluation.
@@ -1046,6 +1024,7 @@ class QuantLlamaAttention(QuantModuleBase):
                 new_k=new_k,
                 new_v=new_v,
                 cache_output_mode=cache_output_mode,
+                cache_position=cache_position,
             )
             outputs += (cache_out,)  # type: ignore[assignment]
 
@@ -1076,7 +1055,7 @@ class QuantLlamaAttention(QuantModuleBase):
                 - attention weights
                 - optional cache output when `use_cache=True`
         """
-        del cache_position, kwargs
+        del kwargs
 
         past_key_value_in = past_key_value
         past_key_value = self._normalize_past_key_value(past_key_value)
@@ -1112,6 +1091,7 @@ class QuantLlamaAttention(QuantModuleBase):
                 past_key_value_in=past_key_value_in,
                 use_cache=use_cache,
                 cache_output_mode=cache_output_mode,
+                cache_position=cache_position,
             )
 
         if self.attn_options.layout == "unrolled":
@@ -1126,6 +1106,7 @@ class QuantLlamaAttention(QuantModuleBase):
                 past_key_value_in=past_key_value_in,
                 use_cache=use_cache,
                 cache_output_mode=cache_output_mode,
+                cache_position=cache_position,
             )
 
         raise RuntimeError(f"Invalid attention layout: {self.attn_options.layout!r}")
@@ -1160,8 +1141,6 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_attn_out,
             self.obs_attn_weights,
             self.obs_attn_out_h,
-            self.obs_past_key,
-            self.obs_past_value,
             self.obs_new_k,
             self.obs_new_v,
             self.obs_present_key,

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import unittest
 from typing import cast, TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaAttentionDecodeExportAdapter,
@@ -85,7 +87,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         for _ in range(3):
             x = torch.randn(2, 4, self.hidden_size)
             pos = self._rand_rope_for(qattn, 2, 4)
-            _ = qattn(x, pos)
+            _ = qattn(x, pos, use_cache=True)
 
         qattn.freeze_qparams()
         return qattn
@@ -433,19 +435,13 @@ class TestQuantLlamaAttention(unittest.TestCase):
         qattn = self._make_qattn(qcfg)
 
         storage_scale, storage_zp = 0.0625, 113
-        compute_scale, compute_zp = 0.3125, 91
-        diagnostic_scale, diagnostic_zp = 0.1875, 127
+        compute_scale, compute_zp = 0.21875, 91
         for observer in (qattn.obs_new_k, qattn.obs_new_v):
             assert isinstance(observer, AffineObserverBase)
             observer.load_qparams(torch.tensor(storage_scale), torch.tensor(storage_zp))
         for observer in (qattn.obs_present_key, qattn.obs_present_value):
             assert isinstance(observer, AffineObserverBase)
             observer.load_qparams(torch.tensor(compute_scale), torch.tensor(compute_zp))
-        for observer in (qattn.obs_past_key, qattn.obs_past_value):
-            assert isinstance(observer, AffineObserverBase)
-            observer.load_qparams(
-                torch.tensor(diagnostic_scale), torch.tensor(diagnostic_zp)
-            )
 
         def quantize(value, scale, zero_point):
             return torch.fake_quantize_per_tensor_affine(
@@ -456,7 +452,8 @@ class TestQuantLlamaAttention(unittest.TestCase):
             [-0.31, -0.07, 0.11, 0.29, 0.43, 0.67, 0.83, 1.09]
         ).reshape(1, 1, 2, 4)
         past_v = -past_k
-        current_k = torch.tensor([0.2, -0.2, 0.48, -0.48]).reshape(1, 1, 4)
+        # C/S = 3.5 exposes double rounding if current compute goes via S.
+        current_k = torch.tensor([0.105, -0.105, 0.34, -0.34]).reshape(1, 1, 4)
         current_v = -current_k
 
         storage_past = qattn._normalize_past_key_value((past_k, past_v))
@@ -526,6 +523,16 @@ class TestQuantLlamaAttention(unittest.TestCase):
                 compute_zp,
             ),
         )
+        self.assertFalse(
+            torch.equal(
+                quantize(current_k, compute_scale, compute_zp),
+                quantize(
+                    quantize(current_k, storage_scale, storage_zp),
+                    compute_scale,
+                    compute_zp,
+                ),
+            )
+        )
         expected_full_storage = (
             torch.cat((expected_storage_past[0], expected_delta[0]), dim=2),
             torch.cat((expected_storage_past[1], expected_delta[1]), dim=2),
@@ -540,13 +547,74 @@ class TestQuantLlamaAttention(unittest.TestCase):
         for actual, expected in zip(full_storage, expected_full_storage):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-        # A diagnostic past grid must not affect storage or compute values.
+    def test_past_cache_calibration_preserves_values_without_observers(self):
+        attention = QuantLlamaAttention(self.fp_attn, layer_idx=0)
+        attention.enable_calibration()
+        past = self._rand_past(1, 2)
+        normalized = attention._normalize_past_key_value(past)
+        assert normalized is not None
+        for actual, original in zip(normalized, past):
+            self.assertIs(actual, original)
+        self.assertFalse(any("past" in name for name, _ in attention.named_observers()))
+        self.assertFalse(any("obs_past" in name for name in attention.state_dict()))
         self.assertFalse(
-            torch.equal(
-                expected_storage_past[0],
-                quantize(past_k, diagnostic_scale, diagnostic_zp),
-            )
+            any("obs_past" in name for name, _ in attention.named_modules())
         )
+
+    def test_checkpoint_without_past_observers_restores_functional_qparams(self):
+        attention = self._make_qattn()
+        restored = QuantLlamaAttention(self.fp_attn, layer_idx=0)
+        # Normal preparation initializes per-channel weight-stat buffer shapes.
+        restored.enable_calibration()
+        restored.load_state_dict(attention.state_dict(), strict=True)
+        restored.freeze_qparams()
+        expected = dict(attention.named_observers())
+        for name, observer in restored.named_observers():
+            self.assertIsInstance(observer, AffineObserverBase)
+            torch.testing.assert_close(
+                observer.compute_qparams(),
+                expected[name].compute_qparams(),
+                rtol=0,
+                atol=0,
+            )
+
+    def test_checkpoint_with_obsolete_past_observers_is_actionably_rejected(self):
+        attention = self._make_qattn()
+        state = attention.state_dict()
+        # Older checkpoints persisted statistics, rather than frozen qparams.
+        for name in ("obs_past_key", "obs_past_value"):
+            state[name + ".min_val"] = torch.tensor(-1.0)
+            state[name + ".max_val"] = torch.tensor(1.0)
+        for strict in (True, False):
+            with self.subTest(strict=strict):
+                restored = QuantLlamaAttention(self.fp_attn, layer_idx=0)
+                with self.assertRaisesRegex(
+                    RuntimeError, "obsolete past-cache observer state; reprepare"
+                ):
+                    restored.load_state_dict(state, strict=strict)
+
+    def test_full_module_checkpoint_rejects_obsolete_registered_observers(self):
+        attention = self._make_qattn()
+        with io.BytesIO() as checkpoint:
+            torch.save(attention, checkpoint)
+            checkpoint.seek(0)
+            restored = torch.load(checkpoint, weights_only=False)
+        for name, observer in restored.named_observers():
+            expected = attention.get_observer(name)
+            assert expected is not None
+            torch.testing.assert_close(
+                observer.compute_qparams(), expected.compute_qparams(), rtol=0, atol=0
+            )
+        # Reproduce a legacy full-module checkpoint with removed registrations.
+        attention.add_module("obs_past_key", MinMaxObserver(name="past_key"))
+        attention.add_module("obs_past_value", MinMaxObserver(name="past_value"))
+        with io.BytesIO() as checkpoint:
+            torch.save(attention, checkpoint)
+            checkpoint.seek(0)
+            with self.assertRaisesRegex(
+                RuntimeError, "obsolete past-cache observer state; reprepare"
+            ):
+                torch.load(checkpoint, weights_only=False)
 
     def test_forward_shapes_and_cache_delta_decode(self):
         torch.manual_seed(1)

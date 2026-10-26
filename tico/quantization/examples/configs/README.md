@@ -233,6 +233,13 @@ must remain wholly in prefill, with the reserved suffix containing text tokens.
 Pixels run only during prefill, and temporary mRoPE request offsets are restored
 after calibration, including errors.
 
+Llama prompt-only calibration explicitly generates cache outputs, even when the
+source model has `use_cache=False`. This collects `new_*` persistent-storage and
+`present_*` attention-compute statistics without decode calls. Llama has no
+independent past-cache observers: prefill output and decode input share the
+`new_*` storage grid. Positive `decode_steps` remains useful for calibrating
+decode activation ranges, but is not required to freeze or export either mode.
+
 Qwen static decode and frozen cached inference reject active cache observers
 without observed affine ranges and valid qparams. A frozen flag or finite scale
 alone is insufficient. Existing checkpoints with valid persisted ranges remain
