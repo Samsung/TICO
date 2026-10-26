@@ -15,16 +15,24 @@
 """Smoke cases for LLaMA wrapper checks."""
 
 from dataclasses import dataclass
-from typing import Any, Mapping, TYPE_CHECKING
+from typing import Any, cast, Literal, Mapping, TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
     from transformers.models.llama.configuration_llama import LlamaConfig
 
+    from tico.quantization.wrapq.wrappers.llama.quant_attention import (
+        QuantLlamaAttention,
+    )
+    from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+        QuantLlamaDecoderLayer,
+    )
+
 
 from tico.quantization.recipes.debug.wrapper_smoke.case import (
     CaseAvailability,
+    ExportInvocation,
     ForwardInput,
     WrapperSmokeCase,
 )
@@ -165,12 +173,104 @@ def _build_llama_config(*, size_profile: str, max_seq: int) -> "LlamaConfig":
     )
 
 
-def _rand_rope(
-    batch_size: int, seq_len: int, head_dim: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create synthetic Hugging Face-style RoPE tensors."""
-    emb = torch.randn(batch_size, seq_len, head_dim)
-    return emb.cos(), emb.sin()
+def _llama_decoder_sample(
+    module: torch.nn.Module,
+    *,
+    batch_size: int,
+    query_length: int,
+    key_length: int,
+    past_length: int = 0,
+) -> ForwardInput:
+    """Build host-owned Llama inputs for eager checks and static adapters.
+
+    Decoder layers reuse the production rotary snapshot. Standalone attention
+    has no rotary owner, so it uses synthetic tables with the wrapped attention's
+    configured sine convention. Cache slots stay fixed while padded slots are
+    masked, as they are in the host runtime.
+    """
+    from tico.quantization.wrapq.wrappers.llama.position import build_causal_mask
+    from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+        prepare_llama_static_inputs,
+    )
+
+    if batch_size < 1 or query_length < 1 or past_length < 0:
+        raise ValueError(
+            "Llama sample dimensions must be positive with nonnegative past length."
+        )
+    if key_length != past_length + query_length:
+        raise ValueError("Llama key length must equal past length plus query length.")
+    owner = cast(
+        "QuantLlamaAttention | QuantLlamaDecoderLayer",
+        getattr(module, "wrapped", module),
+    )
+    attention = getattr(owner, "self_attn", None)
+    config = cast(
+        "LlamaConfig", owner.config if attention is None else attention.wrapped.config
+    )
+    parameter = next(owner.parameters())
+    device, dtype = parameter.device, parameter.dtype
+    hidden = torch.randn(
+        batch_size, query_length, config.hidden_size, device=device, dtype=dtype
+    )
+    fill_value = float(owner.qcfg.attention_mask_fill_value)
+    head_dim = config.head_dim or config.hidden_size // config.num_attention_heads
+    valid_past_length = past_length // 2
+    if attention is None:
+        phase = torch.randn(
+            batch_size, query_length, head_dim, device=device, dtype=dtype
+        )
+        cos, sin = phase.cos(), phase.sin()
+        if owner.attn_options.rope == "pre_negated_sin":
+            half = head_dim // 2
+            sin = torch.cat((-sin[..., :half], sin[..., half:]), dim=-1)
+        mask = build_causal_mask(
+            q_len=query_length,
+            k_len=key_length,
+            past_len=past_length,
+            device=device,
+            fill_value=fill_value,
+        )
+    else:
+        static = prepare_llama_static_inputs(owner, key_length)
+        cos, sin = static.rope(
+            valid_past_length, query_length, device=device, dtype=dtype
+        )
+        mask = static.mask(query_length, key_length, past_length, device=device)
+        cos = cos.repeat(batch_size, 1, 1)
+        sin = sin.repeat(batch_size, 1, 1)
+    mask = mask.repeat(batch_size, 1, 1)
+    kwargs: dict[str, Any] = {
+        "attention_mask": mask,
+        "position_embeddings": (cos, sin),
+    }
+    if past_length:
+        # The current query occupies the tail; the prefix contains valid KV
+        # followed by padded cache slots. RoPE uses the logical valid length.
+        mask[..., valid_past_length:past_length] = fill_value
+        assert config.num_key_value_heads is not None
+        cache_shape = (batch_size, config.num_key_value_heads, past_length, head_dim)
+        past = tuple(
+            torch.randn(cache_shape, device=device, dtype=dtype) for _ in range(2)
+        )
+        for value in past:
+            value[:, :, valid_past_length:] = 0
+        kwargs.update(past_key_value=past, use_cache=True)
+    return ForwardInput((hidden,), kwargs)
+
+
+def _llama_export_invocation(
+    module: torch.nn.Module, sample: ForwardInput, *, mode: Literal["prefill", "decode"]
+) -> ExportInvocation:
+    """Pair one guarded adapter with its named, host-owned invocation."""
+    owner = cast(
+        "QuantLlamaAttention | QuantLlamaDecoderLayer",
+        getattr(module, "wrapped", module),
+    )
+    kwargs = dict(sample.kwargs)
+    kwargs.pop("use_cache", None)  # Static adapters own delta-cache return behavior.
+    return ExportInvocation(
+        owner.as_export_module(mode).eval(), ForwardInput(sample.args, kwargs)
+    )
 
 
 class LlamaBaseCase(WrapperSmokeCase):
@@ -349,33 +449,40 @@ class LlamaAttentionPrefillCase(LlamaBaseCase):
         module = LlamaAttention(self.config, layer_idx=0).eval()
         return module, clone_module(module)
 
-    def _sample(self) -> ForwardInput:
-        """Create one synthetic prefill attention sample."""
-        assert self.config is not None
-        assert self.config.head_dim is not None
-        hidden = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
-        rope = _rand_rope(self.batch_size, self.seq_len, self.config.head_dim)
-        mask = torch.zeros(self.batch_size, self.seq_len, self.seq_len)
-        return ForwardInput((hidden, rope), {"attention_mask": mask})
+    def _sample(
+        self,
+        prepared: torch.nn.Module,
+        *,
+        batch_size: int | None = None,
+        seq_len: int | None = None,
+    ) -> ForwardInput:
+        """Use the same causal host inputs for calibration, evaluation and export."""
+        return _llama_decoder_sample(
+            prepared,
+            batch_size=self.batch_size if batch_size is None else batch_size,
+            query_length=self.seq_len if seq_len is None else seq_len,
+            key_length=self.seq_len if seq_len is None else seq_len,
+        )
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create synthetic prefill attention calibration inputs."""
         count = self._calibration_sample_count(cfg, default=3)
-        return [self._sample() for _ in range(count)]
+        return [self._sample(prepared) for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the synthetic prefill attention evaluation input."""
-        return self._sample()
+        return self._sample(prepared)
 
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
     ) -> Any:
         """Run the original LlamaAttention signature for a prefill sample."""
-        hidden, rope = sample.args
+        hidden = sample.args[0]
+        rope = sample.kwargs["position_embeddings"]
         mask = sample.kwargs.get("attention_mask")
         if not isinstance(mask, torch.Tensor):
             raise TypeError("Llama attention prefill requires a tensor attention mask.")
@@ -387,24 +494,21 @@ class LlamaAttentionPrefillCase(LlamaBaseCase):
         self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
         """Export the wrapped attention module in prefill mode when available."""
-        wrapped = getattr(quantized, "wrapped", quantized)
-        as_export_module = getattr(wrapped, "as_export_module", None)
-        return (
-            as_export_module("prefill").eval()
-            if callable(as_export_module)
-            else quantized
-        )
+        wrapped = cast("QuantLlamaAttention", getattr(quantized, "wrapped", quantized))
+        return wrapped.as_export_module("prefill").eval()
 
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create fixed prefill export inputs without an attention mask."""
+    def export_invocation(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ExportInvocation:
+        """Construct the static adapter and full-capacity causal inputs together."""
         assert self.config is not None
-        assert self.config.head_dim is not None
-        export_seq_len = int(self.config.max_position_embeddings)
-        hidden = torch.randn(1, export_seq_len, self.config.hidden_size)
-        rope = _rand_rope(1, export_seq_len, self.config.head_dim)
-        return ForwardInput((hidden, rope))
+        sample = self._sample(
+            quantized, batch_size=1, seq_len=int(self.config.max_position_embeddings)
+        )
+        return _llama_export_invocation(quantized, sample, mode="prefill")
 
 
 class LlamaAttentionDecodeCase(LlamaBaseCase):
@@ -432,39 +536,14 @@ class LlamaAttentionDecodeCase(LlamaBaseCase):
         module = LlamaAttention(self.config, layer_idx=0).eval()
         return module, clone_module(module)
 
-    def _decode_sample(self, prepared: torch.nn.Module | None = None) -> ForwardInput:
-        """Create one static decode input sample."""
-        assert self.config is not None
-        assert self.config.head_dim is not None
-        hidden = torch.randn(1, 1, self.config.hidden_size)
-        cos = torch.randn(1, 1, self.config.head_dim)
-        sin = torch.randn(1, 1, self.config.head_dim)
-        wrapped = getattr(prepared, "wrapped", None)
-        attn_options = getattr(wrapped, "attn_options", None)
-        if getattr(attn_options, "rope", None) == "pre_negated_sin":
-            sin = sin.clone()
-            sin[..., : self.config.head_dim // 2] = -sin[
-                ..., : self.config.head_dim // 2
-            ]
-        mask = torch.zeros(1, 1, self.max_seq)
-        assert self.config.num_key_value_heads is not None
-        past = (
-            torch.randn(
-                1,
-                self.config.num_key_value_heads,
-                self.max_seq - 1,
-                self.config.head_dim,
-            ),
-            torch.randn(
-                1,
-                self.config.num_key_value_heads,
-                self.max_seq - 1,
-                self.config.head_dim,
-            ),
-        )
-        return ForwardInput(
-            (hidden, (cos, sin)),
-            {"attention_mask": mask, "past_key_value": past, "use_cache": True},
+    def _decode_sample(self, prepared: torch.nn.Module) -> ForwardInput:
+        """Create fixed-capacity decode inputs with explicit padded-cache masks."""
+        return _llama_decoder_sample(
+            prepared,
+            batch_size=1,
+            query_length=1,
+            key_length=self.max_seq,
+            past_length=self.max_seq - 1,
         )
 
     def calibration_inputs(
@@ -484,22 +563,17 @@ class LlamaAttentionDecodeCase(LlamaBaseCase):
         self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
         """Export the wrapped attention module in decode mode when available."""
-        wrapped = getattr(quantized, "wrapped", quantized)
-        as_export_module = getattr(wrapped, "as_export_module", None)
-        return (
-            as_export_module("decode").eval()
-            if callable(as_export_module)
-            else quantized
-        )
+        wrapped = cast("QuantLlamaAttention", getattr(quantized, "wrapped", quantized))
+        return wrapped.as_export_module("decode").eval()
 
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create positional static decode inputs expected by the export adapter."""
-        hidden, pos = eval_sample.args
-        mask = eval_sample.kwargs["attention_mask"]
-        past = eval_sample.kwargs["past_key_value"]
-        return ForwardInput((hidden, pos, mask, past))
+    def export_invocation(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ExportInvocation:
+        """Pair the decode adapter with named cache, mask and RoPE inputs."""
+        return _llama_export_invocation(quantized, eval_sample, mode="decode")
 
 
 class LlamaDecoderLayerPrefillCase(LlamaBaseCase):
@@ -533,15 +607,15 @@ class LlamaDecoderLayerPrefillCase(LlamaBaseCase):
         module = LlamaDecoderLayer(self.config, layer_idx=0).eval()
         return module, clone_module(module)
 
-    def _sample(self) -> ForwardInput:
-        """Create one synthetic decoder-layer prefill sample."""
-        assert self.config is not None
-        assert self.config.head_dim is not None
-        hidden = torch.randn(self.batch_size, self.max_seq, self.config.hidden_size)
-        rope = _rand_rope(self.batch_size, self.max_seq, self.config.head_dim)
-        mask = torch.ones(self.batch_size, self.max_seq, self.max_seq, dtype=torch.bool)
-        return ForwardInput(
-            (hidden,), {"attention_mask": mask, "position_embeddings": rope}
+    def _sample(
+        self, prepared: torch.nn.Module, *, batch_size: int | None = None
+    ) -> ForwardInput:
+        """Reuse production mask and rotary preparation at every lifecycle stage."""
+        return _llama_decoder_sample(
+            prepared,
+            batch_size=self.batch_size if batch_size is None else batch_size,
+            query_length=self.max_seq,
+            key_length=self.max_seq,
         )
 
     def calibration_inputs(
@@ -549,13 +623,13 @@ class LlamaDecoderLayerPrefillCase(LlamaBaseCase):
     ) -> list[ForwardInput]:
         """Create decoder-layer prefill calibration samples."""
         count = self._calibration_sample_count(cfg, default=3)
-        return [self._sample() for _ in range(count)]
+        return [self._sample(prepared) for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the decoder-layer prefill evaluation sample."""
-        return self._sample()
+        return self._sample(prepared)
 
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
@@ -569,13 +643,16 @@ class LlamaDecoderLayerPrefillCase(LlamaBaseCase):
         )
         return out[0] if isinstance(out, tuple) else out
 
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create static decoder-layer prefill export input."""
-        assert self.config is not None
-        assert self.config.head_dim is not None
-        return ForwardInput((torch.randn(1, self.max_seq, self.config.hidden_size),))
+    def export_invocation(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ExportInvocation:
+        """Export a guarded prefill layer with explicit production host tensors."""
+        return _llama_export_invocation(
+            quantized, self._sample(quantized, batch_size=1), mode="prefill"
+        )
 
 
 class LlamaDecoderLayerDecodeCase(LlamaBaseCase):
@@ -607,40 +684,14 @@ class LlamaDecoderLayerDecodeCase(LlamaBaseCase):
         if hasattr(prepared, "wrapped"):
             setattr(prepared.wrapped, "return_type", "tuple")
 
-    def _decode_sample(self) -> ForwardInput:
-        """Create one static decode input sample for a decoder layer."""
-        assert self.config is not None
-        assert self.config.head_dim is not None
-        hidden = torch.randn(1, 1, self.config.hidden_size)
-        pos = (
-            torch.randn(1, 1, self.config.head_dim),
-            torch.randn(1, 1, self.config.head_dim),
-        )
-        mask = torch.zeros(1, 1, self.max_seq)
-        assert self.config.num_key_value_heads is not None
-        past = (
-            torch.randn(
-                1,
-                self.config.num_key_value_heads,
-                self.max_seq - 1,
-                self.config.head_dim,
-            ),
-            torch.randn(
-                1,
-                self.config.num_key_value_heads,
-                self.max_seq - 1,
-                self.config.head_dim,
-            ),
-        )
-        return ForwardInput(
-            (),
-            {
-                "hidden_states": hidden,
-                "attention_mask": mask,
-                "past_key_value": past,
-                "position_embeddings": pos,
-                "use_cache": True,
-            },
+    def _decode_sample(self, prepared: torch.nn.Module) -> ForwardInput:
+        """Create production rotary inputs and a padded fixed-capacity cache."""
+        return _llama_decoder_sample(
+            prepared,
+            batch_size=1,
+            query_length=1,
+            key_length=self.max_seq,
+            past_length=self.max_seq - 1,
         )
 
     def calibration_inputs(
@@ -648,36 +699,31 @@ class LlamaDecoderLayerDecodeCase(LlamaBaseCase):
     ) -> list[ForwardInput]:
         """Create decoder-layer decode calibration samples."""
         count = self._calibration_sample_count(cfg, default=4)
-        return [self._decode_sample() for _ in range(count)]
+        return [self._decode_sample(prepared) for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the decoder-layer decode evaluation sample."""
-        return self._decode_sample()
+        return self._decode_sample(prepared)
 
     def export_module(
         self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
         """Export the decoder layer in decode mode when supported."""
-        as_export_module = getattr(quantized, "as_export_module", None)
-        return (
-            as_export_module("decode").eval()
-            if callable(as_export_module)
-            else quantized
+        wrapped = cast(
+            "QuantLlamaDecoderLayer", getattr(quantized, "wrapped", quantized)
         )
+        return wrapped.as_export_module("decode").eval()
 
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create static decode inputs expected by the decoder-layer export adapter."""
-        hidden = eval_sample.kwargs["hidden_states"]
-        mask = eval_sample.kwargs["attention_mask"]
-        past = eval_sample.kwargs["past_key_value"]
-        pos = eval_sample.kwargs["position_embeddings"]
-        return ForwardInput(
-            (hidden, mask), {"past_key_value": past, "position_embeddings": pos}
-        )
+    def export_invocation(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ExportInvocation:
+        """Pair the decoder adapter with the production named-input ABI."""
+        return _llama_export_invocation(quantized, eval_sample, mode="decode")
 
 
 LLAMA_CASES: tuple[WrapperSmokeCase, ...] = (

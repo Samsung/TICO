@@ -672,6 +672,13 @@ It is useful when you want to quickly validate `prepare -> calibrate -> convert`
 numerical parity, plotting, and optional Circle export for a single wrapped
 module.
 
+Static Llama, Qwen3-VL text, and Gemma4 decoder cases assemble the export adapter
+and its invocation together. Calibration, eager comparison, and export use explicit
+host-owned additive causal masks and `(cos, sin)` RoPE tensors; cache-aware paths
+also supply fixed-capacity past KV (or full shared KV for Gemma4 consumers). The
+runner binds and validates these tensor shapes before Circle tracing, without an
+extra model forward. These host inputs remain part of the exported graph ABI.
+
 List available wrapper smoke cases:
 
 ```bash

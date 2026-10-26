@@ -70,7 +70,7 @@ class Qwen3VLTextAttentionPrefillExportAdapter(nn.Module):
         position_embeddings:
             Tuple `(cos, sin)` where each tensor has shape `(B, S, head_dim)`.
         attention_mask:
-            Optional additive mask with shape broadcastable to `(B, 1, S, S)`.
+            Explicit additive mask with shape broadcastable to `(B, 1, S, S)`.
 
     Return contract when `return_kv=True`:
         `(hidden_states, new_key, new_value)`, where:
@@ -124,7 +124,7 @@ class Qwen3VLTextAttentionDecodeExportAdapter(nn.Module):
         position_embeddings:
             Tuple `(cos, sin)` where each tensor has shape `(B, 1, head_dim)`.
         attention_mask:
-            Optional additive mask with shape broadcastable to `(B, 1, 1, K)`.
+            Explicit additive mask with shape broadcastable to `(B, 1, 1, K)`.
         past_key_values:
             Tuple `(past_key, past_value)` where each tensor has shape
             `(B, num_kv_heads, K - 1, head_dim)`.

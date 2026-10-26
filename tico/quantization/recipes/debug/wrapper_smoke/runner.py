@@ -107,8 +107,10 @@ def _export_circle(
     try:
         import tico
 
-        export_module = case.export_module(quantized, cfg).eval()
-        export_input = case.export_input(eval_sample, cfg)
+        invocation = case.export_invocation(quantized, eval_sample, cfg)
+        invocation.validate_static_decoder_inputs()
+        export_module = invocation.module.eval()
+        export_input = invocation.inputs
         args = tuple(export_input.args)
         kwargs = dict(export_input.kwargs)
         with torch.no_grad(), suppress_tico_warnings():

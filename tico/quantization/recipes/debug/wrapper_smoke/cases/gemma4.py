@@ -15,7 +15,7 @@
 """Smoke cases for Gemma4 wrapper checks."""
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, cast, Mapping, TYPE_CHECKING
 
 import torch
 
@@ -38,6 +38,12 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     Gemma4StaticVisionProfile,
     get_gemma4_static_vision_profile,
 )
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+        QuantGemma4TextAttention,
+    )
+
 
 _GEMMA4_FULL_ROPE_PARAMETERS: dict[str, Any] = {
     "rope_type": "proportional",
@@ -948,9 +954,10 @@ class Gemma4TextAttentionPrefillBaseCase(Gemma4TextAttentionBaseCase):
                 self.sliding_window,
                 fill_value=-120.0,
             )
-        if self._static_runtime_shape() is not None:
-            return _causal_mask(self.seq_len, fill_value=-120.0)
-        return _attention_mask(self.seq_len)
+        return _causal_mask(
+            self.seq_len,
+            fill_value=float(self.ptq_config({}).attention_mask_fill_value),
+        )
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic Gemma4 text attention prefill sample."""
@@ -1112,7 +1119,74 @@ class Gemma4TextAttentionKEqVPrefillCase(Gemma4TextAttentionPrefillBaseCase):
     attention_k_eq_v = True
 
 
-class Gemma4TextAttentionSharedKVPrefillCase(Gemma4TextAttentionPrefillBaseCase):
+class Gemma4SharedKVBaseCase(Gemma4BaseCase):
+    """Model the upstream cache-storage boundary absent from a standalone case.
+
+    The synthetic host KV tensors stand in for a producer's output. The real
+    producer wrapper owns their storage observers, while the consumer owns its
+    separate read/compute observers, as in production. Only that missing
+    boundary is calibrated; no second attention inference is necessary.
+    """
+
+    @staticmethod
+    def _shared_attention(module: torch.nn.Module) -> "QuantGemma4TextAttention":
+        """Resolve attention from a standalone attention or decoder wrapper."""
+        wrapped = getattr(module, "wrapped", module)
+        attention = getattr(wrapped, "self_attn", wrapped)
+        return cast(
+            "QuantGemma4TextAttention", getattr(attention, "wrapped", attention)
+        )
+
+    def prepare_model(
+        self, model: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Bind producer storage before enabling the consumer's calibration."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
+
+        from tico.quantization.public_interface import QUANTIZER_ATTRIBUTE_NAME
+        from tico.quantization.wrapq.quantizer import PTQQuantizer
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+            QuantGemma4TextAttention,
+        )
+        from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
+
+        qconfig = self.ptq_config(cfg)
+        prepared = PTQWrapper(
+            model if self.inplace_prepare else clone_module(model), qcfg=qconfig
+        )
+        attention = self._shared_attention(prepared)
+        producer = QuantGemma4TextAttention(
+            Gemma4TextAttention(self.text_cfg, layer_idx=0).eval(),
+            qcfg=attention.qcfg,
+        ).eval()
+        attention.bind_cache_source(producer)
+        prepared.enable_calibration()
+        setattr(prepared, QUANTIZER_ATTRIBUTE_NAME, PTQQuantizer(qconfig))
+        return prepared
+
+    def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
+        """Collect synthetic host KV at its producer-owned storage boundary."""
+        attention = self._shared_attention(module)
+        if getattr(attention, "_mode", Mode.NO_QUANT) is Mode.CALIB:
+            key, value = sample.kwargs["shared_key_value"]
+            key_observer, value_observer = attention.cache_storage_observers()
+            key_observer.collect(key.detach())
+            value_observer.collect(value.detach())
+        return super().forward(module, sample)
+
+    def convert_model(
+        self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Freeze the external producer boundary before converting its consumer."""
+        for observer in self._shared_attention(prepared).cache_storage_observers():
+            observer.compute_qparams()
+            observer.enabled = False
+        return super().convert_model(prepared, cfg)
+
+
+class Gemma4TextAttentionSharedKVPrefillCase(
+    Gemma4SharedKVBaseCase, Gemma4TextAttentionPrefillBaseCase
+):
     """Smoke case for a Gemma4 shared-KV consumer in prefill mode."""
 
     name = "gemma4_text_attention_shared_kv_prefill"
@@ -1142,7 +1216,9 @@ class Gemma4TextAttentionSharedKVPrefillCase(Gemma4TextAttentionPrefillBaseCase)
         )
 
 
-class Gemma4TextAttentionSharedKVDecodeCase(Gemma4TextAttentionDecodeBaseCase):
+class Gemma4TextAttentionSharedKVDecodeCase(
+    Gemma4SharedKVBaseCase, Gemma4TextAttentionDecodeBaseCase
+):
     """Smoke case for a Gemma4 shared-KV consumer in decode mode."""
 
     name = "gemma4_text_attention_shared_kv_decode"
@@ -1587,7 +1663,9 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
         )
 
 
-class Gemma4TextDecoderLayerSharedKVCase(Gemma4TextDecoderLayerBaseCase):
+class Gemma4TextDecoderLayerSharedKVCase(
+    Gemma4SharedKVBaseCase, Gemma4TextDecoderLayerBaseCase
+):
     """Smoke case for a Gemma4 shared-KV consumer decoder layer."""
 
     name = "gemma4_text_decoder_layer_shared_kv"
@@ -1612,10 +1690,9 @@ class Gemma4TextDecoderLayerSharedKVCase(Gemma4TextDecoderLayerBaseCase):
         kwargs: dict[str, Any] = {
             "hidden_states": hidden,
             "position_embeddings": _text_rope(1, self.seq_len, self.attention_head_dim),
-            "attention_mask": (
-                _causal_mask(self.seq_len, fill_value=-120.0)
-                if self._static_runtime_shape() is not None
-                else _attention_mask(self.seq_len)
+            "attention_mask": _causal_mask(
+                self.seq_len,
+                fill_value=float(self.ptq_config({}).attention_mask_fill_value),
             ),
             "shared_kv_states": {"full_attention": shared_key_value},
             "shared_key_value": shared_key_value,
