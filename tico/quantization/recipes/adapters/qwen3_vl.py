@@ -24,9 +24,9 @@ from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.config.qwen3_vl_spinquant import Qwen3VLSpinQuantConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
-from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
+from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
 from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
@@ -53,6 +53,11 @@ from tico.quantization.recipes.override_policies import (
     ComponentQuantTargetInfo,
     QuantTargetResolverContext,
 )
+from tico.quantization.recipes.sequence_length import (
+    model_context_length,
+    resolve_export_max_seq_len,
+    resolve_ppl_max_seq_len,
+)
 from tico.quantization.recipes.utils import (
     get_attr_path,
     move_to_device,
@@ -60,6 +65,7 @@ from tico.quantization.recipes.utils import (
     quant_specs_equivalent,
     torch_dtype_from_name,
 )
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 _VISION_LINEAR_MODULES = (
@@ -135,12 +141,7 @@ class Qwen3VLAdapter(ModelAdapter):
         ctx.model.eval()
         self._disable_cache(ctx.model)
 
-        calib_seq_len = get_by_path(cfg, "calibration.seq_len")
-        if calib_seq_len is not None and hasattr(ctx.model.config, "text_config"):
-            ctx.model.config.text_config.max_position_embeddings = min(
-                int(ctx.model.config.text_config.max_position_embeddings),
-                int(calib_seq_len),
-            )
+        ctx.artifacts["pretrained_context_length"] = model_context_length(ctx.model)
         return ctx
 
     @staticmethod
@@ -189,12 +190,127 @@ class Qwen3VLAdapter(ModelAdapter):
         prepared_model: torch.nn.Module,
         stage_cfg: Mapping[str, Any],
     ) -> None:
-        self.forward_calibration(
-            ctx,
-            prepared_model,
-            ctx.calibration_inputs,
-            desc="PTQ calibration",
+        """Reserve trailing dataset tokens for connected cache calibration.
+
+        The default one-token decode covers the static past-K/V boundary. Zero
+        explicitly requests prompt-only calibration. Short samples clamp the
+        decode count to leave at least one prefill token; a one-token sample
+        cannot calibrate a nonempty past boundary. No extra tokens are generated.
+        """
+        decode_steps = int(
+            stage_cfg.get(
+                "decode_calibration_steps",
+                ctx.cfg.get("calibration", {}).get("decode_steps", 1),
+            )
         )
+        if decode_steps < 0:
+            raise ValueError("decode_calibration_steps must be non-negative.")
+        show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
+        iterator = tqdm.tqdm(
+            ctx.calibration_inputs, desc="PTQ calibration", disable=not show_progress
+        )
+        prepared_model.eval()
+        owner = (
+            prepared_model.wrapped
+            if isinstance(prepared_model, PTQWrapper)
+            else prepared_model
+        )
+        model_config = owner.config
+        # Qwen owns request-local mRoPE offsets. Calibration must not leave its
+        # final image/text request installed for the next evaluation request.
+        rope_states = [
+            (module, module.rope_deltas)
+            for module in prepared_model.modules()
+            if hasattr(module, "rope_deltas")
+        ]
+        try:
+            with torch.no_grad():
+                for batch in iterator:
+                    batch = move_to_device(batch, ctx.device)
+                    ids = batch.get("input_ids")
+                    if (
+                        not isinstance(ids, torch.Tensor)
+                        or ids.ndim != 2
+                        or ids.size(1) == 0
+                    ):
+                        raise ValueError(
+                            "Qwen PTQ calibration requires nonempty rank-two input_ids."
+                        )
+                    budget = ctx.cfg.get("calibration", {}).get("seq_len")
+                    if budget is not None and ids.size(1) > int(budget):
+                        raise ValueError(
+                            "Qwen calibration input exceeds calibration.seq_len token budget."
+                        )
+                    if batch.get("past_key_values") is not None:
+                        raise ValueError(
+                            "Qwen calibration inputs must start without a cache."
+                        )
+                    steps = min(decode_steps, ids.size(1) - 1)
+                    prefix = ids.size(1) - steps
+                    if steps:
+                        special_ids = [
+                            getattr(model_config, name, None)
+                            for name in (
+                                "image_token_id",
+                                "video_token_id",
+                                "vision_start_token_id",
+                                "vision_end_token_id",
+                            )
+                        ]
+                        if any(
+                            value is not None and bool((ids[:, prefix:] == value).any())
+                            for value in special_ids
+                        ):
+                            raise ValueError(
+                                "Qwen cached calibration requires trailing text tokens after the complete image/video span."
+                            )
+                    mask = batch.get("attention_mask")
+                    if mask is not None and (mask.ndim != 2 or mask.shape != ids.shape):
+                        raise ValueError(
+                            "Qwen PTQ calibration requires a rank-two attention_mask matching input_ids."
+                        )
+                    prefill = dict(batch)
+                    prefill.pop("past_key_values", None)
+                    for name in (
+                        "input_ids",
+                        "attention_mask",
+                        "position_ids",
+                        "token_type_ids",
+                        "mm_token_type_ids",
+                    ):
+                        value = prefill.get(name)
+                        if isinstance(value, torch.Tensor):
+                            prefill[name] = value[..., :prefix]
+                    prefill["use_cache"] = bool(steps)
+                    prefill["return_dict"] = True
+                    outputs = prepared_model(**prefill)
+                    for position in range(prefix, ids.size(1)):
+                        decode = {
+                            "input_ids": ids[:, position : position + 1],
+                            "past_key_values": outputs.past_key_values,
+                            "use_cache": True,
+                            "return_dict": True,
+                        }
+                        if outputs.past_key_values is None:
+                            raise RuntimeError(
+                                "Qwen calibration prefill did not return a usable cache."
+                            )
+                        if mask is not None:
+                            decode["attention_mask"] = mask[:, : position + 1]
+                        for name in (
+                            "position_ids",
+                            "token_type_ids",
+                            "mm_token_type_ids",
+                        ):
+                            value = batch.get(name)
+                            if isinstance(value, torch.Tensor):
+                                decode[name] = value[..., position : position + 1]
+                        # Image/video pixels belong only to prefill. The text
+                        # suffix follows exactly the supplied dataset IDs.
+                        outputs = prepared_model(**decode)
+        finally:
+            for module, value in rope_states:
+                module.rope_deltas = value
 
     def build_ptq_config(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):
         num_vision_blocks = self.get_num_vision_blocks(ctx.model)
@@ -439,7 +555,7 @@ class Qwen3VLAdapter(ModelAdapter):
             return
 
         self.validate_evaluation_config(ctx.cfg)
-        max_seq_len = eval_cfg.get("max_seq_len")
+        max_seq_len = prepare_eager_evaluation(ctx)
         n_samples = int(eval_cfg.get("n_samples", 50))
         verbose = bool(eval_cfg.get("verbose", False))
         show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
@@ -498,6 +614,8 @@ class Qwen3VLAdapter(ModelAdapter):
                 max_new_tokens=int(videomme.get("max_new_tokens", 30)),
                 n_samples=video_n_samples if video_n_samples > 0 else None,
                 max_num_frames=max_num_frames,
+                max_seq_len=max_seq_len,
+                kv_cache=eval_cfg.get("use_cache", True),
                 use_cache=videomme.get("use_cache", None),
                 verbose=bool(videomme.get("verbose", verbose)),
             )
@@ -512,9 +630,7 @@ class Qwen3VLAdapter(ModelAdapter):
                 n_shots=int(mmlu.get("n_shots", 5)),
                 n_samples=int(mmlu.get("n_samples", -1)),
                 batch_size=int(mmlu.get("batch_size", 1)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
-                ),
+                max_seq_len=max_seq_len,
             )
 
         if should_run_mapping_evaluation(eval_cfg, "hellaswag"):
@@ -526,9 +642,7 @@ class Qwen3VLAdapter(ModelAdapter):
                 n_shots=int(hellaswag.get("n_shots", 10)),
                 n_samples=int(hellaswag.get("n_samples", -1)),
                 batch_size=int(hellaswag.get("batch_size", 1)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
-                ),
+                max_seq_len=max_seq_len,
             )
 
         run_mmmu_evaluation(
@@ -549,8 +663,8 @@ class Qwen3VLAdapter(ModelAdapter):
                 split=ppl_cfg.get("split", "test"),
                 device=str(ctx.device),
                 stride=int(ppl_cfg.get("stride", 512)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
+                max_seq_len=resolve_ppl_max_seq_len(
+                    ppl_cfg, evaluation_max_seq_len=max_seq_len
                 ),
                 show_progress=show_progress,
             )
@@ -567,12 +681,7 @@ class Qwen3VLAdapter(ModelAdapter):
             save_checkpoint(ctx.model, output_dir)
 
         if "circle_per_layer" in artifacts:
-            max_seq_len = int(
-                export_cfg.get(
-                    "max_seq_len",
-                    ctx.cfg.get("calibration", {}).get("seq_len", 2048),
-                )
-            )
+            max_seq_len = resolve_export_max_seq_len(ctx)
             model_args = ctx.cfg.get("model_args", {})
             if not isinstance(model_args, Mapping):
                 raise TypeError(

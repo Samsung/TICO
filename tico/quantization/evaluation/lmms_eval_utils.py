@@ -614,6 +614,8 @@ def evaluate_vlm_on_tasks(
     limit: int | None = None,
     use_cache: str | None = None,
     verbose: bool = True,
+    max_seq_len: int | None = None,
+    kv_cache: bool | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Evaluate a VLM on one or more ``lmms-eval`` tasks.
@@ -648,6 +650,10 @@ def evaluate_vlm_on_tasks(
         use_cache: Optional path to an ``lmms-eval`` results cache directory.
             When set, results are cached and can be reused across runs.
         verbose: Whether to print detailed evaluation logs.
+        max_seq_len: Optional eager context budget shared by FP and Quant runs.
+            Defaults to the model's recorded native context, not its export capacity.
+        kv_cache: Optional inference KV-cache policy forwarded to the model wrapper.
+            This is independent of the ``use_cache`` results-cache directory.
         **kwargs: Additional keyword arguments forwarded to
             ``lmms_eval.evaluator.simple_evaluate``.
 
@@ -660,6 +666,8 @@ def evaluate_vlm_on_tasks(
     Raises:
         RuntimeError: If ``lmms-eval`` is not installed.
     """
+    if kv_cache is not None and not isinstance(kv_cache, bool):
+        raise TypeError("kv_cache must be a boolean or None.")
     _check_lmms_eval_available()
     _patch_lmms_eval_broken_tasks()
 
@@ -679,18 +687,24 @@ def evaluate_vlm_on_tasks(
         # Unwrap fake-quant wrapper if present
         inner_model = getattr(model, "wrapped", model)
 
-        # Detect if the model is a PTQ wrapper with a static context budget.
-        # Quantized models have a static causal mask of size
-        # max_position_embeddings that cannot be exceeded at runtime.
-        # When evaluating video benchmarks, the total token count
-        # (text + visual tokens from all frames) must fit within this
-        # budget, so we compute max_pixels/min_pixels per frame.
-        _max_pos_emb = _get_max_position_embeddings(inner_model)
+        # Use the same context budget for FP and Quant preprocessing. Static
+        # export templates do not constrain the eager evaluation path.
+        capacity = _get_max_position_embeddings(inner_model)
+        if max_seq_len is not None:
+            if (
+                isinstance(max_seq_len, bool)
+                or not isinstance(max_seq_len, int)
+                or max_seq_len <= 0
+            ):
+                raise ValueError("max_seq_len must be a positive integer or None.")
+            if capacity is not None and max_seq_len > capacity:
+                raise ValueError("max_seq_len exceeds the model context capacity.")
+        _max_pos_emb = capacity if max_seq_len is None else max_seq_len
 
         # Determine the lmms-eval model name and build model_args.
         # When max_position_embeddings is available, the budget-aware
         # computation adjusts max_pixels, min_pixels, and max_num_frames
-        # so that the total token count stays within the static budget.
+        # so that the total token count stays within the evaluation budget.
         model_name, model_args_dict = _build_model_args(
             inner_model,
             max_num_frames=max_num_frames,
@@ -703,6 +717,9 @@ def evaluate_vlm_on_tasks(
         # already-loaded model and processor instead of downloading and
         # loading them a second time.
         _model_ctx = _patch_from_pretrained_to_reuse_model(model, processor)
+
+    if kv_cache is not None:
+        model_args_dict["use_cache"] = kv_cache
 
     _effective_max_num_frames = model_args_dict.get("max_num_frames", max_num_frames)
 
@@ -918,7 +935,7 @@ def _compute_gemma4_max_num_frames_for_budget(
         raise ValueError(f"max_num_frames must be positive, got {max_num_frames}.")
 
     # Reserve a small safety margin (4 tokens) to account for special tokens
-    # that may push the total sequence length to exactly static_max_seq + 1.
+    # that may push the total sequence length to exactly the context budget plus one.
     _safety_margin = 4
     input_budget = int(max_position_embeddings) - int(max_new_tokens) - _safety_margin
     visual_budget = input_budget - int(text_token_margin)
@@ -954,7 +971,7 @@ def _compute_video_max_pixels_for_budget(
     ``max_num_frames`` when the budget is too tight.
 
     Args:
-        max_position_embeddings: Static context length.
+        max_position_embeddings: Eager evaluation context budget.
         max_num_frames: Requested maximum number of video frames.
         max_new_tokens: Tokens reserved for generation output.
         processor: The Hugging Face processor (used to determine the vision
@@ -1008,53 +1025,8 @@ def _compute_video_max_pixels_for_budget(
     return max_pixels, min_pixels, adjusted_max_num_frames
 
 
-def _find_static_max_seq(model: Any, _depth: int = 0) -> int | None:
-    """Walk the model tree to find a ``static_max_seq`` attribute.
-
-    Quantized Gemma4 models store ``static_max_seq`` on the inner
-    ``QuantGemma4TextModel``.  This attribute represents the actual
-    runtime constraint enforced by the precomputed static mask and RoPE
-    templates, which may be smaller than ``config.max_position_embeddings``.
-
-    Returns ``None`` if no ``static_max_seq`` is found.
-    """
-    if _depth > 10:
-        return None
-
-    value = getattr(model, "static_max_seq", None)
-    if value is not None:
-        return int(value)
-
-    for attr in ("wrapped", "model", "language_model"):
-        child = getattr(model, attr, None)
-        if child is not None and child is not model:
-            result = _find_static_max_seq(child, _depth + 1)
-            if result is not None:
-                return result
-
-    return None
-
-
 def _get_max_position_embeddings(model: Any) -> int | None:
-    """Extract the effective context length from a model.
-
-    For PTQ-wrapped Gemma4 models the actual runtime constraint is
-    ``static_max_seq`` (the size of the precomputed static mask and RoPE
-    templates), which may be smaller than ``config.max_position_embeddings``.
-    This function returns ``static_max_seq`` when present so that budget
-    computations respect the real limit.
-
-    For plain (non-quantized) models it falls back to
-    ``config.max_position_embeddings`` (or ``config.text_config.max_position_embeddings``
-    for VLMs like Qwen3-VL).
-
-    Returns ``None`` if no context length can be determined.
-    """
-    # Check for static_max_seq first (PTQ-wrapped Gemma4 models)
-    static_max_seq = _find_static_max_seq(model)
-    if static_max_seq is not None:
-        return static_max_seq
-
+    """Extract native eager context capacity without consulting export templates."""
     config = getattr(model, "config", None)
     if config is None:
         return None
@@ -1085,8 +1057,7 @@ def _build_model_args(
     model constructor.  This helper infers the correct model name from the
     Python model object and builds the args dict.
 
-    When *max_position_embeddings* is provided (i.e. the model has a static
-    context budget such as a PTQ-quantized model), the function computes
+    When *max_position_embeddings* is provided, the function computes
     ``max_pixels`` and ``min_pixels`` per video frame so that the total
     token count stays within budget.  It also adjusts ``max_num_frames``
     downward if the budget is too tight for the requested frame count.
@@ -1094,7 +1065,7 @@ def _build_model_args(
     Args:
         model: The Hugging Face model object.
         max_num_frames: Requested maximum number of video frames.
-        max_position_embeddings: Static context length of the model.  When
+        max_position_embeddings: Eager evaluation context budget. When
             provided, ``max_pixels`` and ``min_pixels`` are computed from
             the budget.
         max_new_tokens: Tokens reserved for generation output.  Only used
@@ -1147,7 +1118,7 @@ def _build_model_args(
     # However, max_num_frames IS accepted by the generic wrapper.
     _has_dedicated_wrapper = lmms_model_name != "huggingface"
 
-    # When a static context budget is provided, compute max_pixels and
+    # When an evaluation context budget is provided, compute max_pixels and
     # min_pixels per video frame so that the total token count stays within
     # the budget.
     if (
@@ -1170,7 +1141,7 @@ def _build_model_args(
         model_args_dict["max_num_frames"] = adjusted_max_num_frames
 
         print(
-            f"[INFO] Video frame budget computed for static context: "
+            f"[INFO] Video frame budget computed for evaluation context: "
             f"max_position_embeddings={max_position_embeddings}, "
             f"max_num_frames={max_num_frames} -> {adjusted_max_num_frames}, "
             f"max_pixels={budget_max_pixels}, "
@@ -1186,7 +1157,7 @@ def _build_model_args(
         model_args_dict["max_num_frames"] = adjusted_max_num_frames
 
         print(
-            f"[INFO] Gemma4 video frame budget computed for static context: "
+            f"[INFO] Gemma4 video frame budget computed for evaluation context: "
             f"max_position_embeddings={max_position_embeddings}, "
             f"max_num_frames={max_num_frames} -> {adjusted_max_num_frames}, "
             f"soft_tokens_per_frame={_processor_gemma4_video_soft_tokens(processor)}"

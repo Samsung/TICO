@@ -255,3 +255,99 @@ Before merging a new debug utility:
 - It respects config-provided device, dtype, and calibration settings.
 - It does not import from another example script.
 - It has at least a small smoke test or documented manual command.
+
+## Download-free CPU recipe validation
+
+The CPU runner creates deterministic random HF models, uses the real adapters and
+PTQ stage, and executes saved Circle files with the reference runtime. No model
+weights or datasets are downloaded. Run it from the installed development tree:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+python -m tico.quantization.recipes.debug.cpu_validation \
+  --output ./out/cpu-validation-NEW
+```
+
+The default runs static/comparator regressions, real generation, cache coverage,
+small in-memory evaluation, and actual Circle conversion/execution sequentially.
+Use `--stage regression`, `generate`, `coverage`, `evaluation`, or `circle` to rerun
+one stage in a new directory. Unit-stage reports include the actual test count;
+zero tests or any skip cannot establish a pass. `--baseline-repo /path/to/baseline`
+compares the same frozen checkpoint with that checkout's exporter. Select and
+record a revision that supports the fixture's checkpoint and static profile; the
+runner does not recalibrate it. `--fixtures /path/to/prior/fixtures` reuses trusted
+local checkpoints only when their checkpoint and effective-config hashes match
+their recorded calibration provenance.
+
+The bounded Llama and Qwen fixtures use two decoder layers, GQA with two query
+heads and one KV head, native context 128, calibration samples of eight tokens,
+export capacities 16/32 and eager prefill 48 plus four connected decode steps.
+W4A16 means actual frozen four-bit linear weights and sixteen-bit activations;
+embedding/LM-head weights use the standard explicitly recorded unsigned eight-bit policy.
+Qwen includes a local RGB image, a real vision block, mRoPE and fixed external
+mask/RoPE/KV stage inputs. Extra focused tests exercise head dimension 128 and a
+non-square image grid. Gemma's small evaluation smoke explicitly disables PLE
+and shared KV and does not establish those features' coverage.
+
+The Circle stage includes Llama bundle/full-model export, Qwen static capacities
+16 and 32, export/eager isolation, and an image-conditioned Qwen chain. That chain
+writes actual Circle prefill delta-K/V into separate per-layer host buffers and
+passes them into four one-token decodes. The final decode uses S-1 valid past
+positions, masks padded slots and uses positions from the actual HF mRoPE host
+calculation. Every saved stage's local Torch/Circle outputs, including delta-K/V,
+are compared with `atol=1e-5`, `rtol=1e-4`. Strict numerical failures retain their
+nonzero exit code; the runner never treats a matching old/new failure as strict
+parity success. Detailed classification requires the recorded baseline evidence.
+
+Each invocation preserves command lines, working directory, dependency versions,
+resource limits, source digest, seed, effective configs, checkpoint hashes,
+stdout/stderr and original child exit codes. Checkpoints, Circle files and tensor
+archives remain under the caller's output directory and must not be committed.
+An existing directory is refused. Missing dependencies, failed stages and skipped
+checks remain visible in `summary.json`.
+
+These checks cover software contracts and small numerical boundaries. Random-model
+PPL and generated IDs are execution evidence, not pretrained quality. Large
+pretrained accuracy, full 2048-token model capacity and NPU integer behavior or
+performance remain outside this runner's scope.
+
+Missing-cache-coverage rejection and frozen-state preservation are covered by the
+focused CPU regression suite, including models that intentionally omit the
+required calibration path:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+python -m tico.quantization.recipes.debug.cpu_validation \
+  --stage coverage --output ./out/cpu-coverage-NEW
+```
+
+### Replay saved connected Qwen calls
+
+A connected-chain result can be reproduced from the bounded Qwen fixture's saved
+host calls without recalibration or re-export. Select a source checkout that can
+load the same trusted frozen checkpoint and supports the recorded stage
+boundaries. Supply its matching saved Circle stages and the original connected
+run's evidence directory. Run the tool by absolute path from that checkout so
+normal imports select the intended TICO source:
+
+```bash
+cd /path/to/reference-checkout
+PYTHONPATH=/path/to/reference-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+OPENBLAS_NUM_THREADS=1 \
+python /path/to/tool-checkout/tico/quantization/recipes/debug/cpu_validation.py \
+  --stage replay --repo /path/to/reference-checkout \
+  --checkpoint /path/to/cpu-validation-NEW/fixtures/qwen3_vl.pt \
+  --evidence /path/to/cpu-validation-NEW/qwen3_vl-16-connected \
+  --artifacts /path/to/cpu-validation-NEW/qwen3_vl-16/baseline/before/artifacts \
+  --output /path/to/connected-replay-NEW
+```
+
+Replay verifies the imported checkout and checkpoint hash, executes the real
+adapters and runtime, and saves every output. It requires complete indexed input
+and output array sets with matching counts, shapes and dtypes, and rejects
+nonfinite values. A successful reproduction means all saved host inputs and both
+Torch/Circle output arrays match the original run exactly. The separate
+`strict_torch_circle_status` retains the numerical parity verdict; reproducing a
+strict failure does not turn it into parity success. Repeat with capacity 32's
+evidence and matching artifacts when needed. This mode replays the CPU fixture's
+supported stage layout, not arbitrary model graphs.

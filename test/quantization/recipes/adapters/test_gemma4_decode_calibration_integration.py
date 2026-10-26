@@ -455,22 +455,22 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
         """Left and right padding preserve masks, greedy selection and positions."""
         self._calibrate_and_record(with_image=False, padded=True)
 
-    def test_actual_prepared_wrapper_capacity_is_checked_before_forward(self):
-        """An externally prepared smaller mask/RoPE budget limits calibration."""
+    def test_actual_prepared_native_capacity_is_checked_before_forward(self):
+        """The native context budget still rejects overflow before calibration."""
         model, prepared = self._make_prepared_model(max_seq=8)
         adapter = Gemma4Adapter()
         ctx = RecipeContext(
             cfg={
-                "calibration": {"seq_len": 16, "decode_steps": 2},
+                "calibration": {"seq_len": 32, "decode_steps": 2},
                 "model_args": {"text": {"max_seq": 16}},
                 "runtime": {"show_progress": False},
             },
             adapter=adapter,
             model=model,
-            calibration_inputs=[{"input_ids": torch.arange(1, 8).reshape(1, 7)}],
+            calibration_inputs=[{"input_ids": torch.arange(1, 16).reshape(1, 15)}],
         )
         with mock.patch.object(prepared, "forward") as forward:
-            with self.assertRaisesRegex(ValueError, "capacity=8"):
+            with self.assertRaisesRegex(ValueError, "capacity=16"):
                 adapter.calibrate_prepared_model(ctx, prepared, {})
         forward.assert_not_called()
 

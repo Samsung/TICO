@@ -480,12 +480,37 @@ class TestQuantLlamaAttention(unittest.TestCase):
             hidden, new_k, new_v = adapter(
                 hidden_states=x,
                 position_embeddings=pos,
-                attention_mask=None,
+                attention_mask=self._rand_additive_mask(batch_size, seq_len, seq_len),
             )
 
         self.assertEqual(hidden.shape, (batch_size, seq_len, self.hidden_size))
         self.assertEqual(new_k.shape, (batch_size, self.n_kv, seq_len, self.head_dim))
         self.assertEqual(new_v.shape, (batch_size, self.n_kv, seq_len, self.head_dim))
+
+    def test_static_attention_rejects_missing_host_inputs(self):
+        """A static adapter must never build an eager mask or RoPE implicitly."""
+        attention = self._make_qattn()
+        hidden = torch.randn(1, 1, self.hidden_size)
+        positions = self._rand_rope_for(attention, 1, 1)
+        mask = self._rand_additive_mask(1, 1, 1)
+        for cls in (
+            LlamaAttentionPrefillExportAdapter,
+            LlamaAttentionDecodeExportAdapter,
+        ):
+            adapter = cls(attention, return_kv=False)
+            with self.subTest(adapter=cls.__name__):
+                with self.assertRaisesRegex(ValueError, "attention_mask"):
+                    adapter(
+                        hidden_states=hidden,
+                        position_embeddings=positions,
+                        attention_mask=None,
+                    )
+                with self.assertRaisesRegex(ValueError, "cos, sin"):
+                    adapter(
+                        hidden_states=hidden,
+                        position_embeddings=None,
+                        attention_mask=mask,
+                    )
 
     def test_decode_export_adapter_returns_delta_kv(self):
         qattn = self._make_qattn()
@@ -528,7 +553,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
             prefill_hidden = prefill_adapter(
                 hidden_states=x,
                 position_embeddings=pos,
-                attention_mask=None,
+                attention_mask=self._rand_additive_mask(batch_size, q_len, q_len),
             )
             decode_hidden = decode_adapter(
                 hidden_states=x,

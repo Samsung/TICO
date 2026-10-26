@@ -24,9 +24,9 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
-from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
+from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
 from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
@@ -53,6 +53,11 @@ from tico.quantization.recipes.override_policies import (
     COMMON_LINEAR_MODULES,
     ComponentQuantTargetInfo,
     QuantTargetResolverContext,
+)
+from tico.quantization.recipes.sequence_length import (
+    model_context_length,
+    resolve_export_max_seq_len,
+    resolve_ppl_max_seq_len,
 )
 from tico.quantization.recipes.utils import (
     move_to_device,
@@ -170,12 +175,7 @@ class Gemma4Adapter(ModelAdapter):
                 "gemma4_ple_scale_fused_modules"
             ] = fuse_gemma4_ple_embedding_scale(ctx.model)
 
-        calib_seq_len = get_by_path(cfg, "calibration.seq_len")
-        if calib_seq_len is not None and hasattr(ctx.model.config, "text_config"):
-            ctx.model.config.text_config.max_position_embeddings = min(
-                int(ctx.model.config.text_config.max_position_embeddings),
-                int(calib_seq_len),
-            )
+        ctx.artifacts["pretrained_context_length"] = model_context_length(ctx.model)
 
         model_args = ctx.cfg.get("model_args", {})
         if isinstance(model_args, Mapping):
@@ -187,10 +187,7 @@ class Gemma4Adapter(ModelAdapter):
                 normalized_model_args = canonicalize_gemma4_static_vision_model_args(
                     model_args
                 )
-                max_seq_len = int(
-                    calib_seq_len
-                    or ctx.model.config.get_text_config().max_position_embeddings
-                )
+                max_seq_len = resolve_export_max_seq_len(ctx)
                 profile = build_gemma4_static_vision_profile(
                     normalized_model_args,
                     vision_config=ctx.model.config.vision_config,
@@ -379,7 +376,9 @@ class Gemma4Adapter(ModelAdapter):
 
     @staticmethod
     def _decode_calibration_capacity(ctx: RecipeContext, model: Any = None) -> int:
-        """Use the recipe, model, and existing wrapper mask/RoPE limits."""
+        """Resolve the eager budget while retaining real static execution limits."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+
         from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
             QuantGemma4TextAttention,
         )
@@ -398,24 +397,35 @@ class Gemma4Adapter(ModelAdapter):
             ctx.cfg.get("calibration", {}).get("seq_len"),
             getattr(text_config, "max_position_embeddings", None),
         ]
-        model_args = ctx.cfg.get("model_args", {})
-        configured = model_args.get("text", {}).get("max_seq")
-        if configured is None:
-            configured = model_args.get("max_seq")
-        # Match the owning wrapper's default; do not invent a calibration cap.
-        limits.append(
-            configured
-            if configured is not None
-            else QuantGemma4TextModel._DEFAULT_STATIC_MAX_SEQ
+        modules = list(model.modules()) if isinstance(model, torch.nn.Module) else []
+        text_wrappers = [
+            module for module in modules if isinstance(module, QuantGemma4TextModel)
+        ]
+        dynamic_eager = (
+            all(not module._requires_static_inputs() for module in text_wrappers)
+            if text_wrappers
+            else any(isinstance(module, Gemma4TextModel) for module in modules)
         )
-        if isinstance(model, torch.nn.Module):
-            for module in model.modules():
+        # Static profiles do not constrain native eager calibration. Keep the
+        # conservative profile limits for explicit static and unknown/legacy
+        # execution, whose dynamic mask/RoPE contract is not established here.
+        if not dynamic_eager:
+            model_args = ctx.cfg.get("model_args", {})
+            configured = model_args.get("text", {}).get("max_seq")
+            if configured is None:
+                configured = model_args.get("max_seq")
+            limits.append(
+                configured
+                if configured is not None
+                else QuantGemma4TextModel._DEFAULT_STATIC_MAX_SEQ
+            )
+            for module in modules:
                 if isinstance(module, QuantGemma4TextModel):
                     limits.append(module.static_max_seq)
                 elif isinstance(module, QuantGemma4TextAttention):
                     limits.append(module.max_seq)
         capacities = [int(value) for value in limits if value is not None]
-        if min(capacities) <= 0:
+        if not capacities or min(capacities) <= 0:
             raise ValueError("Gemma4 calibration context capacity must be positive.")
         return min(capacities)
 
@@ -695,12 +705,7 @@ class Gemma4Adapter(ModelAdapter):
 
         self.validate_evaluation_config(ctx.cfg)
 
-        # Re-enable KV cache for autoregressive generation during evaluation.
-        # ``_disable_cache`` in ``load_model`` turns it off for calibration,
-        # but ``generate()`` requires cache for acceptable speed.
-        self._enable_cache(ctx.model)
-
-        max_seq_len = eval_cfg.get("max_seq_len")
+        max_seq_len = prepare_eager_evaluation(ctx)
         n_samples = int(eval_cfg.get("n_samples", 50))
         verbose = bool(eval_cfg.get("verbose", False))
         show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
@@ -760,6 +765,8 @@ class Gemma4Adapter(ModelAdapter):
                 max_new_tokens=int(videomme.get("max_new_tokens", 30)),
                 n_samples=video_n_samples if video_n_samples > 0 else None,
                 max_num_frames=max_num_frames,
+                max_seq_len=max_seq_len,
+                kv_cache=eval_cfg.get("use_cache", True),
                 use_cache=videomme.get("use_cache", None),
                 verbose=bool(videomme.get("verbose", verbose)),
             )
@@ -774,9 +781,7 @@ class Gemma4Adapter(ModelAdapter):
                 n_shots=int(mmlu.get("n_shots", 5)),
                 n_samples=int(mmlu.get("n_samples", -1)),
                 batch_size=int(mmlu.get("batch_size", 1)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
-                ),
+                max_seq_len=max_seq_len,
             )
 
         if should_run_mapping_evaluation(eval_cfg, "hellaswag"):
@@ -788,9 +793,7 @@ class Gemma4Adapter(ModelAdapter):
                 n_shots=int(hellaswag.get("n_shots", 10)),
                 n_samples=int(hellaswag.get("n_samples", -1)),
                 batch_size=int(hellaswag.get("batch_size", 1)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
-                ),
+                max_seq_len=max_seq_len,
             )
 
         run_mmmu_evaluation(
@@ -825,8 +828,8 @@ class Gemma4Adapter(ModelAdapter):
                 split=ppl_cfg.get("split", "test"),
                 device=str(ctx.device),
                 stride=int(ppl_cfg.get("stride", 512)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
+                max_seq_len=resolve_ppl_max_seq_len(
+                    ppl_cfg, evaluation_max_seq_len=max_seq_len
                 ),
                 show_progress=show_progress,
             )
@@ -847,13 +850,7 @@ class Gemma4Adapter(ModelAdapter):
             save_checkpoint(ctx.require_model(), output_dir)
 
         if "circle_per_layer" in artifacts:
-            calibration_cfg = ctx.cfg.get("calibration", {})
-            max_seq_len = int(
-                export_cfg.get(
-                    "max_seq_len",
-                    calibration_cfg.get("seq_len", 2048),
-                )
-            )
+            max_seq_len = resolve_export_max_seq_len(ctx)
             model_args = ctx.cfg.get("model_args", {})
             if not isinstance(model_args, Mapping):
                 raise TypeError("model_args must be a mapping for Gemma4 export.")

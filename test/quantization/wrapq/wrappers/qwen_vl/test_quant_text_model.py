@@ -23,6 +23,7 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
     QuantQwen3VLTextModel,
@@ -584,7 +585,14 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         q_model.enable_calibration()
 
         prefill_ids = self._create_test_inputs(batch_size=1, seq_len=8)
-        _ = q_model(input_ids=prefill_ids, use_cache=False)
+        with torch.no_grad():
+            calibration_prefill = q_model(input_ids=prefill_ids[:, :7], use_cache=True)
+            q_model(
+                input_ids=prefill_ids[:, 7:],
+                attention_mask=torch.ones_like(prefill_ids),
+                past_key_values=calibration_prefill.past_key_values,
+                use_cache=True,
+            )
         q_model.freeze_qparams()
 
         with torch.no_grad():
@@ -920,8 +928,10 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         q_model.freeze_qparams()
         q_model.force_export = True
 
-        with torch.no_grad():
-            q_out = q_model(**model_inputs)
+        with torch.no_grad(), prepared_static_export(
+            q_model, q_model.config.max_position_embeddings
+        ):
+            q_out = q_model(**model_inputs, use_cache=False)
             fp_out = self.fp_model(**model_inputs)
 
         # Extract last_hidden_state

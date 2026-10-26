@@ -35,18 +35,39 @@ from tico.quantization.recipes.export.llama_bundle import (
 )
 
 
-def _bundle_model():
-    layers = []
-    for index in range(2):
-        layers.append(
-            SimpleNamespace(
-                wrapped=SimpleNamespace(
-                    rope_cos_template=torch.full((1, 6, 4), float(index + 2)),
-                    rope_sin_template=torch.arange(24).reshape(1, 6, 4).float() + index,
-                    qcfg=SimpleNamespace(attention_mask_fill_value=-100.0 - index),
-                )
-            )
+class _BundleRotary(torch.nn.Module):
+    """Return explicit source tables to exercise bundle serialization contracts."""
+
+    cos: torch.Tensor
+    sin: torch.Tensor
+
+    def __init__(self, index):
+        super().__init__()
+        self.register_buffer("cos", torch.full((1, 6, 4), float(index + 2)))
+        self.register_buffer("sin", torch.arange(24).reshape(1, 6, 4).float() + index)
+
+    def forward(self, hidden, positions):
+        length = positions.shape[-1]
+        return self.cos[:, :length], self.sin[:, :length]
+
+
+class _BundleLayer(torch.nn.Module):
+    """Provide the canonical rotary protocol for host-context contract tests."""
+
+    def __init__(self, index):
+        super().__init__()
+        from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+            capture_rope_state,
         )
+
+        self.config = SimpleNamespace(max_position_embeddings=6, head_dim=4)
+        self.qcfg = SimpleNamespace(attention_mask_fill_value=-100.0 - index)
+        self.attn_options = SimpleNamespace(rope="hf")
+        capture_rope_state(self, self.config, _BundleRotary(index))
+
+
+def _bundle_model():
+    layers = [SimpleNamespace(wrapped=_BundleLayer(index)) for index in range(2)]
     return SimpleNamespace(
         config=SimpleNamespace(
             hidden_size=8,
@@ -84,7 +105,7 @@ def _write_stage(path, input_names, output_count):
 
 
 class TestLlamaBundleContext(unittest.TestCase):
-    def test_context_preserves_actual_per_layer_templates_and_mask_values(self):
+    def test_context_preserves_actual_per_layer_sources_and_mask_values(self):
         qmodel = _bundle_model()
         metadata, context = build_llama_bundle_context(
             qmodel=qmodel, max_seq_len=4, artifact_tag="f32", tokenizer=None
@@ -96,11 +117,13 @@ class TestLlamaBundleContext(unittest.TestCase):
             for key in ("rope_cos", "rope_sin"):
                 np.testing.assert_array_equal(
                     context[f"{key}_{index}"],
-                    getattr(layer.wrapped, f"{key}_template")[:, :4].numpy(),
+                    getattr(layer.wrapped._export_rotary_emb, key.replace("rope_", ""))[
+                        :, :4
+                    ].numpy(),
                 )
                 self.assertEqual(context[f"{key}_{index}"].dtype, np.float32)
         np.testing.assert_array_equal(context["mask_fill_values"], [-100.0, -101.0])
-        qmodel.model.wrapped.layers[0].wrapped.rope_cos_template.zero_()
+        qmodel.model.wrapped.layers[0].wrapped._export_rotary_emb.cos.zero_()
         np.testing.assert_array_equal(context["rope_cos_0"], np.full((1, 4, 4), 2.0))
 
     def test_generation_ids_take_precedence_and_tokenizer_supplies_missing_pad(self):
@@ -122,8 +145,10 @@ class TestLlamaBundleContext(unittest.TestCase):
     def test_context_rejects_incomplete_rope_and_nonfinite_mask(self):
         for mutation, message in (
             (
-                lambda layer: setattr(layer, "rope_sin_template", torch.zeros(1, 2, 4)),
-                "rope_sin_template",
+                lambda layer: setattr(
+                    layer._export_rotary_emb, "sin", torch.zeros(1, 2, 4)
+                ),
+                "head_dim",
             ),
             (
                 lambda layer: setattr(
@@ -194,7 +219,9 @@ class TestLlamaBundleContext(unittest.TestCase):
 
     def test_preflight_failure_preserves_existing_bundle_manifest(self):
         qmodel = _bundle_model()
-        qmodel.model.wrapped.layers[0].wrapped.rope_cos_template = torch.zeros(1, 2, 4)
+        qmodel.model.wrapped.layers[0].wrapped._export_rotary_emb.cos = torch.zeros(
+            1, 2, 4
+        )
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "llama_manifest.json"
             manifest.write_text("old manifest")
@@ -203,7 +230,7 @@ class TestLlamaBundleContext(unittest.TestCase):
                 "_prepare_llama_export_model",
                 return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
             ), patch.object(llama, "_export_prepared_llama_per_layer") as export:
-                with self.assertRaisesRegex(ValueError, "rope_cos_template"):
+                with self.assertRaisesRegex(ValueError, "head_dim"):
                     llama.export_llama_bundle(
                         q_model=torch.nn.Identity(), max_seq_len=4, output_dir=directory
                     )

@@ -18,6 +18,9 @@ import torch
 import torch.nn as nn
 
 if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
+        QuantQwen3VLTextAttention,
+    )
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextDecoderLayer
 
 
@@ -127,6 +130,7 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         output_attentions: bool | None = False,
         cache_position: torch.Tensor | None = None,
         cache_output_mode: Literal["present", "delta"] = "present",
+        return_type: Optional[ReturnType] = None,
         **kwargs,
     ):
         """
@@ -200,9 +204,10 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         if use_cache:
             outputs.append(present_key_value)
 
-        if self.return_type == "tuple":
+        result_type = self.return_type if return_type is None else return_type
+        if result_type == "tuple":
             return tuple(outputs)
-        if self.return_type == "tensor":
+        if result_type == "tensor":
             return hidden_states
         raise RuntimeError(f"Invalid return_type: {self.return_type!r}")
 
@@ -218,12 +223,15 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         """
         Return a static-runtime export adapter for the requested execution mode.
         """
+        attention = cast("QuantQwen3VLTextAttention", self.self_attn.wrapped)
         if mode == "prefill":
+            attention.require_calibrated_cache(include_past=False)
             return Qwen3VLTextDecoderLayerPrefillExportAdapter(
                 self,
                 return_kv=return_kv,
             )
         if mode == "decode":
+            attention.require_calibrated_cache()
             return Qwen3VLTextDecoderLayerDecodeExportAdapter(
                 self,
                 return_kv=return_kv,

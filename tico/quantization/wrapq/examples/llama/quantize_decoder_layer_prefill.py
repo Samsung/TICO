@@ -134,6 +134,10 @@ print(plot_two_outputs(fp32, int8))
 # 4. Export the calibrated layer to Circle
 # -------------------------------------------------------------------------
 import tico
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
+)
 
 save_path = pathlib.Path("decoder_layer_prefill.q.circle")
 B, S, D = 1, MAX_SEQ, model.config.hidden_size
@@ -141,18 +145,18 @@ example_hidden = torch.randn(B, S, D)
 
 with SuppressWarning(UserWarning, ".*"):
     if static_data_inside_the_layer is True:
-        cm = tico.convert(
-            qlayer,
-            (example_hidden,),
-        )
+        with prepared_static_export(qlayer, S):
+            cm = tico.convert(
+                qlayer,
+                (example_hidden,),
+            )
     else:
         qattn = qlayer.wrapped
         assert isinstance(qattn, QuantLlamaDecoderLayer)
-        attn_mask = qattn.causal_mask_template[:, :, :S, :S].squeeze(0)
-        dtype = example_hidden.dtype
-        pos_embeds = (
-            qattn.rope_cos_template.cpu().to(dtype),
-            qattn.rope_sin_template.cpu().to(dtype),
+        static_inputs = prepare_llama_static_inputs(qattn, S)
+        attn_mask = static_inputs.mask(S, S, 0, device=torch.device("cpu"))
+        pos_embeds = static_inputs.rope(
+            0, S, device=torch.device("cpu"), dtype=example_hidden.dtype
         )
 
         cm = tico.convert(

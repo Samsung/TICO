@@ -70,6 +70,7 @@ from tico.quantization.recipes.qparams import (
 )
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.utils.metrics import perplexity
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
     LlamaTokenEmbeddingExportAdapter,
@@ -78,6 +79,9 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
 
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
+)
 from tico.utils.utils import SuppressWarning
 
 DTYPE_MAP = {
@@ -531,18 +535,17 @@ def save_model_to(
     save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
     print(f"saving the whole {model_name} to {save_path.resolve()}")
     config = q_m.wrapped.config
-    with torch.no_grad():
+    with torch.no_grad(), prepared_static_export(q_m, int(calib_input.shape[-1])):
         with SuppressWarning(UserWarning, ".*"):
             qmodel = q_m.wrapped.model.wrapped
             if prefill_decode is True:
                 # kwargs for padding
                 S = calib_input.shape[-1]
-                attention_mask = (
-                    qmodel.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
+                attention_mask = qmodel._build_causal_mask(
+                    q_len=S, k_len=S, past_len=0, device=torch.device("cpu")
                 )
-                pos_embeds = (
-                    qmodel.rope_cos_template[:, :S, :].to("cpu"),
-                    qmodel.rope_sin_template[::S, :].to("cpu"),
+                pos_embeds = qmodel.get_position_embeddings_for(
+                    torch.empty(1, S, config.hidden_size, device="cpu"), start=0
                 )
                 kwargs = {
                     "attention_mask": attention_mask,
@@ -565,7 +568,7 @@ def save_model_to(
         model_name = f"model_decode"
         save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
         print(f"saving the whole {model_name} to {save_path.resolve()}")
-        with torch.no_grad():
+        with torch.no_grad(), prepared_static_export(q_m, int(calib_input.shape[-1])):
             with SuppressWarning(UserWarning, ".*"):
                 token = torch.Tensor([[calib_input[..., 0]]], device="cpu").to(
                     dtype=calib_input.dtype
@@ -789,13 +792,9 @@ def save_layers_to(
         B, S, D = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(B, S, D, device="cpu")
 
-        attention_mask = (
-            qlayer.wrapped.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
-        )
-        dtype = example_hidden.dtype
-        pos_embeds = qlayer.wrapped._slice_rope(
-            start=0, seq_len=S, device="cpu", dtype=dtype
-        )
+        static_inputs = prepare_llama_static_inputs(qlayer.wrapped, max_seq_len)
+        attention_mask = static_inputs.mask(S, S, 0, device=torch.device("cpu"))
+        pos_embeds = static_inputs.rope(0, S, device="cpu", dtype=example_hidden.dtype)
 
         print(f"Saving {layer_name} to {save_path.resolve()}")
         with torch.no_grad():

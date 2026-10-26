@@ -17,6 +17,8 @@ from typing import cast, Optional, Tuple, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
+
 from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import (
     Qwen3VLVisionGridInput,
     Qwen3VLVisionProfile,
@@ -93,6 +95,7 @@ class Qwen3VLTextAttentionPrefillExportAdapter(nn.Module):
         **kwargs,
     ):
         """Run prefill attention and optionally return the newly produced KV tensors."""
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
@@ -150,6 +153,7 @@ class Qwen3VLTextAttentionDecodeExportAdapter(nn.Module):
         **kwargs,
     ):
         """Run decode attention and optionally return the current-token KV delta."""
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
@@ -193,7 +197,6 @@ class Qwen3VLTextDecoderLayerPrefillExportAdapter(nn.Module):
     def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
         super().__init__()
         self.wrapped = wrapped
-        cast("QuantQwen3VLTextDecoderLayer", self.wrapped).return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
@@ -204,6 +207,7 @@ class Qwen3VLTextDecoderLayerPrefillExportAdapter(nn.Module):
         **kwargs,
     ):
         """Run prefill and optionally return the newly produced KV tensors."""
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -211,6 +215,7 @@ class Qwen3VLTextDecoderLayerPrefillExportAdapter(nn.Module):
             past_key_values=None,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            return_type="tuple",
             **kwargs,
         )
 
@@ -250,7 +255,6 @@ class Qwen3VLTextDecoderLayerDecodeExportAdapter(nn.Module):
     def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
         super().__init__()
         self.wrapped = wrapped
-        cast("QuantQwen3VLTextDecoderLayer", self.wrapped).return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
@@ -262,6 +266,7 @@ class Qwen3VLTextDecoderLayerDecodeExportAdapter(nn.Module):
         **kwargs,
     ):
         """Run decode and optionally return the current-token KV delta."""
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -269,6 +274,7 @@ class Qwen3VLTextDecoderLayerDecodeExportAdapter(nn.Module):
             past_key_values=past_key_values,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            return_type="tuple",
             **kwargs,
         )
 

@@ -128,7 +128,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertEqual(qattn.attn_options.rope, "pre_negated_sin")
         self.assertEqual(qattn.attn_options.layout, "unrolled")
 
-    def test_rope_sin_template_convention_depends_on_profile(self):
+    def test_rope_sin_convention_depends_on_profile(self):
         qlayer_ref = QuantLlamaDecoderLayer(
             self.fp_layer,
             qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
@@ -140,20 +140,22 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
             layer_idx=0,
         )
 
+        cos_ref, sin_ref = qlayer_ref._slice_rope(
+            start=0,
+            seq_len=self.max_seq,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        cos_npu, sin_npu = qlayer_npu._slice_rope(
+            start=0,
+            seq_len=self.max_seq,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
         half_dim = self.head_dim // 2
-
-        torch.testing.assert_close(
-            qlayer_ref.rope_cos_template,
-            qlayer_npu.rope_cos_template,
-        )
-        torch.testing.assert_close(
-            qlayer_npu.rope_sin_template[..., :half_dim],
-            -qlayer_ref.rope_sin_template[..., :half_dim],
-        )
-        torch.testing.assert_close(
-            qlayer_npu.rope_sin_template[..., half_dim:],
-            qlayer_ref.rope_sin_template[..., half_dim:],
-        )
+        torch.testing.assert_close(cos_ref, cos_npu)
+        torch.testing.assert_close(sin_npu[..., :half_dim], -sin_ref[..., :half_dim])
+        torch.testing.assert_close(sin_npu[..., half_dim:], sin_ref[..., half_dim:])
 
     def test_mode_transitions_prefill(self):
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)

@@ -14,11 +14,14 @@
 
 import math
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 import tqdm
+
+if TYPE_CHECKING:
+    from transformers.tokenization_utils_base import BatchEncoding
 
 
 def _resolve_device(device: torch.device | str, model: torch.nn.Module) -> torch.device:
@@ -35,7 +38,7 @@ def _resolve_device(device: torch.device | str, model: torch.nn.Module) -> torch
 
 def perplexity(
     model: torch.nn.Module,
-    encodings: torch.Tensor,
+    encodings: "torch.Tensor | BatchEncoding",
     device: torch.device | str = "auto",
     *,
     max_length: Optional[int] = None,
@@ -61,7 +64,9 @@ def perplexity(
         Causal LM loaded in evaluation mode (`model.eval()`).
     encodings : torch.Tensor | transformers.BatchEncoding
         Tokenised corpus.  If a `BatchEncoding` is passed, its
-        `.input_ids` field is used.  Shape must be `(1, seq_len)`.
+        `.input_ids` and optional `.attention_mask` fields are used.
+        Shape must be `(1, seq_len)`. Padding and targets without a valid
+        preceding token are excluded from scoring.
     device : torch.device | str
         CUDA or CPU device on which to run evaluation.
     max_length : int, optional
@@ -83,14 +88,26 @@ def perplexity(
         Corpus-level perplexity.
     """
     # -------- input preparation -------- #
-    try:
-        # transformers.BatchEncoding has `input_ids`
-        input_ids_full = encodings.input_ids  # type: ignore[attr-defined]
-    except AttributeError:  # already a tensor
+    if isinstance(encodings, torch.Tensor):
         input_ids_full = encodings
+    else:
+        input_ids_full = encodings["input_ids"]
     assert isinstance(input_ids_full, torch.Tensor)
+    if ignore_index is None:
+        raise ValueError("ignore_index must be an integer label sentinel.")
     device = _resolve_device(device, model)
     input_ids_full = input_ids_full.to(device)
+    if input_ids_full.ndim != 2 or input_ids_full.shape[0] != 1:
+        raise ValueError("Expected tokenized shape [1, sequence].")
+    attention_mask_full = getattr(encodings, "attention_mask", None)
+    if attention_mask_full is not None:
+        if not isinstance(attention_mask_full, torch.Tensor) or (
+            attention_mask_full.shape != input_ids_full.shape
+        ):
+            raise ValueError("attention_mask must have the same shape as input_ids.")
+        if not bool(((attention_mask_full == 0) | (attention_mask_full == 1)).all()):
+            raise ValueError("attention_mask must be a binary padding mask.")
+        attention_mask_full = attention_mask_full.to(device)
 
     if max_length is None:
         if hasattr(model, "config"):
@@ -106,6 +123,8 @@ def perplexity(
         assert isinstance(model_config.max_position_embeddings, int)
         max_length = model_config.max_position_embeddings
     assert max_length is not None
+    if max_length < 2:
+        raise ValueError("max_length must be greater than 1 for next-token scoring.")
     assert (
         1 <= stride <= max_length
     ), f"stride ({stride}) must be in [1, max_length ({max_length})]"
@@ -123,27 +142,42 @@ def perplexity(
         input_ids = input_ids_full[:, begin:end]
         target_ids = input_ids.clone()
         # mask previously-scored tokens
-        target_ids[:, :-trg_len] = ignore_index  # type: ignore[assignment]
+        target_ids[:, :-trg_len] = ignore_index
+        model_kwargs: dict[str, Any] = {}
+        if attention_mask_full is not None:
+            attention_mask = attention_mask_full[:, begin:end]
+            model_kwargs["attention_mask"] = attention_mask
+            target_ids.masked_fill_(attention_mask == 0, ignore_index)
+            # A padding token cannot provide context for the first valid target.
+            target_ids[:, 1:].masked_fill_(attention_mask[:, :-1] == 0, ignore_index)
+
+        # Skip fully ignored windows before asking the model to average a loss.
+        loss_tokens = int((target_ids[:, 1:] != ignore_index).sum().item())
+        prev_end = end
+        if loss_tokens == 0:
+            if end == seq_len:
+                break
+            continue
 
         with torch.no_grad():
-            outputs = model(input_ids, labels=target_ids)
+            outputs = model(input_ids, labels=target_ids, **model_kwargs)
             # loss is already averaged over non-masked labels
             neg_log_likelihood = outputs.loss
 
-        # exact number of labels that contributed to loss
-        loss_tokens = (target_ids[:, 1:] != ignore_index).sum().item()  # type: ignore[attr-defined]
-        nll_sum += neg_log_likelihood * loss_tokens
-        n_tokens += int(loss_tokens)
+        # Host scalars avoid compounding float32 window-sum rounding error.
+        nll_sum += float(neg_log_likelihood) * loss_tokens
+        n_tokens += loss_tokens
 
-        prev_end = end
         if end == seq_len:
             break
 
+    if n_tokens == 0:
+        raise ValueError("No target tokens were evaluated.")
     avg_nll: float | torch.Tensor = nll_sum / n_tokens
     if not isinstance(avg_nll, torch.Tensor):
         avg_nll = torch.tensor(avg_nll)
     assert isinstance(avg_nll, torch.Tensor)
-    ppl = torch.exp(avg_nll)
+    ppl = torch.exp(avg_nll.float())
 
     return ppl.item()
 

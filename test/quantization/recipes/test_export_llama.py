@@ -26,24 +26,32 @@ import torch
 
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.llama.static_inputs import capture_rope_state
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 skip_msg = "required transformers not installed — skipping floating-point LLaMA test"
 
 
+class _RoutingRotary(torch.nn.Module):
+    """Provide an explicit deterministic source for export routing fixtures."""
+
+    def forward(self, hidden, positions):
+        shape = (1, positions.shape[-1], 4)
+        return (
+            torch.ones(shape, device=hidden.device, dtype=hidden.dtype),
+            torch.zeros(shape, device=hidden.device, dtype=hidden.dtype),
+        )
+
+
 class FakeLayerWrapper(torch.nn.Module):
-    """Fake wrapped decoder layer used for per-layer export tests."""
+    """Implement the static-input owner contract without compiling a model."""
 
     def __init__(self, max_seq=4):
         super().__init__()
-        self.causal_mask_template = torch.zeros(1, 1, max_seq, max_seq)
-
-    def _slice_rope(self, start, seq_len, device, dtype):
-        """Return fake RoPE tensors with the requested sequence length."""
-        return (
-            torch.ones(1, seq_len, 4, device=device, dtype=dtype),
-            torch.zeros(1, seq_len, 4, device=device, dtype=dtype),
-        )
+        self.config = SimpleNamespace(max_position_embeddings=max_seq, head_dim=4)
+        self.qcfg = SimpleNamespace(attention_mask_fill_value=-120.0)
+        self.attn_options = SimpleNamespace(rope="hf")
+        capture_rope_state(self, self.config, _RoutingRotary())
 
     def as_export_module(self, mode, return_kv=False):
         """Return a trivial module representing the export adapter."""

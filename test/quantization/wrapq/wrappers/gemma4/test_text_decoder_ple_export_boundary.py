@@ -77,6 +77,7 @@ class _FakeDecoderLayer(torch.nn.Module):
         shared_key_value=None,
         use_cache: bool = False,
         cache_output_mode: str = "delta",
+        static_export: bool = False,
     ) -> torch.Tensor:
         """Add PLE to hidden states and ignore unrelated decoder inputs."""
         del (
@@ -86,6 +87,7 @@ class _FakeDecoderLayer(torch.nn.Module):
             shared_key_value,
             use_cache,
             cache_output_mode,
+            static_export,
         )
         if per_layer_input is None:
             raise RuntimeError("per_layer_input is required by this test layer.")

@@ -26,6 +26,15 @@ Export helpers should not:
 The model adapter decides **which** artifacts to export. The export helper
 decides **how** to write an artifact.
 
+For LLaMA, Qwen3-VL, and Gemma4, `export.max_seq_len` owns static text capacity.
+It defaults independently to `min(2048, model context)` and never reads
+`calibration.seq_len` or `evaluation.max_seq_len`. LLaMA full-model export also
+builds its shape example at this export length without consuming calibration
+samples. Existing static vision/profile validation and staged prefill/decode
+contracts still apply. See the
+[eager quality protocol](../evaluation/README.md#standard-quality-protocol-fp-eager-vs-quant-eager)
+for the separate evaluation policy.
+
 ## Current layout
 
 ```text

@@ -194,22 +194,14 @@ class QuantGemma4TextAttention(QuantModuleBase):
     _DEFAULT_STATIC_MAX_SEQ = 2048
 
     def _resolve_max_seq(self) -> int:
-        """Resolve the causal-mask capacity from configuration and model limits.
+        """Resolve the export-mask capacity from configuration and model limits.
 
-        Resolution precedence is ``calibration.seq_len``,
-        ``model_args["text"]["max_seq"]``, ``model_args["max_seq"]``, and finally
+        Resolution precedence is ``model_args["text"]["max_seq"]``,
+        ``model_args["max_seq"]``, and finally
         ``min(max_position_embeddings, 2048)``. The cap avoids allocating a full
-        model-context square mask for a smaller static export profile.
+        model-context square mask for a smaller static export profile. Eager
+        execution is independent of this capacity and the calibration length.
         """
-        from tico.quantization.recipes.config import get_by_path
-
-        try:
-            calib_seq_len = get_by_path(self.qcfg, "calibration.seq_len")
-            if calib_seq_len is not None:
-                return int(calib_seq_len)
-        except (KeyError, TypeError):
-            pass
-
         configured = get_model_arg(self.qcfg, "text", "max_seq", default=None)
         if configured is None:
             configured = get_model_arg(self.qcfg, "max_seq", default=None)
@@ -342,27 +334,61 @@ class QuantGemma4TextAttention(QuantModuleBase):
         q_len: int,
         k_len: int,
         device: torch.device,
+        static_export: bool = False,
     ) -> torch.Tensor:
         """Build an additive attention mask for the active query and key range."""
         fill_val = float(self.qcfg.attention_mask_fill_value)
         assert isinstance(self.causal_mask_template, torch.Tensor)
-
-        if k_len > self.causal_mask_template.size(-1):
+        use_static_template = static_export or torch.compiler.is_compiling()
+        capacity = (
+            self.causal_mask_template.size(-1)
+            if use_static_template
+            else int(self.config.max_position_embeddings)
+        )
+        if k_len > capacity:
             raise RuntimeError(
                 "Key length exceeds causal mask capacity: "
-                f"k_len={k_len}, capacity={self.causal_mask_template.size(-1)}."
+                f"k_len={k_len}, capacity={capacity}."
             )
 
         q_start = max(k_len - q_len, 0)
         q_end = q_start + q_len
-        if q_end > self.causal_mask_template.size(-2):
+        if q_end > capacity:
             raise RuntimeError(
                 "Query range exceeds causal mask capacity: "
                 f"q_start={q_start}, q_end={q_end}, "
-                f"capacity={self.causal_mask_template.size(-2)}."
+                f"capacity={capacity}."
             )
 
-        causal_mask = self.causal_mask_template[..., q_start:q_end, :k_len].to(device)
+        # Model-level masks already contain causality, padding, and the exact
+        # cache offset for full or sliding attention. Avoid constructing a
+        # second mask when the caller supplies that complete additive mask.
+        if attention_mask is not None and torch.is_floating_point(attention_mask):
+            attention_mask = self._normalize_attention_mask_shape(
+                attention_mask.to(device),
+                q_len=q_len,
+                k_len=k_len,
+            )
+            return self._fq(attention_mask, self.obs_attn_mask)
+
+        if use_static_template:
+            causal_mask = self.causal_mask_template[..., q_start:q_end, :k_len].to(
+                device
+            )
+        else:
+            query = torch.arange(q_start, q_end, device=device).view(-1, 1)
+            key = torch.arange(k_len, device=device).view(1, -1)
+            keep = key <= query
+            if self.is_sliding:
+                keep = keep & (key > query - int(cast(int, self.sliding_window)))
+            causal_mask = (
+                torch.zeros(
+                    (q_len, k_len), dtype=self.causal_mask_template.dtype, device=device
+                )
+                .masked_fill(~keep, fill_val)
+                .unsqueeze(0)
+                .unsqueeze(0)
+            )
 
         if attention_mask is None:
             return self._fq(causal_mask, self.obs_attn_mask)
@@ -389,14 +415,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
             additive = additive.masked_fill(~keep_mask, fill_val)
             mask = torch.clamp(causal_mask + additive, min=fill_val)
             return self._fq(mask, self.obs_attn_mask)
-
-        if torch.is_floating_point(attention_mask):
-            attention_mask = self._normalize_attention_mask_shape(
-                attention_mask,
-                q_len=q_len,
-                k_len=k_len,
-            )
-            return self._fq(attention_mask, self.obs_attn_mask)
 
         raise RuntimeError(
             "Unsupported attention_mask dtype for Gemma4 text attention: "
@@ -1190,6 +1208,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         past_key_value: Optional[Any] = None,
         use_cache: bool = False,
         cache_output_mode: str = "delta",
+        static_export: bool = False,
         **kwargs,
     ):
         """Run Gemma4 text attention with selectable execution layout.
@@ -1208,6 +1227,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
             cache_output_mode: ``"delta"`` returns newly projected K/V;
                 ``"present"`` or ``"full"`` returns full K/V or the updated
                 cache object.
+            static_export: Enforce the configured static capacity when an
+                export adapter runs eagerly for deployment parity checks.
 
         Returns:
             ``(attn_output, attn_weights)`` and an optional third cache item when
@@ -1285,6 +1306,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
             q_len=query_states.size(-2),
             k_len=key_states.size(-2),
             device=query_states.device,
+            static_export=static_export,
         )
 
         if self.attn_options.layout == "batched":

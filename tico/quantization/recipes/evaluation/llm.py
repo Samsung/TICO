@@ -30,6 +30,7 @@ def evaluate_perplexity(
     dataset_name: str = "Salesforce/wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
     split: str = "test",
+    stride: int | None = None,
 ) -> float:
     """Evaluate text perplexity on a Hugging Face dataset.
 
@@ -54,7 +55,13 @@ def evaluate_perplexity(
     )
     enc = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt")
     return float(
-        perplexity(model, enc, device, max_length=max_seq_len, stride=max_seq_len)
+        perplexity(
+            model,
+            enc,
+            device,
+            max_length=max_seq_len,
+            stride=max_seq_len if stride is None else stride,
+        )
     )
 
 

@@ -34,6 +34,16 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaDecoderLayerDecodeExportAdapter,
     LlamaDecoderLayerPrefillExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.llama.position import (
+    build_causal_mask,
+    combine_binary_attention_mask,
+    make_rotary_embedding,
+    position_embeddings as make_position_embeddings,
+)
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    capture_rope_state,
+    prepare_llama_static_inputs,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -53,10 +63,6 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
       `QuantLlamaAttention` for RoPE table generation.
     """
 
-    causal_mask_template: torch.Tensor
-    rope_cos_template: torch.Tensor
-    rope_sin_template: torch.Tensor
-
     def __init__(
         self,
         fp_layer: nn.Module,
@@ -65,13 +71,15 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         fp_name: Optional[str] = None,
         return_type: Optional[str] = None,
         layer_idx: Optional[int] = None,
+        rotary_emb: Optional[nn.Module] = None,
     ):
         """
         Initialize the quantized decoder-layer wrapper.
 
         `return_type` is needed because different versions of
         `transformers` wrap decoder output in different containers: a plain
-        tensor or a tuple.
+        tensor or a tuple. Pass the original model-level ``rotary_emb`` for
+        customized rotary state; otherwise the complete layer config is used.
         """
         fp_layer = cast("LlamaDecoderLayer", fp_layer)
         self.return_type = return_type
@@ -137,53 +145,41 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         assert hasattr(cfg, "max_position_embeddings")
         assert isinstance(cfg.max_position_embeddings, int)
         self.max_seq = cfg.max_position_embeddings
-        # Static causal mask template
-        mask = torch.full(
-            (1, 1, self.max_seq, self.max_seq),
-            float(self.qcfg.attention_mask_fill_value),
+        source = (
+            rotary_emb
+            if rotary_emb is not None
+            else getattr(fp_layer, "rotary_emb", None)
         )
-        mask.triu_(1)
-        self.register_buffer("causal_mask_template", mask, persistent=False)
+        self.rotary_emb = make_rotary_embedding(cfg, source)
+        capture_rope_state(self, cfg, self.rotary_emb)
 
-        head_dim = getattr(cfg, "head_dim", None) or (
-            cfg.hidden_size // cfg.num_attention_heads
-        )
-        rotary = getattr(fp_layer, "rotary_emb", None)
-        # Static RoPE (position_embeddings) templates
-        # `rotray_emb` is normally inside `LlamaModel`.
-        # 1) inv_freq, scaling
-        if rotary is not None and hasattr(rotary, "inv_freq"):
-            inv_freq = rotary.inv_freq.detach().float()
-            attn_scaling = float(getattr(rotary, "attention_scaling", 1.0))
-        else:
-            rope_params = getattr(cfg, "rope_parameters", None)
-            if (
-                rope_params is not None
-                and isinstance(rope_params, dict)
-                and "rope_theta" in rope_params
-            ):
-                base = float(rope_params["rope_theta"])
-            else:
-                base = float(getattr(cfg, "rope_theta", 10000.0))
-            inv_freq = 1.0 / (
-                base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+    def _build_static_export_inputs(self, max_seq_len: int):
+        """Support direct layer export without calling eager input builders."""
+        return prepare_llama_static_inputs(self, max_seq_len)
+
+    def _build_causal_mask(
+        self,
+        *,
+        q_len: int,
+        k_len: int,
+        past_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build the [1, Q, K] mask for eager execution or an explicit export shape."""
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            return prepared.mask(q_len, k_len, past_len, device=device)
+        if torch.compiler.is_compiling():
+            raise ValueError(
+                "Static layer export requires an explicit mask or prepared_static_export()."
             )
-            attn_scaling = 1.0
-        # 2) Create cos/sin: [max_seq, head_dim]
-        pos = torch.arange(self.max_seq, dtype=torch.float32)  # [max_seq]
-        freqs = torch.outer(pos, inv_freq)  # [max_seq, head_dim/2]
-        emb = torch.cat([freqs, freqs], dim=-1)  # [max_seq, head_dim]
-        cos_t = emb.cos() * attn_scaling
-        sin_t = emb.sin() * attn_scaling
-        half_dim = head_dim // 2
-        if self.attn_options.rope == "pre_negated_sin":
-            sin_t[..., :half_dim] = -sin_t[..., :half_dim]
-        self.register_buffer(
-            "rope_cos_template", cos_t.unsqueeze(0), persistent=False
-        )  # [1, max_seq, head_dim]
-        self.register_buffer(
-            "rope_sin_template", sin_t.unsqueeze(0), persistent=False
-        )  # [1, max_seq, head_dim]
+        return build_causal_mask(
+            q_len=q_len,
+            k_len=k_len,
+            past_len=past_len,
+            device=device,
+            fill_value=float(self.qcfg.attention_mask_fill_value),
+        )
 
     def _slice_rope(
         self,
@@ -193,15 +189,22 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Slice the static RoPE templates for the requested token range.
-        """
-        assert isinstance(self.rope_cos_template, torch.Tensor)
-        assert isinstance(self.rope_sin_template, torch.Tensor)
-        end = start + seq_len
-        cos = self.rope_cos_template[:, start:end, :].to(device=device, dtype=dtype)
-        sin = self.rope_sin_template[:, start:end, :].to(device=device, dtype=dtype)
-        return cos, sin
+        """Generate pretrained RoPE for the requested range without a full table."""
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            return prepared.rope(start, seq_len, device=device, dtype=dtype)
+        if torch.compiler.is_compiling():
+            raise ValueError(
+                "Static layer export requires explicit RoPE or prepared_static_export()."
+            )
+        positions = torch.arange(start, start + seq_len, device=device).unsqueeze(0)
+        return make_position_embeddings(
+            self,
+            self.self_attn.wrapped.config,
+            torch.empty((), device=device, dtype=dtype),
+            positions,
+            pre_negated_sin=self.attn_options.rope == "pre_negated_sin",
+        )
 
     def _get_past_len(
         self,
@@ -227,18 +230,41 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         hidden_states: torch.Tensor,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]],
         past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
+        position_ids: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Return position embeddings that match this wrapper's RoPE convention.
         """
-        if position_embeddings is None:
-            q_len = hidden_states.size(1)
-            past_len = self._get_past_len(past_key_value)
-            cos, sin = self._slice_rope(
-                start=past_len,
-                seq_len=q_len,
+        prepared = getattr(self, "_static_export_inputs", None)
+        if position_embeddings is None and prepared is not None:
+            if position_ids is not None:
+                raise ValueError(
+                    "Provide explicit RoPE tensors for custom static positions."
+                )
+            cos, sin = prepared.rope(
+                self._get_past_len(past_key_value),
+                hidden_states.size(1),
                 device=hidden_states.device,
                 dtype=hidden_states.dtype,
+            )
+        elif position_embeddings is None:
+            if torch.compiler.is_compiling():
+                raise ValueError(
+                    "Static layer export requires explicit RoPE or prepared_static_export()."
+                )
+            if position_ids is None:
+                past_len = self._get_past_len(past_key_value)
+                position_ids = torch.arange(
+                    past_len,
+                    past_len + hidden_states.size(1),
+                    device=hidden_states.device,
+                ).unsqueeze(0)
+            cos, sin = make_position_embeddings(
+                self,
+                self.self_attn.wrapped.config,
+                hidden_states,
+                position_ids,
+                pre_negated_sin=self.attn_options.rope == "pre_negated_sin",
             )
         else:
             cos, sin = position_embeddings
@@ -256,7 +282,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         Return an additive attention mask usable with per-head logits.
 
         Supported cases:
-        - None: build a causal mask slice.
+        - None: build a causal mask for the current query and key lengths.
         - bool mask: convert to additive mask using 0 / configured fill value.
         - additive mask: use as-is.
         """
@@ -265,27 +291,21 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         k_len = past_len + q_len
 
         if attention_mask is None:
-            assert isinstance(self.causal_mask_template, torch.Tensor)
-            mask = self.causal_mask_template[
-                ..., past_len : past_len + q_len, :k_len
-            ].to(device)
-            return self._fq(mask.squeeze(0), self.obs_attn_mask)
+            mask = self._build_causal_mask(
+                q_len=q_len, k_len=k_len, past_len=past_len, device=device
+            )
+            return self._fq(mask, self.obs_attn_mask)
 
         if attention_mask.dtype in (torch.bool, torch.int64):
-            if attention_mask.dtype == torch.int64:
-                attention_mask = attention_mask != 0
-
-            assert isinstance(self.causal_mask_template, torch.Tensor)
-            causal_mask = self.causal_mask_template[
-                ..., past_len : past_len + q_len, :k_len
-            ].to(device)
-
-            fill_val = self.qcfg.attention_mask_fill_value
-            additive = torch.zeros_like(attention_mask, dtype=torch.float32)
-            additive = additive.masked_fill(~attention_mask, float(fill_val))
-
-            mask = torch.clamp(causal_mask + additive, min=fill_val)
-            return self._fq(mask.squeeze(0), self.obs_attn_mask)
+            causal_mask = self._build_causal_mask(
+                q_len=q_len, k_len=k_len, past_len=past_len, device=device
+            )
+            mask = combine_binary_attention_mask(
+                causal_mask,
+                attention_mask,
+                fill_value=float(self.qcfg.attention_mask_fill_value),
+            )
+            return self._fq(mask, self.obs_attn_mask)
 
         return self._fq(attention_mask, self.obs_attn_mask)
 
@@ -331,13 +351,12 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.Tensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        return_type: Optional[str] = None,
         **kwargs,
     ):
         """
         Run the quantized decoder layer.
         """
-        del position_ids
-
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -351,6 +370,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             past_key_value=past_key_value,
+            position_ids=position_ids,
         )
 
         attn_out = self.self_attn(
@@ -382,9 +402,10 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         if use_cache:
             outputs += (present_key_value,)  # type: ignore[assignment]
 
-        if self.return_type == "tuple":
+        result_type = self.return_type if return_type is None else return_type
+        if result_type == "tuple":
             return outputs
-        if self.return_type == "tensor":
+        if result_type == "tensor":
             return hidden_states
         raise RuntimeError("Invalid return_type configuration.")
 

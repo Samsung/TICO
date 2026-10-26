@@ -28,6 +28,7 @@ import torch
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     QuantLlamaForCausalLMDecodeExportAdapter,
@@ -145,6 +146,14 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         self.assertLess(diff, 0.4)
         self.assertEqual(fp_out.shape, q_out.shape)
 
+    def test_full_model_export_requires_explicit_preparation(self):
+        """Unprepared full-model export must fail rather than trace eager helpers."""
+        model = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
+        inputs = torch.randint(0, self.vocab_size, (1, self.seq_len))
+        adapter = QuantLlamaForCausalLMPrefillExportAdapter(model)
+        with self.assertRaisesRegex(ValueError, "prepared_static_export"):
+            adapter(input_ids=inputs)
+
     def test_export_adapter_without_cache_return_logits_only(self):
         qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
         prefill_adapter = QuantLlamaForCausalLMPrefillExportAdapter(qmodel)
@@ -156,7 +165,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
             (1, self.seq_len),
         )
 
-        with torch.no_grad():
+        with prepared_static_export(prefill_adapter, self.seq_len), torch.no_grad():
             logits = prefill_adapter(
                 input_ids=inp,
             )
@@ -176,7 +185,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
             (1, self.seq_len),
         )
 
-        with torch.no_grad():
+        with prepared_static_export(prefill_adapter, self.seq_len), torch.no_grad():
             out = prefill_adapter(
                 input_ids=inp,
             )
@@ -211,7 +220,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
             for _ in range(2)
         ]
 
-        with torch.no_grad():
+        with prepared_static_export(decode_adapter, self.seq_len), torch.no_grad():
             out = decode_adapter(
                 input_ids=inp,
                 past_key_values=past_key_values,

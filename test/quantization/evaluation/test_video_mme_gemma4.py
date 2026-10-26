@@ -22,6 +22,7 @@ These tests exercise:
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -214,6 +215,9 @@ class TestEvaluateAndPrintVideoMME(unittest.TestCase):
             max_new_tokens=30,
             n_samples=10,
             verbose=False,
+            max_seq_len=4096,
+            kv_cache=False,
+            use_cache="/tmp/lmms-results",
         )
 
         mock_eval.assert_called_once()
@@ -225,6 +229,9 @@ class TestEvaluateAndPrintVideoMME(unittest.TestCase):
         self.assertEqual(call_kwargs["max_new_tokens"], 30)
         self.assertEqual(call_kwargs["limit"], 10)
         self.assertEqual(call_kwargs["verbose"], False)
+        self.assertEqual(call_kwargs["max_seq_len"], 4096)
+        self.assertIs(call_kwargs["kv_cache"], False)
+        self.assertEqual(call_kwargs["use_cache"], "/tmp/lmms-results")
 
         mock_print_results.assert_called_once_with(mock_results)
         self.assertEqual(result, mock_results)
@@ -276,18 +283,37 @@ class TestEvaluateAndPrintVideoMME(unittest.TestCase):
 class TestGemma4AdapterVideoMMEConfig(unittest.TestCase):
     """Test the Gemma4 adapter's videomme config parsing."""
 
+    @staticmethod
+    def _make_context(adapter, evaluation):
+        """Create a recipe context with concrete native and export capacities."""
+        from tico.quantization.recipes.context import RecipeContext
+
+        model = SimpleNamespace(
+            config=SimpleNamespace(
+                use_cache=False,
+                text_config=SimpleNamespace(
+                    max_position_embeddings=8192, use_cache=False
+                ),
+            ),
+            generation_config=SimpleNamespace(use_cache=False),
+        )
+        return RecipeContext(
+            cfg={
+                "calibration": {"seq_len": 4},
+                "export": {"max_seq_len": 16},
+                "evaluation": evaluation,
+            },
+            adapter=adapter,
+            model=model,
+            processor=SimpleNamespace(tokenizer=None),
+        )
+
     def test_videomme_disabled_by_default(self):
         """When videomme is not in eval_cfg, evaluate_and_print_video_mme should not be called."""
         from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 
         adapter = Gemma4Adapter()
-        ctx = Mock()
-        ctx.cfg = {
-            "evaluation": {"enabled": True},
-        }
-        ctx.model = Mock()
-        ctx.processor = Mock()
-        ctx.device = "cpu"
+        ctx = self._make_context(adapter, {"enabled": True})
 
         with patch(
             "tico.quantization.recipes.adapters.gemma4.evaluate_and_print_video_mme"
@@ -300,22 +326,22 @@ class TestGemma4AdapterVideoMMEConfig(unittest.TestCase):
         from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 
         adapter = Gemma4Adapter()
-        ctx = Mock()
-        ctx.cfg = {
-            "evaluation": {
+        ctx = self._make_context(
+            adapter,
+            {
                 "enabled": True,
+                "max_seq_len": 4096,
+                "use_cache": False,
                 "videomme": {
                     "enabled": True,
                     "n_samples": 5,
                     "max_num_frames": 21,
                     "batch_size": 1,
                     "max_new_tokens": 30,
+                    "use_cache": "/tmp/lmms-results",
                 },
             },
-        }
-        ctx.model = Mock()
-        ctx.processor = Mock()
-        ctx.device = "cpu"
+        )
 
         with patch(
             "tico.quantization.recipes.adapters.gemma4.evaluate_and_print_video_mme"
@@ -327,24 +353,26 @@ class TestGemma4AdapterVideoMMEConfig(unittest.TestCase):
             self.assertEqual(call_kwargs["max_num_frames"], 21)
             self.assertEqual(call_kwargs["batch_size"], 1)
             self.assertEqual(call_kwargs["max_new_tokens"], 30)
+            self.assertEqual(call_kwargs["max_seq_len"], 4096)
+            self.assertIs(call_kwargs["kv_cache"], False)
+            self.assertEqual(call_kwargs["use_cache"], "/tmp/lmms-results")
+            self.assertFalse(ctx.model.config.text_config.use_cache)
+            self.assertFalse(ctx.model.generation_config.use_cache)
 
     def test_videomme_default_max_num_frames_is_21(self):
         """Gemma4 adapter should default max_num_frames to 21 (not 32)."""
         from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 
         adapter = Gemma4Adapter()
-        ctx = Mock()
-        ctx.cfg = {
-            "evaluation": {
+        ctx = self._make_context(
+            adapter,
+            {
                 "enabled": True,
                 "videomme": {
                     "enabled": True,
                 },
             },
-        }
-        ctx.model = Mock()
-        ctx.processor = Mock()
-        ctx.device = "cpu"
+        )
 
         with patch(
             "tico.quantization.recipes.adapters.gemma4.evaluate_and_print_video_mme"
@@ -353,25 +381,26 @@ class TestGemma4AdapterVideoMMEConfig(unittest.TestCase):
             call_kwargs = mock_eval.call_args.kwargs
             # Gemma4 defaults to 21 frames (not 32) due to soft_tokens_per_frame
             self.assertEqual(call_kwargs["max_num_frames"], 21)
+            self.assertEqual(call_kwargs["max_seq_len"], 8192)
+            self.assertIs(call_kwargs["kv_cache"], True)
+            self.assertTrue(ctx.model.config.text_config.use_cache)
+            self.assertTrue(ctx.model.generation_config.use_cache)
 
     def test_videomme_invalid_max_num_frames_raises(self):
         """max_num_frames <= 0 should raise ValueError."""
         from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 
         adapter = Gemma4Adapter()
-        ctx = Mock()
-        ctx.cfg = {
-            "evaluation": {
+        ctx = self._make_context(
+            adapter,
+            {
                 "enabled": True,
                 "videomme": {
                     "enabled": True,
                     "max_num_frames": 0,
                 },
             },
-        }
-        ctx.model = Mock()
-        ctx.processor = Mock()
-        ctx.device = "cpu"
+        )
 
         with patch(
             "tico.quantization.recipes.adapters.gemma4.evaluate_and_print_video_mme"
@@ -385,24 +414,21 @@ class TestGemma4AdapterVideoMMEConfig(unittest.TestCase):
         from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 
         adapter = Gemma4Adapter()
-        ctx = Mock()
-        ctx.cfg = {
-            "evaluation": {
+        ctx = self._make_context(
+            adapter,
+            {
                 "enabled": True,
                 "videomme": {
                     "enabled": True,
                     "max_num_frames": -1,
                 },
             },
-        }
-        ctx.model = Mock()
-        ctx.processor = Mock()
-        ctx.device = "cpu"
+        )
 
         with patch(
             "tico.quantization.recipes.adapters.gemma4.evaluate_and_print_video_mme"
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "max_num_frames"):
                 adapter.evaluate(ctx)
 
     def test_videomme_n_samples_negative_becomes_none(self):
@@ -410,19 +436,16 @@ class TestGemma4AdapterVideoMMEConfig(unittest.TestCase):
         from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 
         adapter = Gemma4Adapter()
-        ctx = Mock()
-        ctx.cfg = {
-            "evaluation": {
+        ctx = self._make_context(
+            adapter,
+            {
                 "enabled": True,
                 "videomme": {
                     "enabled": True,
                     "n_samples": -1,
                 },
             },
-        }
-        ctx.model = Mock()
-        ctx.processor = Mock()
-        ctx.device = "cpu"
+        )
 
         with patch(
             "tico.quantization.recipes.adapters.gemma4.evaluate_and_print_video_mme"

@@ -63,7 +63,9 @@ class TestAdapterMmmuRouting(unittest.TestCase):
         ctx.model = SimpleNamespace(
             config=SimpleNamespace(
                 use_cache=False,
-                text_config=SimpleNamespace(use_cache=False),
+                text_config=SimpleNamespace(
+                    use_cache=False, max_position_embeddings=8192
+                ),
             )
         )
         ctx.processor = SimpleNamespace(tokenizer=object())
@@ -100,7 +102,7 @@ class TestAdapterMmmuRouting(unittest.TestCase):
                     n_shots=5,
                     n_samples=-1,
                     max_new_tokens=None,
-                    max_seq_len=None,
+                    max_seq_len=8192,
                     temperature=0.0,
                     verbose=False,
                     prompt_mode="strict_single_letter",
@@ -269,7 +271,7 @@ class TestAdapterMmmuRouting(unittest.TestCase):
 
                 def evaluate_mmmu(**kwargs):
                     events.append("mmmu")
-                    expected_cache = adapter_cls.family == "gemma4"
+                    expected_cache = True
                     self.assertEqual(ctx.model.config.use_cache, expected_cache)
                     self.assertEqual(
                         ctx.model.config.text_config.use_cache, expected_cache

@@ -1041,7 +1041,10 @@ class TestMmmuExampleConfigs(unittest.TestCase):
             with self.subTest(preset=preset):
                 path = root / "tico/quantization/examples/configs" / (preset + ".yaml")
                 config = yaml.safe_load(path.read_text())["evaluation"]
-                self.assertEqual(config["max_seq_len"], 2048)
+                self.assertIsNone(config["max_seq_len"])
+                self.assertNotIn("backend", config)
+                self.assertTrue(config["llava_bench"]["regenerate"])
+                self.assertEqual(config["ppl"]["max_seq_len"], 2048)
                 config = config["mmmu"]
                 self.assertEqual(config["dataset"], "MMMU/MMMU_Pro")
                 self.assertEqual(config["subjects"], ["vision"])
