@@ -125,6 +125,32 @@ def print_hellaswag_results(results: dict[str, Any]) -> None:
     print(make_table(results))
 
 
+def _lookup_lm_eval_metric(task_results: dict[str, Any], metric: str) -> float:
+    """Read a metric from an ``lm_eval`` per-task results mapping.
+
+    ``lm_eval`` 0.4+ stores metrics as ``"<metric>,<filter>"`` (for example
+    ``"acc,none"``); older releases used the bare metric name. Accept both and
+    fail loudly when the metric is absent instead of reporting a fake score.
+    """
+    if metric in task_results:
+        return float(task_results[metric])
+    filtered = [
+        key
+        for key in task_results
+        if isinstance(key, str) and key.split(",", 1)[0] == metric and "," in key
+    ]
+    if len(filtered) == 1:
+        return float(task_results[filtered[0]])
+    if len(filtered) > 1:
+        raise KeyError(
+            f"Ambiguous HellaSwag metric {metric!r}: multiple filters {sorted(filtered)}."
+        )
+    raise KeyError(
+        f"HellaSwag metric {metric!r} not found in lm_eval results; "
+        f"available keys: {sorted(str(k) for k in task_results)}."
+    )
+
+
 def get_hellaswag_accuracy(results: dict[str, Any]) -> dict[str, float]:
     """
     Extract accuracy metrics from HellaSwag evaluation results.
@@ -136,9 +162,14 @@ def get_hellaswag_accuracy(results: dict[str, Any]) -> dict[str, float]:
         Dictionary with accuracy metrics:
         - acc: Accuracy
         - acc_norm: Normalized accuracy (length-normalized)
+
+    Raises:
+        KeyError: If the results do not contain the HellaSwag accuracy metrics.
     """
-    hellaswag_results = results.get("results", {}).get("hellaswag", {})
+    hellaswag_results = results.get("results", {}).get("hellaswag")
+    if not isinstance(hellaswag_results, dict):
+        raise KeyError("lm_eval results do not contain a 'hellaswag' task entry.")
     return {
-        "acc": hellaswag_results.get("acc", 0.0),
-        "acc_norm": hellaswag_results.get("acc_norm", 0.0),
+        "acc": _lookup_lm_eval_metric(hellaswag_results, "acc"),
+        "acc_norm": _lookup_lm_eval_metric(hellaswag_results, "acc_norm"),
     }
