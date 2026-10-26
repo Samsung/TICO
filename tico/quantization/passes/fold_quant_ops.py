@@ -325,11 +325,9 @@ class FoldQuantOps(PassBase):
     embedding output, keep Q explicitly and remove only DQ. Its table remains
     dequantized so the lookup preserves FLOAT32 values before that Quantize.
 
-    Also keep Q when the unquantized producer has other users, or its Q-DQ
-    boundary explicitly declares a float input through tracing metadata.
-    Folding either boundary would change the source's float contract. Preserve
-    that producer's float inputs with explicit Dequantize bridges after the
-    remaining folds.
+    Also keep Q when the unquantized producer has other users: folding it into
+    that producer would round those users' values too. Preserve that producer's
+    float inputs with explicit Dequantize bridges after the remaining folds.
 
     Discover an existing source domain through slices, views, and same-domain
     concatenations before deciding whether a trailing Q is a requantization.
@@ -382,13 +380,8 @@ class FoldQuantOps(PassBase):
                 qparam.scale = [q_args.scale]
                 qparam.zero_point = [q_args.zero_p]
                 qparam.dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
-                preserve_float_input = dq.meta.get("custom", {}).get(
-                    "tico_preserve_float_input", False
-                )
-                if (
-                    preserve_float_input
-                    or op.target == torch.ops.aten.embedding.default
-                    or any(user is not q for user in op.users)
+                if op.target == torch.ops.aten.embedding.default or any(
+                    user is not q for user in op.users
                 ):
                     if op.target not in _QPARAM_PRESERVING_VIEW_TARGETS:
                         op.meta[_PRESERVE_FLOAT_INPUTS_KEY] = True

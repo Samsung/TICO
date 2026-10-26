@@ -500,7 +500,8 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                             label=f"shared {layer_type} INT16={signed_storage} {mode}",
                         )
 
-    def test_external_float_input_has_explicit_compute_quantize(self):
+    def test_external_float_policy_uses_folded_compute_input_grid(self):
+        """Ordinary folding places C on the serialized external-cache inputs."""
         consumer = self._attention(layer_index=1)
         consumer.bind_external_float_cache()
         shared_key = torch.linspace(-0.875, 0.875, 32 * 4).reshape(1, 1, 32, 4)
@@ -513,24 +514,23 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                 kwargs = {"shared_key_value": shared}
                 runtime = self._convert(module, args, kwargs)
                 self.assertEqual(len(runtime.program.outputs), 1)
-                for index in runtime.program.inputs[-2:]:
+                for index, observer in zip(
+                    runtime.program.inputs[-2:],
+                    (consumer.obs_present_key, consumer.obs_present_value),
+                ):
                     tensor = runtime.program.tensor(index)
-                    self.assertEqual(tensor.dtype, np.dtype(np.float32))
-                    self.assertIsNone(self._qparams(tensor))
+                    self._assert_storage(tensor, observer)
                     users = [
                         op for op in runtime.program.operators if index in op.inputs
                     ]
-                    self.assertEqual(len(users), 1)
-                    self.assertEqual(users[0].name, "QUANTIZE")
-                    converted = runtime.program.tensor(users[0].outputs[0])
-                    self.assertEqual(converted.dtype, np.dtype(np.uint8))
-                    self.assertEqual(self._qparams(converted), ((0.21875,), (91,)))
+                    self.assertTrue(users)
+                    self.assertNotIn("QUANTIZE", {op.name for op in users})
                 self._assert_parity(
                     module,
                     args,
                     runtime,
                     kwargs=kwargs,
-                    label=f"external FP {mode}",
+                    label=f"external FP policy, folded C input {mode}",
                 )
 
 

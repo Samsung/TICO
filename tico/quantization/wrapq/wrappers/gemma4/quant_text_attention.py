@@ -899,29 +899,9 @@ class QuantGemma4TextAttention(QuantModuleBase):
 
     def _cache_to_compute(self, key_value: LayerKV) -> LayerKV:
         """Convert the declared storage domain directly into attention's grid."""
-        compute = (self.obs_present_key, self.obs_present_value)
-        if self._mode is not Mode.QUANT:
-            return self._fq(key_value[0], compute[0]), self._fq(
-                key_value[1], compute[1]
-            )
-
-        converted = []
-        for tensor, storage, observer in zip(
-            key_value, self.cache_storage_observers(), compute
-        ):
-            if isinstance(storage, IdentityObserver) and not isinstance(
-                observer, IdentityObserver
-            ):
-                # The external ABI is float. Keep its explicit FP-to-C
-                # Quantize rather than folding C qparams into the input tensor.
-                with (
-                    torch.fx.traceback.preserve_node_meta(),
-                    torch.fx.traceback.annotate({"tico_preserve_float_input": True}),
-                ):
-                    converted.append(self._fq(tensor, observer))
-            else:
-                converted.append(self._fq(tensor, observer))
-        return converted[0], converted[1]
+        return self._fq(key_value[0], self.obs_present_key), self._fq(
+            key_value[1], self.obs_present_value
+        )
 
     def _cache_object_past(self, cache: Any, q_len: int) -> Optional[LayerKV]:
         """Read active slots before update using supported HF Cache layer APIs.

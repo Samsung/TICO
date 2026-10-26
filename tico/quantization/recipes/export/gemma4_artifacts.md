@@ -100,8 +100,12 @@ never mutates producer storage.
 Gemma4 Assistant receives KV from the FP target used by its existing assisted
 generation adapter. Its backbone declares this external float storage contract
 with `bind_external_float_cache()` and IdentityObserver storage boundaries;
-it does not invent a quantized producer. External FP KV is explicitly converted
-to the assistant's `present_*` compute grid.
+it does not invent a quantized producer. In PyTorch, external FP KV is
+fake-quantized directly to the assistant's `present_*` compute grid. Circle
+export uses the normal quantization folding rules, which can fold this
+conversion into integer KV inputs carrying the compute qparams. The PyTorch
+float storage declaration does not force a float Circle input ABI; callers
+must use the serialized input dtypes and qparams.
 
 `cache_output_mode="delta"` returns current storage KV. `"present"`/`"full"`
 returns the updated HF cache object or the full **storage** tuple. The shared-KV

@@ -242,8 +242,8 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
         for expected, actual in zip(reference, replayed):
             torch.testing.assert_close(expected, actual)
 
-    def test_circle_preserves_external_float_kv_and_compute_conversion(self):
-        """The serialized assistant accepts FP target KV and quantizes it once."""
+    def test_circle_shared_kv_inputs_use_consumer_compute_grid(self):
+        """Circle shared KV inputs use the consumer's frozen integer compute grid."""
         converted = self._converted()
         adapter = Gemma4AssistantCoreExportAdapter(converted).eval()
         inputs = self._static_inputs().as_tuple()
@@ -267,21 +267,18 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
         ):
             input_index = program.inputs[input_offset]
             source = program.tensor(input_index)
-            self.assertEqual(source.dtype, np.dtype(np.float32))
-            self.assertIsNone(source.quantization)
+            self.assertEqual(source.dtype, np.dtype(np.int16))
+            observer = getattr(attentions[layer_type], f"obs_present_{role}")
+            scale, zero_point = observer.compute_qparams()
+            assert source.quantization is not None
+            self.assertEqual(source.quantization.scale, (float(scale),))
+            self.assertEqual(source.quantization.zero_point, (int(zero_point),))
             conversions = [
                 operator
                 for operator in program.operators
                 if operator.name == "QUANTIZE" and operator.inputs == (input_index,)
             ]
-            self.assertEqual(len(conversions), 1)
-            target = program.tensor(conversions[0].outputs[0])
-            observer = getattr(attentions[layer_type], f"obs_present_{role}")
-            scale, zero_point = observer.compute_qparams()
-            self.assertEqual(target.dtype, np.dtype(np.int16))
-            assert target.quantization is not None
-            self.assertEqual(target.quantization.scale, (float(scale),))
-            self.assertEqual(target.quantization.zero_point, (int(zero_point),))
+            self.assertEqual(conversions, [])
 
         actual = runtime.run(
             [value.numpy() for value in inputs], mode=ExecutionMode.FAKE_QUANTIZE
