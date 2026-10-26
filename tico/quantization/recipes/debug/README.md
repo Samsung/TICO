@@ -272,11 +272,12 @@ The default runs static/comparator regressions, real generation, cache coverage,
 small in-memory evaluation, and actual Circle conversion/execution sequentially.
 Use `--stage regression`, `generate`, `coverage`, `evaluation`, or `circle` to rerun
 one stage in a new directory. Unit-stage reports include the actual test count;
-zero tests or any skip cannot establish a pass. `--baseline-repo /path/to/start`
-compares the same frozen checkpoint with that checkout's exporter. It does not
-recalibrate the baseline. `--fixtures /path/to/prior/fixtures` reuses trusted local
-checkpoints only when their checkpoint and effective-config hashes match their
-recorded calibration provenance.
+zero tests or any skip cannot establish a pass. `--baseline-repo /path/to/baseline`
+compares the same frozen checkpoint with that checkout's exporter. Select and
+record a revision that supports the fixture's checkpoint and static profile; the
+runner does not recalibrate it. `--fixtures /path/to/prior/fixtures` reuses trusted
+local checkpoints only when their checkpoint and effective-config hashes match
+their recorded calibration provenance.
 
 The bounded Llama and Qwen fixtures use two decoder layers, GQA with two query
 heads and one KV head, native context 128, calibration samples of eight tokens,
@@ -310,52 +311,43 @@ PPL and generated IDs are execution evidence, not pretrained quality. Large
 pretrained accuracy, full 2048-token model capacity and NPU integer behavior or
 performance remain outside this runner's scope.
 
-For a separate calibration-change diagnostic, create the negative checkpoint with
-an absolute script invocation from the starting checkout. This imports that
-checkout normally and verifies the actual TICO import path. The saved FP source,
-calibration tensors and effective config are shared; the resulting frozen
-checkpoint remains separate from the correctly calibrated candidate:
+Missing-cache-coverage rejection and frozen-state preservation are covered by the
+focused CPU regression suite, including models that intentionally omit the
+required calibration path:
 
 ```bash
-cd /path/to/starting-checkout
-PYTHONPATH=/path/to/starting-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-python /path/to/candidate/tico/quantization/recipes/debug/cpu_validation.py \
-  --stage _baseline_calibration --repo /path/to/starting-checkout \
-  --fixtures /path/to/cpu-validation-NEW/fixtures \
-  --output /path/to/calibration-before-NEW
-
-cd /path/to/candidate
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 python -m tico.quantization.recipes.debug.cpu_validation \
-  --stage _legacy_rejection \
-  --checkpoint /path/to/calibration-before-NEW/qwen3_vl.missing-cache-coverage.pt \
-  --output /path/to/legacy-rejection-NEW
+  --stage coverage --output ./out/cpu-coverage-NEW
 ```
 
-The first diagnostic passes when it reproduces missing past-cache coverage in
-that starting revision; its checkpoint is explicitly invalid for static decode.
-The second passes when the candidate rejects each layer's decode export preflight
-with calibration guidance and preserves all frozen weights/observers/qparams.
-This is a calibration-change negative test, not numerical exporter equivalence
-for an invalid old checkpoint. Neither diagnostic repairs or overwrites it.
+### Replay saved connected Qwen calls
 
-A connected-chain strict failure can be diagnosed with the exact saved host calls,
-using the same valid checkpoint and the starting checkout's saved Circle stages:
+A connected-chain result can be reproduced from the bounded Qwen fixture's saved
+host calls without recalibration or re-export. Select a source checkout that can
+load the same trusted frozen checkpoint and supports the recorded stage
+boundaries. Supply its matching saved Circle stages and the original connected
+run's evidence directory. Run the tool by absolute path from that checkout so
+normal imports select the intended TICO source:
 
 ```bash
-cd /path/to/starting-checkout
-PYTHONPATH=/path/to/starting-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+cd /path/to/reference-checkout
+PYTHONPATH=/path/to/reference-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 OPENBLAS_NUM_THREADS=1 \
-python /path/to/candidate/tico/quantization/recipes/debug/cpu_validation.py \
-  --stage _baseline_connected --repo /path/to/starting-checkout \
+python /path/to/tool-checkout/tico/quantization/recipes/debug/cpu_validation.py \
+  --stage replay --repo /path/to/reference-checkout \
   --checkpoint /path/to/cpu-validation-NEW/fixtures/qwen3_vl.pt \
   --evidence /path/to/cpu-validation-NEW/qwen3_vl-16-connected \
   --artifacts /path/to/cpu-validation-NEW/qwen3_vl-16/baseline/before/artifacts \
-  --output /path/to/connected-baseline-replay-NEW
+  --output /path/to/connected-replay-NEW
 ```
 
-Replay checks the checkpoint hash, executes the real baseline adapters and runtime,
-and saves every output. A successful reproduction means all saved host inputs and
-both Torch/Circle output arrays match the original run exactly. The separate
-`strict_torch_circle_status` retains the numerical parity verdict; an identical
-baseline failure does not become strict parity success. Repeat with capacity 32's
-evidence and artifacts when that profile needs diagnosis.
+Replay verifies the imported checkout and checkpoint hash, executes the real
+adapters and runtime, and saves every output. It requires complete indexed input
+and output array sets with matching counts, shapes and dtypes, and rejects
+nonfinite values. A successful reproduction means all saved host inputs and both
+Torch/Circle output arrays match the original run exactly. The separate
+`strict_torch_circle_status` retains the numerical parity verdict; reproducing a
+strict failure does not turn it into parity success. Repeat with capacity 32's
+evidence and matching artifacts when needed. This mode replays the CPU fixture's
+supported stage layout, not arbitrary model graphs.

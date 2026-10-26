@@ -24,19 +24,20 @@ prove pretrained-model accuracy or final Circle equivalence. Length-dependent
 RoPE is evaluated at the selected export capacity; comparisons must use that
 same profile rather than an unrelated eager history/length.
 
-## New checkpoints
+## Capturing the rotary source
 
-Construct and calibrate wrappers with the patched code. No new YAML option is
-required. New snapshots are saved in full-model pickle checkpoints. A normal
-state-dict load into newly constructed wrappers gets the source from the new
+Construct and calibrate wrappers from the matching HF model. No additional YAML
+option is required. Rotary snapshots are saved in full-model pickle checkpoints.
+A normal state-dict load into newly constructed wrappers gets the source from the
 constructor; the source checkpoint/config must still match.
 
-## Existing full-model pickle checkpoints
+## Migrating checkpoints without a canonical source
 
-Old checkpoints can retain incorrect layer tables or the previous isolation
-patch's intentionally legacy snapshot. Export refuses these sources with an
-explicit migration error instead of silently using them. Recreating a checkpoint
-with the new code is preferred for final quality measurements.
+Legacy full-model pickle checkpoints can retain unscaled standalone layer tables
+or a rotary snapshot without canonical model-level provenance. Export refuses
+these sources with an explicit migration error instead of silently using them.
+Reconstructing and calibrating the model with the matching rotary source is
+preferred for final quality measurements.
 
 To reuse a trusted frozen checkpoint for diagnosis without recalibration:
 
@@ -79,7 +80,7 @@ or NPU validation command.
 
 ## 2. Real-checkpoint export isolation
 
-For an OLD checkpoint, opt in to candidate-only migration:
+For a checkpoint that lacks a canonical rotary source, opt in to migration:
 
 ```bash
 python tico/quantization/recipes/debug/export_regression.py isolation \
@@ -91,31 +92,39 @@ python tico/quantization/recipes/debug/export_regression.py isolation \
   --output /absolute/path/to/new-results/llama-unified-isolation
 ```
 
-For a NEW unified checkpoint, omit `--migrate-llama-rope`. Use longer eager stress
-only if the checkpoint's recorded capacity allows it. The runner checks frozen
-state before and after migration, then exports before and after eager stress.
-`environment.json` records the migration provenance.
+For a checkpoint with a valid canonical source, omit `--migrate-llama-rope`. Use
+longer eager stress only if the checkpoint's recorded capacity allows it. When
+migration is requested, the runner checks frozen state before and after it, then
+exports before and after eager stress. `environment.json` records migration
+provenance.
 
-## 3. Old/new diagnostic comparison
+## 3. Two-revision diagnostic comparison
 
-Use the same pre-PR checkpoint in both workers and the pre-PR baseline `bb09ca8`:
+Select a baseline revision and a config matching a trusted frozen checkpoint that
+both checkouts can load. Record the resolved source revisions with the result.
+The following example opts in to candidate-only migration for a legacy rotary
+source; omit that option when both workers can use its canonical source directly:
 
 ```bash
-git worktree add --detach ../TICO-export-baseline bb09ca852b0ca1b1a6271cfe1e10c162104c997e
+BASELINE_REF=your-recorded-baseline-ref
+EXPORT_CONFIG=/absolute/path/to/matching_llama_export.yaml
+FROZEN_CHECKPOINT=/absolute/path/to/frozen_llama.pt
+git worktree add --detach ../TICO-export-baseline "$BASELINE_REF"
 python tico/quantization/recipes/debug/export_regression.py run \
   --baseline-repo ../TICO-export-baseline --candidate-repo . \
-  --config tico/quantization/examples/configs/llama_export.yaml \
-  --checkpoint /absolute/path/to/pre_pr_frozen.pt \
+  --config "$EXPORT_CONFIG" \
+  --checkpoint "$FROZEN_CHECKPOINT" \
   --migrate-llama-rope \
-  --legacy-calibration-length \
   --seq-len 2048 --eager-seq-len 1536 --decode-steps 4 \
-  --output /absolute/path/to/new-results/llama-old-new
+  --output /absolute/path/to/new-results/llama-comparison
 ```
 
-The explicit length bridge is required for this historical exporter; current
-exporters preserve the configured calibration length by default. It does not
-recalibrate the checkpoint or verify calibration/export length independence.
-The baseline remains unchanged. The candidate migration preserves frozen
+If the selected baseline reads static capacity from `calibration.seq_len`, add
+`--legacy-calibration-length`. This explicit bridge is unnecessary for exporters
+that read `export.max_seq_len`. It does not recalibrate the checkpoint or verify
+calibration/export length independence.
+
+The baseline remains unchanged. Candidate-only migration preserves frozen
 weights/qparams, but corrected RoPE may change host arrays, conversion probe
 inputs, and outputs. Those differences still produce `FAIL` (exit 1); there is
 no broad "expected difference" exemption. Review them alongside the focused HF
@@ -124,5 +133,6 @@ unexpected differences still require investigation. Do not loosen tolerances
 simply to hide the correction.
 
 See [STATIC_EXPORT_REGRESSION.md](STATIC_EXPORT_REGRESSION.md) for detailed
-artifact comparison semantics and resource requirements. Qwen3-VL and Gemma4
-retain the previous isolation behavior; the migration option is LLaMA-only.
+artifact comparison semantics and resource requirements. The migration option
+is LLaMA-only; Qwen3-VL and Gemma4 have their own checkpoint and cache-readiness
+requirements.

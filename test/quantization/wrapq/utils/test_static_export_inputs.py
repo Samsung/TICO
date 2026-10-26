@@ -423,7 +423,7 @@ class TestQwenStaticInputs(unittest.TestCase):
     def test_legacy_tables_and_bounds(self):
         owner = _QwenOwner()
         del owner._export_rotary_emb
-        with self.assertRaisesRegex(ValueError, "intermediate"):
+        with self.assertRaisesRegex(ValueError, "requires valid legacy rotary tables"):
             prepare_qwen3_vl_static_text_inputs(owner, 4)
         owner.position_ids_template = torch.arange(8).view(1, 1, -1).expand(3, 1, -1)
         owner.cos_template = torch.full((1, 8, 4), 2.0)

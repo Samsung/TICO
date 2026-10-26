@@ -78,9 +78,10 @@ def prepare_qwen3_vl_static_text_inputs(owner, max_seq_len):
         snapshot = getattr(owner, "_export_rotary_emb", None)
         if snapshot is None:
             raise ValueError(
-                "This intermediate Qwen3-VL checkpoint has neither legacy tables "
-                "nor a frozen export rotary snapshot. Use a pre-PR checkpoint or "
-                "regenerate it with the static-input isolation code."
+                "Qwen3-VL static export requires valid legacy rotary tables or "
+                "a frozen export rotary snapshot; this checkpoint has neither. "
+                "Recreate the quantized checkpoint from the original model and "
+                "configuration using the current wrapper and calibration workflow."
             )
         positions = owner._compute_3d_position_ids(
             device=device,
@@ -90,7 +91,7 @@ def prepare_qwen3_vl_static_text_inputs(owner, max_seq_len):
             spatial_merge_size=owner._get_spatial_merge_size(owner.qcfg),
         )
         rotary = copy.deepcopy(snapshot).to(device)
-        # The historical full-text templates used the default float32 dummy.
+        # Match the float32 dummy input used by legacy full-text rotary tables.
         cos, sin = rotary(torch.empty(0, device=device, dtype=torch.float32), positions)
     return Qwen3VLStaticTextInputs(
         positions, cos, sin, float(owner.qcfg.attention_mask_fill_value)

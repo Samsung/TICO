@@ -156,8 +156,6 @@ def _fixtures(root: Path, seed: int) -> None:
     for family in ("llama", "qwen3_vl"):
         ctx = fixture_context(family, seed=seed)
         geometry = ctx.model.config.to_dict()
-        torch.save(ctx.model, root / f"{family}.fp-source.pt")
-        torch.save(ctx.calibration_inputs, root / f"{family}.calibration-inputs.pt")
         count = sum(parameter.numel() for parameter in ctx.model.parameters())
         print(
             f"{family}: {count} parameters, approximately {4 * count} FP32 parameter bytes",
@@ -175,10 +173,6 @@ def _fixtures(root: Path, seed: int) -> None:
                 "parameters": count,
                 "approximate_fp32_parameter_bytes": 4 * count,
                 "checkpoint_sha256": _file_sha256(checkpoint),
-                "fp_source_sha256": _file_sha256(root / f"{family}.fp-source.pt"),
-                "calibration_inputs_sha256": _file_sha256(
-                    root / f"{family}.calibration-inputs.pt"
-                ),
                 "config_sha256": _file_sha256(root / f"{family}.json"),
                 "calibration_tokens_per_sample": 8,
                 "calibration_samples": 2,
@@ -188,147 +182,55 @@ def _fixtures(root: Path, seed: int) -> None:
         )
 
 
-def _baseline_calibration(options: argparse.Namespace) -> int:
-    """Create a separate negative fixture with the starting checkout's real PTQ."""
-    import torch
+def _replay_array_keys(record: dict[str, Any]) -> set[str]:
+    """Require explicit input/output counts before interpreting saved arrays."""
+    inputs, outputs = record.get("input_count"), record.get("output_count")
+    if type(inputs) is not int or inputs < 0:
+        raise ValueError("Connected replay input_count must be a nonnegative integer.")
+    if type(outputs) is not int or outputs < 1:
+        raise ValueError("Connected replay output_count must be a positive integer.")
+    return {
+        f"{kind}_{index}"
+        for kind, count in (("input", inputs), ("torch", outputs), ("circle", outputs))
+        for index in range(count)
+    }
 
-    import tico
 
-    from tico.quantization.recipes.adapters import resolve_adapter
-    from tico.quantization.recipes.context import RecipeContext
-    from tico.quantization.recipes.debug.export_regression import (
-        _file_sha256,
-        _state_contract,
-    )
-    from tico.quantization.recipes.stages.ptq import PTQStage
+def _load_replay_evidence(evidence: Path) -> dict[str, Any]:
+    """Reject empty or malformed replay stages before loading the checkpoint."""
+    source = json.loads((evidence / "summary.json").read_text())
+    if not isinstance(source, dict):
+        raise ValueError("Connected replay summary must be a mapping.")
+    stages = source.get("stages")
+    if not isinstance(stages, list) or not stages:
+        raise ValueError("Connected replay requires nonempty stage evidence.")
+    for stage in stages:
+        if not isinstance(stage, dict):
+            raise ValueError("Connected replay stage evidence must be a mapping.")
+        _replay_array_keys(stage)
+    return source
 
-    repo = Path(options.repo).resolve()
-    if not Path(tico.__file__).resolve().is_relative_to(repo):
-        raise RuntimeError(
-            "Baseline calibration imported TICO from a different checkout."
+
+def _same_replay_arrays(
+    previous, current: dict[str, Any], record: dict[str, Any]
+) -> bool:
+    """Compare complete saved evidence with exact numeric shape/dtype semantics."""
+    from tico.quantization.recipes.debug.export_regression import compare_arrays
+
+    expected = _replay_array_keys(record)
+    if len(previous.files) != len(set(previous.files)):
+        raise ValueError("Connected replay contains duplicate array keys.")
+    if set(previous.files) != expected or set(current) != expected:
+        raise ValueError(
+            "Connected replay evidence array keys do not match the declared input/output counts."
         )
-    torch.set_num_threads(1)
-    fixtures = Path(options.fixtures)
-    provenance = json.loads((fixtures / "qwen3_vl.provenance.json").read_text())
-    for filename, field in (
-        ("qwen3_vl.fp-source.pt", "fp_source_sha256"),
-        ("qwen3_vl.calibration-inputs.pt", "calibration_inputs_sha256"),
-        ("qwen3_vl.json", "config_sha256"),
-    ):
-        if _file_sha256(fixtures / filename) != provenance[field]:
-            raise ValueError(f"Baseline calibration source hash differs: {filename}")
-    cfg = json.loads((fixtures / "qwen3_vl.json").read_text())
-    model = torch.load(
-        fixtures / "qwen3_vl.fp-source.pt", map_location="cpu", weights_only=False
-    )
-    inputs = torch.load(
-        fixtures / "qwen3_vl.calibration-inputs.pt",
-        map_location="cpu",
-        weights_only=True,
-    )
-    ctx = RecipeContext(
-        cfg=cfg, adapter=resolve_adapter(cfg), model=model, calibration_inputs=inputs
-    )
-    PTQStage().run(ctx, cfg["pipeline"][0])
-    root = Path(options.output)
-    root.mkdir(parents=True, exist_ok=False)
-    checkpoint = root / "qwen3_vl.missing-cache-coverage.pt"
-    torch.save(ctx.model, checkpoint)
-    missing = []
-    for name, observer in ctx.model.named_modules():
-        if name.rsplit(".", 1)[-1] not in {"obs_past_key", "obs_past_value"}:
-            continue
-        minimum = getattr(observer, "min_val", None)
-        maximum = getattr(observer, "max_val", None)
-        if (
-            isinstance(minimum, torch.Tensor)
-            and isinstance(maximum, torch.Tensor)
-            and not bool(
-                torch.isfinite(minimum).all() and torch.isfinite(maximum).all()
-            )
-        ):
-            missing.append(name)
-    git = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    state = _state_contract(ctx.model)
-    _write(root / "state.json", state)
-    _write(
-        root / "summary.json",
-        {
-            "status": "PASS" if missing else "FAIL",
-            "purpose": "Reproduce the starting checkout's missing past-cache coverage with an independent frozen checkpoint.",
-            "code_sha": git.stdout.strip(),
-            "tico_import": str(Path(tico.__file__).resolve()),
-            "checkpoint_sha256": _file_sha256(checkpoint),
-            "source_fp_sha256": provenance["fp_source_sha256"],
-            "calibration_inputs_sha256": provenance["calibration_inputs_sha256"],
-            "config_sha256": provenance["config_sha256"],
-            "missing_observers": missing,
-            "checkpoint_usable_for_static_decode": not missing,
-            "state_sha256": hashlib.sha256(
-                json.dumps(state, sort_keys=True).encode()
-            ).hexdigest(),
-        },
-    )
-    return 0 if missing else 1
-
-
-def _legacy_rejection(options: argparse.Namespace) -> int:
-    """Reject the separate invalid checkpoint without repairing any frozen state."""
-    import torch
-
-    from tico.quantization.recipes.debug.export_regression import (
-        _file_sha256,
-        _state_contract,
-    )
-    from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_decoder_layer import (
-        QuantQwen3VLTextDecoderLayer,
+    return all(
+        compare_arrays(current[key], previous[key], atol=0, rtol=0)["ok"]
+        for key in sorted(expected)
     )
 
-    torch.set_num_threads(1)
-    root = Path(options.output)
-    root.mkdir(parents=True, exist_ok=False)
-    model = torch.load(options.checkpoint, map_location="cpu", weights_only=False)
-    before = _state_contract(model)
-    diagnostics = []
-    layers = [
-        module
-        for module in model.modules()
-        if isinstance(module, QuantQwen3VLTextDecoderLayer)
-    ]
-    if not layers:
-        raise ValueError("The negative fixture has no Qwen text decoder layers.")
-    for layer in layers:
-        try:
-            layer.as_export_module("decode", return_kv=True)
-        except RuntimeError as error:
-            if "Uncalibrated Qwen cache observer" not in str(error):
-                raise
-            diagnostics.append(str(error))
-        else:
-            raise AssertionError("An uncalibrated static decode adapter was accepted.")
-    preserved = before == _state_contract(model)
-    _write(
-        root / "summary.json",
-        {
-            "status": "PASS" if preserved else "FAIL",
-            "checkpoint_sha256": _file_sha256(Path(options.checkpoint)),
-            "rejected_layers": len(diagnostics),
-            "diagnostics": diagnostics,
-            "frozen_state_preserved": preserved,
-            "stage": "static decode adapter export preflight",
-            "automatic_repair": False,
-        },
-    )
-    return 0 if preserved else 1
 
-
-def _baseline_connected(options: argparse.Namespace) -> int:
+def _replay_connected(options: argparse.Namespace) -> int:
     """Replay saved connected host calls through the selected real source/runtime."""
     import re
 
@@ -363,7 +265,7 @@ def _baseline_connected(options: argparse.Namespace) -> int:
     torch.set_num_threads(1)
     root, evidence = Path(options.output), Path(options.evidence)
     root.mkdir(parents=True, exist_ok=False)
-    source = json.loads((evidence / "summary.json").read_text())
+    source = _load_replay_evidence(evidence)
     checkpoint = Path(options.checkpoint)
     if _file_sha256(checkpoint) != source["checkpoint_sha256"]:
         raise ValueError("Connected replay checkpoint differs from the original run.")
@@ -423,40 +325,35 @@ def _baseline_connected(options: argparse.Namespace) -> int:
                 or len(actual) != original["output_count"]
             ):
                 raise RuntimeError("Connected replay output count changed.")
+            values: dict[str, Any] = {
+                f"input_{i}": _array(value) for i, value in enumerate(bound)
+            }
+            for kind, tensors in (("torch", golden), ("circle", actual)):
+                values.update(
+                    {f"{kind}_{i}": _array(value) for i, value in enumerate(tensors)}
+                )
             with np.load(
                 evidence / original["evidence"], allow_pickle=False
             ) as previous:
-                exact = (
-                    len(bound) == original["input_count"]
-                    and mode.value == original["mode"]
-                )
-                values: dict[str, Any] = {
-                    f"input_{i}": _array(value) for i, value in enumerate(bound)
-                }
+                exact = _same_replay_arrays(previous, values, original)
+                exact = exact and mode.value == original["mode"]
                 outputs = []
-                for i, value in enumerate(bound):
-                    exact = exact and np.array_equal(
-                        _array(value), previous[f"input_{i}"]
-                    )
                 for i, (left, right) in enumerate(zip(golden, actual)):
                     left, right = _array(left), _array(right)
-                    exact = (
-                        exact
-                        and np.array_equal(left, previous[f"torch_{i}"])
-                        and np.array_equal(right, previous[f"circle_{i}"])
-                    )
-                    values[f"torch_{i}"], values[f"circle_{i}"] = left, right
                     result = compare_arrays(left, right, atol=1e-5, rtol=1e-4)
-                    mismatch = np.argwhere(
-                        ~np.isclose(left, right, atol=1e-5, rtol=1e-4, equal_nan=False)
-                    )
-                    if len(mismatch):
-                        coordinate = tuple(int(v) for v in mismatch[0])
-                        result["first_difference"] = {
-                            "index": list(coordinate),
-                            "torch": float(left[coordinate]),
-                            "circle": float(right[coordinate]),
-                        }
+                    if left.shape == right.shape and left.dtype == right.dtype:
+                        mismatch = np.argwhere(
+                            ~np.isclose(
+                                left, right, atol=1e-5, rtol=1e-4, equal_nan=False
+                            )
+                        )
+                        if len(mismatch):
+                            coordinate = tuple(int(v) for v in mismatch[0])
+                            result["first_difference"] = {
+                                "index": list(coordinate),
+                                "torch": float(left[coordinate]),
+                                "circle": float(right[coordinate]),
+                            }
                     outputs.append(result)
                 if any(not np.isfinite(value).all() for value in values.values()):
                     raise ValueError("Connected replay contains nonfinite evidence.")
@@ -485,7 +382,7 @@ def _baseline_connected(options: argparse.Namespace) -> int:
         root / "summary.json",
         {
             "status": "PASS" if same and preserved else "FAIL",
-            "purpose": "Exact same-input starting-HEAD reproduction; strict Torch/Circle failures remain failures.",
+            "purpose": "Exact same-input connected replay; strict Torch/Circle parity is reported separately.",
             "code_sha": git.stdout.strip(),
             "tico_import": str(Path(tico.__file__).resolve()),
             "checkpoint_sha256": _file_sha256(checkpoint),
@@ -634,6 +531,7 @@ def _run(options: argparse.Namespace) -> int:
     tests = {
         "regression": [
             "test.quantization.recipes.test_cpu_fixtures",
+            "test.quantization.recipes.test_cpu_validation",
             "test.quantization.recipes.test_export_regression",
             "test.quantization.wrapq.utils.test_static_export_inputs",
             "test.quantization.wrapq.wrappers.llama.test_rope_consistency",
@@ -789,12 +687,10 @@ def main(argv=None) -> int:
             "coverage",
             "evaluation",
             "circle",
+            "replay",
             "_fixtures",
             "_connected",
             "_tests",
-            "_baseline_calibration",
-            "_legacy_rejection",
-            "_baseline_connected",
         ),
         default="all",
     )
@@ -805,26 +701,42 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--baseline-repo",
-        help="Starting-HEAD checkout for same-checkpoint exporter comparison.",
+        help="Baseline checkout for same-checkpoint exporter comparison.",
     )
     parser.add_argument(
         "--test-module", action="append", default=[], help=argparse.SUPPRESS
     )
-    parser.add_argument("--evidence", help=argparse.SUPPRESS)
-    parser.add_argument("--repo", help=argparse.SUPPRESS)
-    parser.add_argument("--checkpoint", help=argparse.SUPPRESS)
-    parser.add_argument("--artifacts", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--evidence", help="Original connected-run evidence directory for replay."
+    )
+    parser.add_argument(
+        "--repo", help="Checkout providing the imported TICO package for replay."
+    )
+    parser.add_argument(
+        "--checkpoint",
+        help="Trusted frozen checkpoint for connected execution or replay.",
+    )
+    parser.add_argument(
+        "--artifacts",
+        help="Directory of saved Circle stages for connected execution or replay.",
+    )
     parser.add_argument("--capacity", type=int, default=16, help=argparse.SUPPRESS)
     options = parser.parse_args(argv)
     if Path(options.output).exists():
         parser.error("Output already exists; choose a new directory.")
+    if options.stage == "replay":
+        required = ("repo", "checkpoint", "evidence", "artifacts")
+        missing = ["--" + name for name in required if not getattr(options, name)]
+        if missing:
+            parser.error("Replay requires " + ", ".join(missing) + ".")
+        for name in ("repo", "evidence", "artifacts"):
+            if not Path(getattr(options, name)).is_dir():
+                parser.error(f"Replay --{name} must be an existing directory.")
+        if not Path(options.checkpoint).is_file():
+            parser.error("Replay --checkpoint must be an existing file.")
     try:
-        if options.stage == "_baseline_connected":
-            return _baseline_connected(options)
-        if options.stage == "_baseline_calibration":
-            return _baseline_calibration(options)
-        if options.stage == "_legacy_rejection":
-            return _legacy_rejection(options)
+        if options.stage == "replay":
+            return _replay_connected(options)
         if options.stage == "_tests":
             import unittest
 
