@@ -24,6 +24,7 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaAttentionDecodeExportAdapter,
@@ -420,11 +421,132 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertEqual(
             v1.shape, (batch_size, self.n_kv, seq_prefill + seq_decode, self.head_dim)
         )
-        # Decode with a legacy tuple past may requantize the cached prefix through
-        # obs_past_key/obs_past_value and obs_present_key/obs_present_value before
-        # returning the full present cache, so exact prefix equality is not guaranteed.
-        self.assertEqual(k1[:, :, :seq_prefill, :].shape, k0.shape)
-        self.assertEqual(v1[:, :, :seq_prefill, :].shape, v0.shape)
+        torch.testing.assert_close(k1[:, :, :seq_prefill, :], k0, rtol=0, atol=0)
+        torch.testing.assert_close(v1[:, :, :seq_prefill, :], v0, rtol=0, atol=0)
+
+    def test_storage_and_compute_grids_are_branch_local(self):
+        """Keep cache storage independent from the attention compute grid."""
+        qcfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
+            model_args={"profile": "npu_export"},
+        )
+        qattn = self._make_qattn(qcfg)
+
+        storage_scale, storage_zp = 0.0625, 113
+        compute_scale, compute_zp = 0.3125, 91
+        diagnostic_scale, diagnostic_zp = 0.1875, 127
+        for observer in (qattn.obs_new_k, qattn.obs_new_v):
+            assert isinstance(observer, AffineObserverBase)
+            observer.load_qparams(torch.tensor(storage_scale), torch.tensor(storage_zp))
+        for observer in (qattn.obs_present_key, qattn.obs_present_value):
+            assert isinstance(observer, AffineObserverBase)
+            observer.load_qparams(torch.tensor(compute_scale), torch.tensor(compute_zp))
+        for observer in (qattn.obs_past_key, qattn.obs_past_value):
+            assert isinstance(observer, AffineObserverBase)
+            observer.load_qparams(
+                torch.tensor(diagnostic_scale), torch.tensor(diagnostic_zp)
+            )
+
+        def quantize(value, scale, zero_point):
+            return torch.fake_quantize_per_tensor_affine(
+                value, scale, zero_point, 0, 255
+            )
+
+        past_k = torch.tensor(
+            [-0.31, -0.07, 0.11, 0.29, 0.43, 0.67, 0.83, 1.09]
+        ).reshape(1, 1, 2, 4)
+        past_v = -past_k
+        current_k = torch.tensor([0.2, -0.2, 0.48, -0.48]).reshape(1, 1, 4)
+        current_v = -current_k
+
+        storage_past = qattn._normalize_past_key_value((past_k, past_v))
+        assert storage_past is not None
+        past_k_i, past_v_i = qattn._get_past_kv_head(
+            past_key_value=storage_past,
+            kv_idx=0,
+        )
+        compute = qattn._build_present_kv_head(
+            past_k_i=past_k_i,
+            past_v_i=past_v_i,
+            new_k_i=current_k,
+            new_v_i=current_v,
+        )
+        delta = qattn._finalize_cache_output(
+            past_key_value_in=(past_k, past_v),
+            past_key_value=storage_past,
+            new_k_parts=[current_k],
+            new_v_parts=[current_v],
+            cache_output_mode="delta",
+        )
+        full_storage = qattn._finalize_cache_output(
+            past_key_value_in=(past_k, past_v),
+            past_key_value=storage_past,
+            new_k_parts=[current_k],
+            new_v_parts=[current_v],
+            cache_output_mode="present",
+        )
+
+        expected_storage_past = (
+            quantize(past_k, storage_scale, storage_zp),
+            quantize(past_v, storage_scale, storage_zp),
+        )
+        expected_delta = (
+            quantize(current_k.unsqueeze(1), storage_scale, storage_zp),
+            quantize(current_v.unsqueeze(1), storage_scale, storage_zp),
+        )
+        expected_compute = (
+            quantize(
+                torch.cat(
+                    (
+                        quantize(
+                            expected_storage_past[0][:, 0],
+                            compute_scale,
+                            compute_zp,
+                        ),
+                        quantize(current_k, compute_scale, compute_zp),
+                    ),
+                    dim=1,
+                ),
+                compute_scale,
+                compute_zp,
+            ),
+            quantize(
+                torch.cat(
+                    (
+                        quantize(
+                            expected_storage_past[1][:, 0],
+                            compute_scale,
+                            compute_zp,
+                        ),
+                        quantize(current_v, compute_scale, compute_zp),
+                    ),
+                    dim=1,
+                ),
+                compute_scale,
+                compute_zp,
+            ),
+        )
+        expected_full_storage = (
+            torch.cat((expected_storage_past[0], expected_delta[0]), dim=2),
+            torch.cat((expected_storage_past[1], expected_delta[1]), dim=2),
+        )
+
+        for actual, expected in zip(compute, expected_compute):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert isinstance(delta, tuple)
+        for actual, expected in zip(delta, expected_delta):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert isinstance(full_storage, tuple)
+        for actual, expected in zip(full_storage, expected_full_storage):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        # A diagnostic past grid must not affect storage or compute values.
+        self.assertFalse(
+            torch.equal(
+                expected_storage_past[0],
+                quantize(past_k, diagnostic_scale, diagnostic_zp),
+            )
+        )
 
     def test_forward_shapes_and_cache_delta_decode(self):
         torch.manual_seed(1)

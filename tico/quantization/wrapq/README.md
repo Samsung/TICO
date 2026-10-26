@@ -96,6 +96,13 @@ returns signed float32 tensor differences at every depth, including tensors in l
 tuples, dictionaries, and object fields. The default returns tensor difference
 statistics. `compare_side_by_side()` uses full differences for `interesting_modules`.
 
+LLaMA attention keeps persistent KV-cache storage in the `new_k`/`new_v`
+quantization domains for prefill outputs, decode inputs, and both delta and full
+cache outputs. Attention converts past and current KV tensors independently to
+the `present_key`/`present_value` compute domains before concatenation. The
+`past_key`/`past_value` observers collect calibration diagnostics only; they do not
+define serialized cache domains.
+
 ---
 
 ## 5. Extensibility
