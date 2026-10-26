@@ -325,11 +325,14 @@ python tico/quantization/recipes/debug/export_regression.py compare \
 Do not loosen tolerances to hide qparam, host-array, constant, or I/O changes;
 those comparisons are intentionally exact and unaffected by numerical tolerances.
 
-## CPU 검증
+## CPU validation
 
-작은 무작위 HF 모델로 frozen Quant generation, 표준 PTQ cache 관측, PPL 채점과
-export 격리를 검사한다. 기본 runner는 실제 Circle 변환·실행과 연결된 Qwen 이미지
-cache 검사도 포함한다. [debug README](../debug/README.md)의 명령으로 새 결과
-디렉터리에 실행하며, 실행 환경은 `environment.json`, 단계별 상태와 로그 경로는
-`summary.json`에 기록한다. 무작위 모델의 결과는 pretrained 품질 점수가 아니며,
-대형 모델의 전체 변환과 NPU 수치·성능 검증은 별도로 수행한다.
+Small randomly initialized HF models exercise frozen quantized generation,
+standard PTQ cache observation, PPL scoring, and export isolation. The default
+runner also performs actual Circle conversion and execution, including connected
+Qwen image-conditioned cache checks. Follow the commands in the
+[debug README](../debug/README.md) and use a new results directory. The runner
+records the execution environment in `environment.json` and stage statuses and
+log paths in `summary.json`. Random-model results do not measure pretrained
+quality. Full large-model conversion and NPU numerical and performance validation
+require separate checks.
