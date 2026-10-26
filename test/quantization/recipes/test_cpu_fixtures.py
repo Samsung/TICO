@@ -26,7 +26,7 @@ from tico.quantization.recipes.debug.cpu_fixtures import (
     qwen_batch,
     qwen_model,
 )
-from tico.quantization.recipes.debug.cpu_followup import _command
+from tico.quantization.recipes.debug.cpu_validation import _command
 
 
 class TestCPUFixtures(unittest.TestCase):
@@ -103,7 +103,7 @@ class TestCPUFixtures(unittest.TestCase):
         import json
         from unittest.mock import patch
 
-        from tico.quantization.recipes.debug.cpu_followup import main
+        from tico.quantization.recipes.debug.cpu_validation import main
 
         class Skipped(unittest.TestCase):
             @unittest.skip("Deliberate fixture skip")

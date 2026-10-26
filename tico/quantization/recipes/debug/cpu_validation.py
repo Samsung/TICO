@@ -14,7 +14,7 @@
 
 """Run download-free CPU recipe checks, including real saved Circle execution.
 
-Invoke with ``python -m tico.quantization.recipes.debug.cpu_followup`` from an
+Invoke with ``python -m tico.quantization.recipes.debug.cpu_validation`` from an
 installed development checkout. Each invocation requires a new output directory.
 All original child exit codes, configurations and logs remain available there.
 """
@@ -647,7 +647,7 @@ def _run(options: argparse.Namespace) -> int:
             command = [
                 sys.executable,
                 "-m",
-                "tico.quantization.recipes.debug.cpu_followup",
+                "tico.quantization.recipes.debug.cpu_validation",
                 "--stage",
                 "_tests",
                 "--output",
@@ -667,7 +667,7 @@ def _run(options: argparse.Namespace) -> int:
                 [
                     sys.executable,
                     "-m",
-                    "tico.quantization.recipes.debug.cpu_followup",
+                    "tico.quantization.recipes.debug.cpu_validation",
                     "--stage",
                     "_fixtures",
                     "--output",
@@ -746,7 +746,7 @@ def _run(options: argparse.Namespace) -> int:
                     [
                         sys.executable,
                         "-m",
-                        "tico.quantization.recipes.debug.cpu_followup",
+                        "tico.quantization.recipes.debug.cpu_validation",
                         "--stage",
                         "_connected",
                         "--output",

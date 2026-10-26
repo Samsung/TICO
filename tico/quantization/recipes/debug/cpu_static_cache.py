@@ -23,7 +23,7 @@ import torch
 
 from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
 from tico.quantization.recipes.debug.cpu_fixtures import qwen_batch
-from tico.quantization.recipes.debug.cpu_followup import _write
+from tico.quantization.recipes.debug.cpu_validation import _write
 from tico.quantization.recipes.debug.export_regression import (
     _array,
     _file_sha256,

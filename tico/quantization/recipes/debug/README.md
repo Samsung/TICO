@@ -256,7 +256,7 @@ Before merging a new debug utility:
 - It does not import from another example script.
 - It has at least a small smoke test or documented manual command.
 
-## Download-free CPU recipe follow-up
+## Download-free CPU recipe validation
 
 The CPU runner creates deterministic random HF models, uses the real adapters and
 PTQ stage, and executes saved Circle files with the reference runtime. No model
@@ -264,8 +264,8 @@ weights or datasets are downloaded. Run it from the installed development tree:
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-python -m tico.quantization.recipes.debug.cpu_followup \
-  --output ./out/cpu-followup-NEW
+python -m tico.quantization.recipes.debug.cpu_validation \
+  --output ./out/cpu-validation-NEW
 ```
 
 The default runs static/comparator regressions, real generation, cache coverage,
@@ -319,13 +319,13 @@ checkpoint remains separate from the correctly calibrated candidate:
 ```bash
 cd /path/to/starting-checkout
 PYTHONPATH=/path/to/starting-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-python /path/to/candidate/tico/quantization/recipes/debug/cpu_followup.py \
+python /path/to/candidate/tico/quantization/recipes/debug/cpu_validation.py \
   --stage _baseline_calibration --repo /path/to/starting-checkout \
-  --fixtures /path/to/cpu-followup-NEW/fixtures \
+  --fixtures /path/to/cpu-validation-NEW/fixtures \
   --output /path/to/calibration-before-NEW
 
 cd /path/to/candidate
-python -m tico.quantization.recipes.debug.cpu_followup \
+python -m tico.quantization.recipes.debug.cpu_validation \
   --stage _legacy_rejection \
   --checkpoint /path/to/calibration-before-NEW/qwen3_vl.missing-cache-coverage.pt \
   --output /path/to/legacy-rejection-NEW
@@ -345,11 +345,11 @@ using the same valid checkpoint and the starting checkout's saved Circle stages:
 cd /path/to/starting-checkout
 PYTHONPATH=/path/to/starting-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 OPENBLAS_NUM_THREADS=1 \
-python /path/to/candidate/tico/quantization/recipes/debug/cpu_followup.py \
+python /path/to/candidate/tico/quantization/recipes/debug/cpu_validation.py \
   --stage _baseline_connected --repo /path/to/starting-checkout \
-  --checkpoint /path/to/cpu-followup-NEW/fixtures/qwen3_vl.pt \
-  --evidence /path/to/cpu-followup-NEW/qwen3_vl-16-connected \
-  --artifacts /path/to/cpu-followup-NEW/qwen3_vl-16/baseline/before/artifacts \
+  --checkpoint /path/to/cpu-validation-NEW/fixtures/qwen3_vl.pt \
+  --evidence /path/to/cpu-validation-NEW/qwen3_vl-16-connected \
+  --artifacts /path/to/cpu-validation-NEW/qwen3_vl-16/baseline/before/artifacts \
   --output /path/to/connected-baseline-replay-NEW
 ```
 

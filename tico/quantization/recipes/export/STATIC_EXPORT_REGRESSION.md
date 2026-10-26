@@ -345,7 +345,7 @@ Llama의 calibration 8/export 16/eager 48+4 full-model 보완 검사는 strict P
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-python -m tico.quantization.recipes.debug.cpu_followup \
+python -m tico.quantization.recipes.debug.cpu_validation \
   --output /absolute/new-result-directory \
   --baseline-repo /absolute/starting-head-worktree
 ```
