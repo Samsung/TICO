@@ -144,9 +144,11 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
         return QuantGemma4TextAttention(
             Gemma4TextAttention(
                 _config(layer_type),
-                layer_idx=layer_index * 2
-                if layer_type == "sliding_attention"
-                else layer_index,
+                layer_idx=(
+                    layer_index * 2
+                    if layer_type == "sliding_attention"
+                    else layer_index
+                ),
             ).eval(),
             qcfg=config,
         ).eval()

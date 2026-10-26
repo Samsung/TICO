@@ -433,9 +433,11 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
                         for observer in storage
                     )
                     kwargs = {
-                        "shared_key_value"
-                        if attention.is_kv_shared_layer
-                        else "past_key_value": kv
+                        (
+                            "shared_key_value"
+                            if attention.is_kv_shared_layer
+                            else "past_key_value"
+                        ): kv
                     }
                     with torch.no_grad():
                         expected = decode(*args, **kwargs)
