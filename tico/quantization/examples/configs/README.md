@@ -240,16 +240,41 @@ independent past-cache observers: prefill output and decode input share the
 `new_*` storage grid. Positive `decode_steps` remains useful for calibrating
 decode activation ranges, but is not required to freeze or export either mode.
 
-Qwen static decode and frozen cached inference reject active cache observers
-without observed affine ranges and valid qparams. A frozen flag or finite scale
-alone is insufficient. Existing checkpoints with valid persisted ranges remain
-usable; checkpoints with missing/sentinel ranges require explicit recalibration.
-Prefill-only, `NO_QUANT`, identity and explicitly bypassed cache observers retain
-their valid uses. HF cache execution supports append-only dynamic caches; fixed
-or sliding buffers must use the static tuple/delta interface with external masks.
-HF cache storage and the static host buffer retain new-K/V delta values; past
-and present grids are applied to read-only attention values rather than written
-back into the cache.
+Qwen uses two independent KV domains. `new_k` and `new_v` own persistent
+storage (S); `present_key` and `present_value` own attention computation (C).
+Prefill outputs, decode inputs and decode deltas use the same S dtype, scale
+and zero-point. Current KV branches directly from the raw tensor into S and C;
+cached S values are converted to C before concatenation. Both attention Concat
+inputs and its output use C, even when S and C differ. A full `present` cache
+output remains in S. Reading a cache with `use_cache=False` does not modify it.
+
+Qwen prompt-only calibration (`decode_calibration_steps: 0`) collects both
+domains even when cache output is disabled, so it can prepare prefill and decode
+export without a separate past-cache calibration pass. Positive decode counts
+still improve general activation-distribution coverage; the default remains one.
+Padding is handled by the attention mask, without past-specific observer filtering.
+Active affine S/C observers require observed ranges and valid frozen qparams;
+a frozen flag or finite scale alone is insufficient. `NO_QUANT`, identity and
+explicitly bypassed observers retain their valid uses. Append-only HF dynamic
+caches and static host buffers retain S tensors; fixed or sliding HF buffers
+still require the static tuple/delta interface with external masks.
+
+Affine cache grids support independent S/C policies, including UINT8 and INT16.
+Matching MX storage/compute policies remain supported when their block axis
+does not cross sequence positions. Mixed MX/affine policies, differing MX
+configurations and sequence-axis cache quantization are explicitly rejected;
+they do not satisfy the same appendable cache contract. Matching MX eager
+execution and structural Circle export are separate from affine CPU parity:
+the Circle reference runtime does not currently provide an MX value codec.
+
+The obsolete `past_key` and `past_value` quantization overrides are rejected.
+Configure storage through `new_*` and compute through `present_*`, then reprepare
+and recalibrate. State dictionaries and serialized modules containing the old
+`obs_past_*` observers are also rejected; their three-domain qparams cannot be
+silently migrated into this two-domain contract. Discard caches produced by an
+old checkpoint when regenerating it. Preserve the version metadata attached to
+PyTorch `state_dict()` objects when saving and loading; removing that metadata
+also removes the evidence needed to distinguish the cache contract version.
 
 ## `model_args`
 
