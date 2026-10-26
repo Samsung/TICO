@@ -294,14 +294,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--kv_cache_key_qdtype",
         type=str,
-        default=None,
-        help="which activation types are supposed for KV cache key quantization. Defaults to linear_io_qdtype if not specified.",
+        choices=["int16", "uint8", "uint4"],
+        default="int16",
+        help="which activation types are supposed for KV cache key quantization. Defaults to int16 if not specified.",
     )
     parser.add_argument(
         "--kv_cache_value_qdtype",
         type=str,
-        default=None,
-        help="which activation types are supposed for KV cache value quantization. Defaults to linear_io_qdtype if not specified.",
+        choices=["int16", "uint8", "uint4"],
+        default="int16",
+        help="which activation types are supposed for KV cache value quantization. Defaults to int16 if not specified.",
     )
     parser.add_argument(
         "--kv_cache_key_observer",
@@ -419,8 +421,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--gptq_mse",
         type=str,
         default=None,
-        choices=["mse", "smse", "smse_for_gptq", "mse_for_gptq"],
-        help="Whether and how to use mse in gptq (none/mse/smse/smse_for_gptq/mse_for_gptq)",
+        choices=[
+            "mse",
+            "smse",
+            "mse_octav",
+            "smse_octav",
+            "smse_for_gptq",
+            "mse_for_gptq",
+        ],
+        help="Whether and how to use mse in gptq (none/mse/smse/mse_octav/smse_octav/smse_for_gptq/mse_for_gptq)",
     )
     parser.add_argument(
         "--max_seq_len",
