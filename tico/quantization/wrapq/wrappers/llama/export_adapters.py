@@ -541,6 +541,19 @@ class QuantLlamaForCausalLMDecodeExportAdapter(nn.Module):
         )
 
         logits = outputs.logits
-        new_key_values = outputs.past_key_values
+        cache = outputs.past_key_values
+        # The model updates the complete persistent cache. Select the delta at
+        # this export boundary without resetting or rewriting its HF layers.
+        if isinstance(cache, (tuple, list)):
+            full_cache = cache
+            cache_length = full_cache[0][0].size(2)
+        else:
+            full_cache = text_model._cache_to_legacy(cache)
+            cache_length = text_model._cache_seq_length(cache)
+        start = cache_length - input_ids.size(1)
+        new_key_values = tuple(
+            (key[:, :, start:cache_length, :], value[:, :, start:cache_length, :])
+            for key, value in full_cache
+        )
 
         return (logits, new_key_values)

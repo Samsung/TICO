@@ -277,7 +277,9 @@ class LlamaAdapter(ModelAdapter):
             for inp in iterator:
                 inp = inp.to(ctx.device)
                 if decode_steps <= 0:
-                    prepared_model(inp)
+                    # Cache outputs exercise the persistent storage observers
+                    # even when optional decode activation calibration is off.
+                    prepared_model(inp, use_cache=True)
                     continue
 
                 # Reserve dataset tokens for connected teacher-forced decode;

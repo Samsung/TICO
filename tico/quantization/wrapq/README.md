@@ -96,6 +96,26 @@ returns signed float32 tensor differences at every depth, including tensors in l
 tuples, dictionaries, and object fields. The default returns tensor difference
 statistics. `compare_side_by_side()` uses full differences for `interesting_modules`.
 
+LLaMA attention keeps persistent KV-cache storage in the `new_k`/`new_v`
+quantization domains for prefill outputs, decode inputs, and both delta and full
+cache outputs. Attention converts past and current KV tensors independently to
+the `present_key`/`present_value` compute domains before concatenation. Current KV
+producers branch directly to storage and compute, without routing compute through
+storage first. There are no `past_*` observers or independent read grids. Prefill
+and decode share the storage ABI, so cache deltas can be appended and reused
+without host requantization. Supplied HF `DynamicCache` and `StaticCache`
+objects append/update S deltas in both cache return modes: `delta` returns the
+new tensors, while `present` returns the updated cache object. Reads use the
+occupied prefix and never write compute-grid values into persistent storage.
+
+Calibration must enable cache generation to observe `new_*` storage outputs.
+`calibration.decode_steps` optionally collects decode activation statistics; zero
+is supported and no decode is needed solely to determine past-cache qparams.
+Only active functional observers participate in freezing. Old Llama full-module
+recipe checkpoints and state dicts containing removed past-observer state are
+rejected, including non-strict state-dict loads: reprepare the original float model and recalibrate with cache generation
+enabled. Obsolete past statistics are never reused as storage or compute qparams.
+
 ---
 
 ## 5. Extensibility
