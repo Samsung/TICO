@@ -33,7 +33,7 @@ import sys
 from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -82,7 +82,8 @@ def qcontract(tensor: Any) -> dict[str, Any]:
     }
 
 
-def grid(contract: dict[str, Any]) -> tuple[Any, ...]:
+def grid(contract: dict[str, Any] | None) -> tuple[Any, ...]:
+    assert contract is not None
     return contract["dtype"], contract["scale"], contract["zero_point"]
 
 
@@ -165,7 +166,7 @@ def domain_paths(program: Any) -> dict[str, Any]:
     and temporary tensor names. These expose shared P ancestry of the C/S branches.
     """
     producers = {i: op for op in program.operators for i in op.outputs}
-    counters = Counter()
+    counters: Counter[str] = Counter()
     anchors = {}
     for operator in program.operators:
         anchors[operator.index] = f"{operator.name}:{counters[operator.name]}"
@@ -258,8 +259,8 @@ def runtime_results(model: Any, folder: Path) -> tuple[dict[str, Any], dict[str,
         prepare_llama_static_inputs,
     )
 
-    summaries = {}
-    arrays = {}
+    summaries: dict[str, Any] = {}
+    arrays: dict[str, Any] = {}
     layers = model.wrapped.model.wrapped.layers
     for layer_index, wrapper in enumerate(layers):
         layer = wrapper.wrapped
@@ -336,10 +337,9 @@ def compile_options(optimize: bool):
 
     original = tico.convert
 
-    def convert_with_config(*args, **kwargs):
-        return original(
-            *args, **kwargs, config=CompileConfigV1(circle_optimize=optimize)
-        )
+    def convert_with_config(*args: Any, **kwargs: Any):
+        kwargs["config"] = CompileConfigV1(circle_optimize=optimize)
+        return original(*args, **kwargs)
 
     with patch.object(tico, "convert", convert_with_config):
         yield
@@ -408,9 +408,9 @@ def export(args: argparse.Namespace) -> None:
                     getattr(attention, name).load_qparams(
                         torch.tensor(scale), torch.tensor(zero)
                     )
-                attention.v_proj.wrapped.obs_act_out.load_qparams(
-                    torch.tensor(0.0015), torch.tensor(125)
-                )
+                cast(
+                    AffineObserverBase, attention.v_proj.wrapped.obs_act_out
+                ).load_qparams(torch.tensor(0.0015), torch.tensor(125))
         quantized = convert(prepared).eval()
         observers = {
             name: {
@@ -471,8 +471,8 @@ def export(args: argparse.Namespace) -> None:
 
 def semantic_topology(graph: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize away Quantize positions to compare all other producer/consumer edges."""
-    references = {}
-    occurrences = Counter()
+    references: dict[str, str] = {}
+    occurrences: Counter[str] = Counter()
     result = []
     for operator in graph["operators"]:
         inputs = [references.get(value, value) for value in operator["inputs"]]

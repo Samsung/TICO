@@ -218,7 +218,7 @@ class TestLlamaHFCache(unittest.TestCase):
         )
         for kind in ("tuple", "dynamic", "static"):
             with self.subTest(kind=kind):
-                cache = raw if kind == "tuple" else self._empty_cache(kind, config)
+                cache: Any = raw if kind == "tuple" else self._empty_cache(kind, config)
                 if kind != "tuple":
                     cache.update(
                         *raw, 1, cache_kwargs={"cache_position": torch.arange(3)}
@@ -248,7 +248,7 @@ class TestLlamaHFCache(unittest.TestCase):
             model(input_ids=torch.tensor([[1, 2, 3]]), use_cache=True)
         model.freeze_qparams()
         adapter = model.as_export_module("decode")
-        text_model = model.model.wrapped
+        text_model: Any = model.model.wrapped
         for kind in ("tuple", "dynamic", "static"):
             with self.subTest(kind=kind), torch.no_grad():
                 cache: Any = () if kind == "tuple" else self._empty_cache(kind, config)
