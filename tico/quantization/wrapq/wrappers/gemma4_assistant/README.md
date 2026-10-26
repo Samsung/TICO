@@ -37,11 +37,16 @@ quantizes the embedding copy and the ordered sparse head reads the single
 fake-quantized `lm_head` weight source.
 
 The existing adapter uses an FP target. The backbone explicitly declares its
-shared KV input as external floating-point storage, independently of its
-`past_*` read and `present_*` attention observers. It never uses the assistant's
-dormant `new_*` observers as a target cache policy. Quantized target-cache input
-requires an explicit producer storage contract; the FP target declaration does
-not provide one. See the [Gemma4 cache contract](../../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries).
+PyTorch shared KV input as external floating-point storage with IdentityObserver
+boundaries. Each layer fake-quantizes FP KV directly to its own `present_*`
+attention compute grid. There is no intermediate read observer, and the
+assistant's dormant `new_*` observers never define target storage. Circle export
+uses normal quantization folding and can represent these inputs as integer
+tensors with compute qparams; the PyTorch float declaration does not force float
+Circle inputs. Circle callers must use the serialized input dtypes and qparams.
+Consuming KV from a quantized target in PyTorch requires an explicit producer
+storage contract; the FP target declaration does not provide one. See the
+[Gemma4 cache contract](../../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries).
 
 ## NPU / host partition
 

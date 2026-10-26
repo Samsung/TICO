@@ -207,19 +207,19 @@ obeys its wrapper profile. Image structure is preserved; samples that cannot fit
 fail with an error. Externally supplied calibration inputs are checked before
 execution as well.
 
-These calls collect statistics in `Mode.CALIB`, including Gemma4 `past_key` and
-`past_value` on actual cached decode inputs. An empty-cache prefill observes
-`new_*` and `present_*` only; a shared-KV consumer observes the producer's real
-KV input even during prefill. These calls do not validate accuracy with a
-quantized cache.
+These calls collect statistics in `Mode.CALIB`. Gemma4 `new_*` observers
+calibrate producer storage, and `present_*` observers calibrate attention
+computation. A shared-KV consumer observes its producer's real KV input even
+during prefill. These calls do not validate accuracy with a quantized cache.
 
-Use positive decode calibration for cached inference and decode export when
-the read observers need statistics. With `decode_steps: 0`, ordinary prefill
-remains usable, but an unobserved affine `past_*` cannot serve cached inference
-or export: recalibrate with a positive count. Valid loaded frozen qparams and
-observers that need no statistics do not require extra decode calls. See the
+Prefill-only calibration (`decode_steps: 0`) establishes the storage and compute
+grids needed for ordinary cached inference and decode export. Positive decode
+calibration remains available for broader activation-statistics coverage; the
+existing preset default remains `8`. There are no independent `past_key` or
+`past_value` observer roles. Obsolete overrides are rejected: use `new_*` for
+storage and `present_*` for computation, then reprepare and recalibrate. See the
 [Gemma4 cache boundary contract](../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries)
-for storage/read policies and checkpoint compatibility.
+for supported policies and checkpoint compatibility.
 
 ### Llama and Qwen3-VL cached PTQ calibration
 

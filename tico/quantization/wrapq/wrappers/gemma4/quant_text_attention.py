@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from collections.abc import MutableMapping
-from dataclasses import replace
 from typing import Any, cast, Iterable, Literal, Optional, Tuple, TYPE_CHECKING
 
 import torch
@@ -22,7 +21,6 @@ import torch.nn.functional as F
 
 from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.config.ptq import ExportMode, PTQConfig
-from tico.quantization.config.specs import QuantSpec
 from tico.quantization.wrapq.dtypes import INT16, UINT8
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
@@ -74,6 +72,14 @@ class QuantGemma4TextAttention(QuantModuleBase):
     ):
         fp_attn = cast("Gemma4TextAttention", fp_attn)
         super().__init__(qcfg, fp_name=fp_name)
+        obsolete = {"past_key", "past_value"}.intersection(self.qcfg.overrides)
+        if obsolete:
+            raise ValueError(
+                "Gemma4 past_key/past_value observer overrides were removed; "
+                "configure new_k/new_v for storage and present_key/present_value "
+                "for attention computation, then reprepare and recalibrate."
+            )
+        self._cache_checkpoint_version = 2
         self.attn_options = get_gemma4_text_attention_options(self.qcfg)
 
         self.module = fp_attn
@@ -165,12 +171,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self.obs_new_k = mk("new_k")
         self.obs_new_v = mk("new_v")
         object.__setattr__(self, "_cache_source", None)
-        self.obs_past_key = self._make_cache_read_observer(
-            "past_key", "new_k", self.qcfg
-        )
-        self.obs_past_value = self._make_cache_read_observer(
-            "past_value", "new_v", self.qcfg
-        )
         self.obs_present_key = mk("present_key")
         self.obs_present_value = mk("present_value")
         self.obs_attn_mask = mk("attn_mask")
@@ -471,34 +471,9 @@ class QuantGemma4TextAttention(QuantModuleBase):
         value_states = self.v_norm(value_states)
         value_states = value_states.transpose(1, 2)
 
-        key_states = self._fq(key_states, self.obs_new_k)
-        value_states = self._fq(value_states, self.obs_new_v)
+        # Branch to storage and attention only after returning these raw tensors.
+        # Computing C from the S-quantized delta would introduce double rounding.
         return key_states, value_states
-
-    def _make_cache_read_observer(
-        self, name: str, storage_name: str, storage_qcfg: PTQConfig
-    ) -> ObserverBase:
-        """Resolve read policy with the producer policy as its default.
-
-        Partial kwargs extend the producer policy. A complete QuantSpec retains
-        the factory's replace-role behavior and does not inherit that policy.
-        """
-        read_override = self.qcfg.get_kwargs(name)
-        if read_override.get("__quant_spec_replace_role__", False):
-            return self._make_obs(name)
-        storage_override = storage_qcfg.get_kwargs(storage_name)
-        storage_override.update(read_override)
-        policy = replace(
-            self.qcfg,
-            activation=storage_qcfg.activation,
-            overrides={name: storage_override},
-        )
-        original = self.qcfg
-        try:
-            self.qcfg = policy
-            return self._make_obs(name)
-        finally:
-            self.qcfg = original
 
     def bind_cache_source(self, source: "QuantGemma4TextAttention") -> None:
         """Bind a shared consumer to its storage producer without owning it.
@@ -527,12 +502,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 "Bind the Gemma4 cache producer before prepare/calibration; reprepare and recalibrate this consumer."
             )
         object.__setattr__(self, "_cache_source", source)
-        self.obs_past_key = self._make_cache_read_observer(
-            "past_key", "new_k", source.qcfg
-        )
-        self.obs_past_value = self._make_cache_read_observer(
-            "past_value", "new_v", source.qcfg
-        )
 
     def bind_external_float_cache(self) -> None:
         """Declare FP target KV input for the assistant's external cache.
@@ -556,25 +525,32 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self._external_float_cache = True
         self.obs_cache_storage_key = IdentityObserver(name="cache_storage_key")
         self.obs_cache_storage_value = IdentityObserver(name="cache_storage_value")
-        storage_qcfg = replace(
-            self.qcfg, activation=QuantSpec(IdentityObserver), overrides={}
-        )
-        self.obs_past_key = self._make_cache_read_observer(
-            "past_key", "new_k", storage_qcfg
-        )
-        self.obs_past_value = self._make_cache_read_observer(
-            "past_value", "new_v", storage_qcfg
-        )
+
+    _OBSOLETE_CACHE_CHECKPOINT = (
+        "Gemma4 checkpoint uses an incompatible cache quantization contract; "
+        "reprepare and recalibrate the original float model with new_k/new_v "
+        "storage and present_key/present_value compute policies. Three-domain "
+        "past-KV checkpoints cannot be reused (calibration.decode_steps=0 is supported)."
+    )
+
+    def __setstate__(self, state):
+        # Full-module recipe checkpoints bypass state-dict loading.
+        if state.get("_cache_checkpoint_version") != 2 or any(
+            name in state.get("_modules", {})
+            for name in ("obs_past_key", "obs_past_value")
+        ):
+            raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
+        super().__setstate__(state)
 
     def _validate_cache_observers(self) -> None:
         """Reject old pickled wrappers instead of inventing missing statistics."""
-        if not hasattr(self, "obs_past_key") or not hasattr(self, "obs_past_value"):
-            raise RuntimeError(
-                "This Gemma4 checkpoint lacks past-KV read observers; reprepare and recalibrate with positive calibration.decode_steps."
-            )
+        if getattr(self, "_cache_checkpoint_version", None) != 2 or any(
+            name in self._modules for name in ("obs_past_key", "obs_past_value")
+        ):
+            raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
 
     def cache_storage_observers(self) -> tuple[ObserverBase, ObserverBase]:
-        """Return the producer-owned storage boundaries, never the read policy."""
+        """Return the actual producer-owned storage boundaries."""
         self._validate_cache_observers()
         source = getattr(self, "_cache_source", None)
         if self.is_kv_shared_layer:
@@ -588,7 +564,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         return self.obs_new_k, self.obs_new_v
 
     @staticmethod
-    def _has_read_statistics(observer: ObserverBase) -> bool:
+    def _has_cache_statistics(observer: ObserverBase) -> bool:
         if not isinstance(observer, AffineObserverBase) or isinstance(
             observer, IdentityObserver
         ):
@@ -617,19 +593,19 @@ class QuantGemma4TextAttention(QuantModuleBase):
             or observer.qscheme.is_per_channel()
         ):
             raise ValueError(
-                "Gemma4 cache storage/read/concat currently supports per-tensor affine policies only; MX and per-channel cache conversion are unsupported."
+                "Gemma4 cache storage/compute currently supports per-tensor affine policies only; MX and per-channel cache conversion are unsupported."
             )
         if not observer.fake_quant_enabled:
             raise ValueError(
-                "Gemma4 affine cache boundaries require fake quantization to preserve storage/read/concat qparams; use an explicit IdentityObserver float policy instead of disabling fake quantization."
+                "Gemma4 affine cache boundaries require fake quantization to preserve storage/compute qparams; use an explicit IdentityObserver float policy instead of disabling fake quantization."
             )
         if observer.dtype not in (INT16, UINT8):
             raise ValueError(
-                "Gemma4 affine cache conversion currently supports UINT8 and INT16 storage/read/compute grids only."
+                "Gemma4 affine cache conversion currently supports UINT8 and INT16 storage/compute grids only."
             )
         if not observer.has_qparams:
             raise RuntimeError(
-                f"Gemma4 {observer.name} read/storage qparams are not ready; recalibrate with positive calibration.decode_steps (or load valid frozen qparams)."
+                f"Gemma4 {observer.name} storage/compute qparams are not ready; run prefill calibration (or load valid frozen qparams)."
             )
         scale, zp = observer._cached_scale, observer._cached_zp
         if (
@@ -641,27 +617,23 @@ class QuantGemma4TextAttention(QuantModuleBase):
             )
         ):
             raise RuntimeError(
-                f"Gemma4 {observer.name} has invalid frozen cache qparams; reprepare and recalibrate with positive calibration.decode_steps."
+                f"Gemma4 {observer.name} has invalid frozen cache qparams; reprepare and recalibrate."
             )
 
     def validate_export_cache(self, mode: str) -> None:
-        """Check storage boundaries and only the reads needed by this export."""
+        """Validate the storage owner and direct storage-to-compute contract."""
         self._validate_cache_observers()
         if self._mode is not Mode.QUANT:
             return
         storage = self.cache_storage_observers()
-        for observer in storage:
-            self._validate_frozen_observer(observer)
-        if mode == "prefill" and not self.is_kv_shared_layer:
-            return
         for group in (
-            (storage[0], self.obs_past_key, self.obs_present_key),
-            (storage[1], self.obs_past_value, self.obs_present_value),
+            (storage[0], self.obs_present_key),
+            (storage[1], self.obs_present_value),
         ):
             for observer in group:
                 self._validate_frozen_observer(observer)
             identities = [isinstance(observer, IdentityObserver) for observer in group]
-            float_input_conversion = identities[0] and not identities[2]
+            float_input_conversion = identities[0] and not identities[1]
             if any(identities) and not all(identities) and not float_input_conversion:
                 raise ValueError(
                     "Gemma4 cache conversion supports per-tensor affine grids, all-identity paths, or explicit float storage converted to an affine compute grid; other identity/affine combinations are unsupported."
@@ -672,14 +644,12 @@ class QuantGemma4TextAttention(QuantModuleBase):
         super().enable_calibration()
 
     def freeze_qparams(self) -> None:
-        """Freeze executed observers while leaving unused prefill reads unready."""
+        """Freeze independently observed storage and compute grids."""
         self._validate_cache_observers()
         self._mode = Mode.QUANT
         cache_observers = (
             self.obs_new_k,
             self.obs_new_v,
-            self.obs_past_key,
-            self.obs_past_value,
             self.obs_present_key,
             self.obs_present_value,
         )
@@ -691,15 +661,15 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 and observer.has_qparams
             ):
                 # A valid externally loaded frozen grid is sufficient, even
-                # when this calibration run never executed the read boundary.
+                # when this calibration run never executed the boundary.
                 self._validate_frozen_observer(observer)
-                if observer._qparams_locked or not self._has_read_statistics(observer):
+                if observer._qparams_locked or not self._has_cache_statistics(observer):
                     continue
-            if observer in (
-                self.obs_past_key,
-                self.obs_past_value,
-            ) and not self._has_read_statistics(observer):
-                continue
+            if observer in cache_observers and not self._has_cache_statistics(observer):
+                raise RuntimeError(
+                    f"Gemma4 {observer.name} has no calibration statistics; "
+                    "run prefill calibration or load valid frozen qparams."
+                )
             observer.compute_qparams()
         for child in self._child_quant_modules():
             child.freeze_qparams()
@@ -707,21 +677,44 @@ class QuantGemma4TextAttention(QuantModuleBase):
     _CACHE_OBSERVER_NAMES = (
         "new_k",
         "new_v",
-        "past_key",
-        "past_value",
         "present_key",
         "present_value",
     )
 
+    def _owned_cache_observer_names(self) -> tuple[str, ...]:
+        # A shared consumer's dormant new_* observers never define storage.
+        return (
+            self._CACHE_OBSERVER_NAMES[2:]
+            if self.is_kv_shared_layer
+            else self._CACHE_OBSERVER_NAMES
+        )
+
     @staticmethod
     def _observer_grid_policy(
         observer: ObserverBase,
-    ) -> tuple[str, str, str, Optional[int]]:
+    ) -> tuple[str, str, str, Optional[int], tuple[tuple[str, Any], ...]]:
+        # Record the built-in affine observers' calibration options as well as
+        # their grid type. Statistics and lifecycle flags are saved separately.
+        options = tuple(
+            (name, getattr(observer, name))
+            for name in (
+                "fake_quant_enabled",
+                "momentum",
+                "percentile",
+                "lower_percentile",
+                "upper_percentile",
+                "max_samples",
+                "samples_per_batch",
+                "seed",
+            )
+            if hasattr(observer, name)
+        )
         return (
             f"{type(observer).__module__}.{type(observer).__qualname__}",
             str(observer.dtype),
             str(observer.qscheme),
             observer.channel_axis,
+            options,
         )
 
     def get_extra_state(self) -> dict[str, Any]:
@@ -729,10 +722,14 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self._validate_cache_observers()
         qparams = {}
         policies = {}
-        for name in self._CACHE_OBSERVER_NAMES:
+        for name in self._owned_cache_observer_names():
             observer = getattr(self, f"obs_{name}")
             policies[name] = self._observer_grid_policy(observer)
-            if isinstance(observer, AffineObserverBase) and observer.has_qparams:
+            if (
+                isinstance(observer, AffineObserverBase)
+                and not isinstance(observer, IdentityObserver)
+                and observer.has_qparams
+            ):
                 qparams[name] = (
                     observer._cached_scale,
                     observer._cached_zp,
@@ -743,25 +740,33 @@ class QuantGemma4TextAttention(QuantModuleBase):
         if source is not None or getattr(self, "_external_float_cache", False):
             for observer in self.cache_storage_observers():
                 grid = None
-                if isinstance(observer, AffineObserverBase) and observer.has_qparams:
+                if (
+                    isinstance(observer, AffineObserverBase)
+                    and not isinstance(observer, IdentityObserver)
+                    and observer.has_qparams
+                ):
                     grid = (observer._cached_scale, observer._cached_zp)
                 source_grids.append((self._observer_grid_policy(observer), grid))
         return {
-            "version": 1,
+            "version": 2,
             "frozen": self._mode is Mode.QUANT,
             "qparams": qparams,
             "source_grids": source_grids,
             "external_float_cache": bool(getattr(self, "_external_float_cache", False)),
             "policies": policies,
             "source_layer_idx": None if source is None else source.layer_idx,
+            "source_layer_type": None if source is None else source.layer_type,
         }
 
     def set_extra_state(self, state: dict[str, Any]) -> None:
         """Restore frozen grids and validate the constructor's source binding."""
-        if state.get("version") != 1:
-            raise RuntimeError(
-                "Unsupported Gemma4 cache observer checkpoint; reprepare and recalibrate."
-            )
+        if state.get("version") != 2:
+            raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
+        names = self._owned_cache_observer_names()
+        if set(state.get("policies", {})) != set(names) or not set(
+            state.get("qparams", {})
+        ).issubset(names):
+            raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
         if bool(state.get("external_float_cache", False)) != bool(
             getattr(self, "_external_float_cache", False)
         ):
@@ -770,11 +775,19 @@ class QuantGemma4TextAttention(QuantModuleBase):
             )
         source = getattr(self, "_cache_source", None)
         expected = state.get("source_layer_idx")
-        if expected != (None if source is None else source.layer_idx):
+        if expected != (None if source is None else source.layer_idx) or state.get(
+            "source_layer_type"
+        ) != (None if source is None else source.layer_type):
             raise RuntimeError(
                 "Gemma4 checkpoint cache producer binding differs; bind the original producer before loading state_dict."
             )
-        if source is not None or getattr(self, "_external_float_cache", False):
+        has_source = source is not None or getattr(self, "_external_float_cache", False)
+        if len(state.get("source_grids", [])) != (2 if has_source else 0):
+            raise RuntimeError(
+                "Gemma4 checkpoint cache source grids differ; restore the original "
+                "producer or external float boundary, or reprepare and recalibrate."
+            )
+        if has_source:
             for observer, (policy, grid) in zip(
                 self.cache_storage_observers(),
                 state.get("source_grids", []),
@@ -793,7 +806,13 @@ class QuantGemma4TextAttention(QuantModuleBase):
                     raise RuntimeError(
                         "Gemma4 checkpoint producer storage qparams differ; load the original frozen producer before loading the consumer state_dict."
                     )
-        for name in self._CACHE_OBSERVER_NAMES:
+                if state.get("frozen", False):
+                    if not isinstance(observer, IdentityObserver) and grid is None:
+                        raise RuntimeError(
+                            "Gemma4 checkpoint lacks frozen producer storage qparams; reprepare and recalibrate."
+                        )
+                    self._validate_frozen_observer(observer)
+        for name in names:
             observer = getattr(self, f"obs_{name}")
             if state.get("policies", {}).get(name) != self._observer_grid_policy(
                 observer
@@ -812,6 +831,16 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 zp.to(observer.min_val.device),
                 lock=locked or bool(state.get("frozen", False)),
             )
+        if state.get("frozen", False):
+            for name in names:
+                observer = getattr(self, f"obs_{name}")
+                if not isinstance(observer, IdentityObserver) and name not in state.get(
+                    "qparams", {}
+                ):
+                    raise RuntimeError(
+                        f"Gemma4 checkpoint lacks frozen {name} cache qparams; reprepare and recalibrate."
+                    )
+                self._validate_frozen_observer(observer)
 
     def _load_from_state_dict(
         self,
@@ -823,10 +852,11 @@ class QuantGemma4TextAttention(QuantModuleBase):
         unexpected_keys,
         error_msgs,
     ):
-        if prefix + "_extra_state" not in state_dict:
-            error_msgs.append(
-                "Gemma4 checkpoint lacks past-KV observer state; reprepare and recalibrate with positive calibration.decode_steps."
-            )
+        if prefix + "_extra_state" not in state_dict or any(
+            name.startswith((prefix + "obs_past_key.", prefix + "obs_past_value."))
+            for name in state_dict
+        ):
+            error_msgs.append(self._OBSOLETE_CACHE_CHECKPOINT)
         super()._load_from_state_dict(
             state_dict,
             prefix,
@@ -851,7 +881,11 @@ class QuantGemma4TextAttention(QuantModuleBase):
             )
 
     def _read_cache_key_value(self, key_value: LayerKV) -> LayerKV:
-        """Observe only real external KV and leave producer storage untouched."""
+        """Declare the source storage grid without collecting or writing it.
+
+        The caller converts these S values directly to its own C grid. During
+        calibration the supplied values pass through for compute observation.
+        """
         self._validate_cache_tensor_pair(key_value)
         if self._mode is Mode.QUANT:
             if not torch.compiler.is_compiling():
@@ -861,8 +895,12 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 storage_k.fake_quant(key_value[0]),
                 storage_v.fake_quant(key_value[1]),
             )
-        return self._fq(key_value[0], self.obs_past_key), self._fq(
-            key_value[1], self.obs_past_value
+        return key_value
+
+    def _cache_to_compute(self, key_value: LayerKV) -> LayerKV:
+        """Convert the declared storage domain directly into attention's grid."""
+        return self._fq(key_value[0], self.obs_present_key), self._fq(
+            key_value[1], self.obs_present_value
         )
 
     def _cache_object_past(self, cache: Any, q_len: int) -> Optional[LayerKV]:
@@ -927,10 +965,17 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self,
         *,
         new_key_value: LayerKV,
+        current_key_value: LayerKV,
         past_key_value: Optional[Any],
+        use_cache: bool = True,
     ) -> tuple[LayerKV, LayerKV, Optional[Any]]:
-        """Split persistent storage from the past-read/attention compute branch."""
+        """Combine independent raw-to-C and storage-to-C attention branches.
+
+        ``new_key_value`` is the S delta; ``current_key_value`` is the raw
+        projection. Only the former is appended to persistent storage.
+        """
         new_k, new_v = new_key_value
+        current_k, current_v = current_key_value
         cache_object_out = None
         if past_key_value is None:
             past = None
@@ -951,17 +996,16 @@ class QuantGemma4TextAttention(QuantModuleBase):
         if past is None:
             storage = new_key_value
             compute = (
-                self._fq(new_k, self.obs_present_key),
-                self._fq(new_v, self.obs_present_value),
+                self._fq(current_k, self.obs_present_key),
+                self._fq(current_v, self.obs_present_value),
             )
         else:
-            read_k, read_v = self._read_cache_key_value(past)
+            past = self._read_cache_key_value(past)
+            read_k, read_v = past
             # Both concat inputs must share the actual compute grid. These are
             # value conversions; the original new_* delta branch stays intact.
-            current_k, current_v = new_k, new_v
             if self._mode is Mode.QUANT:
-                read_k = self._fq(read_k, self.obs_present_key)
-                read_v = self._fq(read_v, self.obs_present_value)
+                read_k, read_v = self._cache_to_compute((read_k, read_v))
                 current_k = self._fq(current_k, self.obs_present_key)
                 current_v = self._fq(current_v, self.obs_present_value)
             compute = (
@@ -974,9 +1018,13 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 torch.cat((past[0], new_k), dim=-2),
                 torch.cat((past[1], new_v), dim=-2),
             )
-        if past_key_value is not None and not isinstance(past_key_value, tuple):
+        if (
+            use_cache
+            and past_key_value is not None
+            and not isinstance(past_key_value, tuple)
+        ):
             # HF storage receives only the producer's new_* delta. In particular,
-            # never update it with read-grid tensors or post-concat fake quant.
+            # never update it with compute-grid tensors or post-concat fake quant.
             past_key_value.update(new_k, new_v, self.layer_idx)
             cache_object_out = past_key_value
         return compute, storage, cache_object_out
@@ -1222,7 +1270,9 @@ class QuantGemma4TextAttention(QuantModuleBase):
             shared_key_value: Optional full K/V tensors for shared-KV layers.
             past_key_value: Optional tuple or HF-like cache object for non-shared
                 layers. Tuple caches are shaped ``(B, num_kv_heads, K, H)``.
-            use_cache: Whether to append cache data to the output tuple.
+            use_cache: Whether to update an HF cache and append cache data to
+                the output tuple. Existing cache tensors can be read without
+                mutation when this is false.
             cache_output_mode: ``"delta"`` returns newly projected K/V;
                 ``"present"`` or ``"full"`` returns full K/V or the updated
                 cache object.
@@ -1280,13 +1330,18 @@ class QuantGemma4TextAttention(QuantModuleBase):
                     ),
                 )
             )
-            key_states = self._fq(key_states, self.obs_present_key)
-            value_states = self._fq(value_states, self.obs_present_value)
+            key_states, value_states = self._cache_to_compute(
+                (key_states, value_states)
+            )
             new_key_value = None
             present_key_value: Optional[LayerKV] = (key_states, value_states)
         else:
-            new_key_value = self._project_current_key_value(
+            current_key_value = self._project_current_key_value(
                 hidden, hidden_shape, cos, sin
+            )
+            new_key_value = (
+                self._fq(current_key_value[0], self.obs_new_k),
+                self._fq(current_key_value[1], self.obs_new_v),
             )
             (
                 present_key_value,
@@ -1294,7 +1349,9 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 cache_object_out,
             ) = self._build_present_key_value(
                 new_key_value=new_key_value,
+                current_key_value=current_key_value,
                 past_key_value=past_key_value,
+                use_cache=use_cache,
             )
             key_states, value_states = present_key_value
             if self.store_full_length_kv and shared_kv_states is not None:
@@ -1378,8 +1435,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
             self.obs_q_cos,
             self.obs_q_sin,
             self.obs_q_rot,
-            self.obs_past_key,
-            self.obs_past_value,
             self.obs_present_key,
             self.obs_present_value,
             self.obs_attn_mask,

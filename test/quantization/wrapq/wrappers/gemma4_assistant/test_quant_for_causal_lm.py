@@ -221,7 +221,10 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
             self.assertIsInstance(storage_key, IdentityObserver)
             self.assertIsInstance(storage_value, IdentityObserver)
             self.assertIsNot(storage_key, attention.obs_new_k)
-            self.assertIsNot(storage_key, attention.obs_past_key)
+            self.assertIsNot(storage_key, attention.obs_present_key)
+            self.assertFalse(hasattr(attention, "obs_past_key"))
+            self.assertFalse(hasattr(attention, "obs_past_value"))
+            self.assertIsNone(attention._cache_source)
         for layer_type, tensors in self.sample["shared_kv_states"].items():
             for tensor, before in zip(tensors, shared_before[layer_type]):
                 self.assertTrue(torch.equal(tensor, before))
@@ -273,6 +276,47 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
             actual = loaded(**self.sample)
         torch.testing.assert_close(actual.logits, expected.logits)
         torch.testing.assert_close(actual.last_hidden_state, expected.last_hidden_state)
+
+        # Module deserialization and deepcopy must retain the explicit external
+        # float contract without inventing an assistant-owned KV producer.
+        for restored in (loaded, copy.deepcopy(converted)):
+            for layer in restored.wrapped.model.layers:
+                attention = layer.wrapped.self_attn.wrapped
+                self.assertTrue(attention.get_extra_state()["external_float_cache"])
+                self.assertIsNone(attention._cache_source)
+                self.assertTrue(
+                    all(
+                        isinstance(observer, IdentityObserver)
+                        for observer in attention.cache_storage_observers()
+                    )
+                )
+                self.assertFalse(hasattr(attention, "obs_past_key"))
+                attention.validate_export_cache("decode")
+            with torch.no_grad():
+                replayed = restored(**self.sample)
+            torch.testing.assert_close(replayed.logits, expected.logits, atol=0, rtol=0)
+
+    def test_state_dict_round_trip_preserves_external_float_cache(self):
+        """Frozen compute qparams load alongside the FP target storage policy."""
+        prepared = self._prepare(copy.deepcopy(self.fp_ref))
+        with torch.no_grad():
+            prepared(**self.sample)
+        converted = convert(prepared)
+        restored = self._prepare(copy.deepcopy(self.fp_ref))
+        restored.load_state_dict(converted.state_dict())
+        restored.freeze_qparams()
+        for layer in restored.wrapped.model.layers:
+            attention = layer.wrapped.self_attn.wrapped
+            state = attention.get_extra_state()
+            self.assertTrue(state["external_float_cache"])
+            self.assertNotIn("past_key", state["policies"])
+            self.assertNotIn("past_value", state["qparams"])
+            self.assertIsNone(attention._cache_source)
+            attention.validate_export_cache("decode")
+        with torch.no_grad():
+            expected = converted(**self.sample)
+            actual = restored(**self.sample)
+        torch.testing.assert_close(actual.logits, expected.logits, atol=0, rtol=0)
 
     def test_generation_adapter_matches_hf_dispatch_contract(self):
         """The generation adapter must satisfy the HF MTP dispatch rules."""

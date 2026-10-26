@@ -18,14 +18,18 @@ import copy
 import unittest
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
         Gemma4AssistantForCausalLM,
     )
 
 
+import tico
 import torch
-
+from tico.circle import CircleDocument
+from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
 from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_assistant_builders import (
     build_gemma4_assistant_ptq_config,
@@ -126,11 +130,11 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
             prepared(**self.inputs)
         return convert(prepared)
 
-    def test_unsupported_shared_read_policy_is_rejected_before_tracing(self):
+    def test_unsupported_shared_compute_policy_is_rejected_before_tracing(self):
         """A direct core adapter must validate its reused attention boundaries."""
         qcfg = build_gemma4_assistant_ptq_config(num_hidden_layers=2)
         qcfg.set_override(
-            "model.layers.0.self_attn.past_key",
+            "model.layers.0.self_attn.present_key",
             affine(DType.int(16), qscheme=QScheme.PER_CHANNEL_SYMM, channel_axis=1),
         )
         prepared = prepare(copy.deepcopy(self.fp_model), qcfg)
@@ -141,6 +145,17 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
         prepared.freeze_qparams()
         with self.assertRaisesRegex(ValueError, "per-tensor affine"):
             Gemma4AssistantCoreExportAdapter(prepared)
+
+    def test_legacy_past_overrides_require_explicit_migration(self):
+        """The assistant cannot silently retain an independent read grid."""
+        for role in ("past_key", "past_value"):
+            with self.subTest(role=role):
+                qcfg = build_gemma4_assistant_ptq_config(num_hidden_layers=2)
+                qcfg.set_override(
+                    f"model.layers.0.self_attn.{role}", affine(DType.uint(8))
+                )
+                with self.assertRaisesRegex(ValueError, "past_.*present_"):
+                    prepare(copy.deepcopy(self.fp_model), qcfg)
 
     def test_unconverted_model_is_rejected(self):
         """The core export requires a converted (QUANT-mode) assistant."""
@@ -226,6 +241,61 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
             replayed = exported.module()(*static.as_tuple())
         for expected, actual in zip(reference, replayed):
             torch.testing.assert_close(expected, actual)
+
+    def test_circle_shared_kv_inputs_use_consumer_compute_grid(self):
+        """Circle shared KV inputs use the consumer's frozen integer compute grid."""
+        converted = self._converted()
+        adapter = Gemma4AssistantCoreExportAdapter(converted).eval()
+        inputs = self._static_inputs().as_tuple()
+        originals = tuple(value.clone() for value in inputs)
+        with torch.no_grad():
+            expected = adapter(*inputs)
+            circle = tico.convert(adapter, inputs, strict=False)
+        document = CircleDocument.from_bytes(circle.circle_binary)
+        document.verify()
+        runtime = CircleReferenceRuntime(document)
+        program = runtime.program
+        attentions = {
+            layer.wrapped.self_attn.wrapped.layer_type: layer.wrapped.self_attn.wrapped
+            for layer in converted.wrapped.model.layers
+        }
+        for input_offset, layer_type, role in (
+            (1, "full_attention", "key"),
+            (2, "full_attention", "value"),
+            (3, "sliding_attention", "key"),
+            (4, "sliding_attention", "value"),
+        ):
+            input_index = program.inputs[input_offset]
+            source = program.tensor(input_index)
+            self.assertEqual(source.dtype, np.dtype(np.int16))
+            observer = getattr(attentions[layer_type], f"obs_present_{role}")
+            scale, zero_point = observer.compute_qparams()
+            assert source.quantization is not None
+            self.assertEqual(source.quantization.scale, (float(scale),))
+            self.assertEqual(source.quantization.zero_point, (int(zero_point),))
+            conversions = [
+                operator
+                for operator in program.operators
+                if operator.name == "QUANTIZE" and operator.inputs == (input_index,)
+            ]
+            self.assertEqual(conversions, [])
+
+        actual = runtime.run(
+            [value.numpy() for value in inputs], mode=ExecutionMode.FAKE_QUANTIZE
+        ).outputs
+        for result, reference, index in zip(actual, expected, program.outputs):
+            # CPU serialization changes float accumulation order. Bound the
+            # two-layer core to four output-grid steps, with no relative slack.
+            quantization = program.tensor(index).quantization
+            assert quantization is not None
+            np.testing.assert_allclose(
+                result,
+                reference.numpy(),
+                atol=4 * quantization.scale[0],
+                rtol=0,
+            )
+        for value, original in zip(inputs, originals):
+            torch.testing.assert_close(value, original, atol=0, rtol=0)
 
 
 if __name__ == "__main__":
