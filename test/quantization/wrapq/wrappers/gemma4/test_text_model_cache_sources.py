@@ -55,7 +55,7 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
                 )
             for name in ("gate_proj", "up_proj", "down_proj"):
                 overrides[f"layers.{index}.mlp.{name}.weight"] = affine(DType.int(16))
-        overrides["layers.4.self_attn.past_key"] = affine(DType.uint(8))
+        overrides["layers.4.self_attn.present_key"] = affine(DType.uint(8))
         qcfg = PTQConfig(
             model_args={"text": {"max_seq": 32}},
             overrides=overrides,
@@ -66,7 +66,7 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
     def _attention(model, index):
         return model.layers[index].wrapped.self_attn.wrapped
 
-    def test_binds_last_owning_layer_of_each_type_and_keeps_read_override(self):
+    def test_binds_last_owning_layer_of_each_type_and_keeps_compute_override(self):
         model = self._model()
         for producer_index, consumer_index in ((2, 4), (3, 5)):
             producer = self._attention(model, producer_index)
@@ -74,24 +74,20 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
             storage_key, storage_value = consumer.cache_storage_observers()
             self.assertIs(storage_key, producer.obs_new_k)
             self.assertIs(storage_value, producer.obs_new_v)
-            self.assertIsNot(consumer.obs_past_key, storage_key)
-            self.assertIsNot(consumer.obs_past_value, storage_value)
-            self.assertIsNot(consumer.obs_present_key, consumer.obs_past_key)
+            self.assertIsNot(consumer.obs_present_key, storage_key)
+            self.assertIsNot(consumer.obs_present_value, storage_value)
             self.assertNotIn(producer, list(consumer.modules()))
             self.assertFalse(
                 any("cache_source" in key for key in consumer.state_dict())
             )
-        self.assertEqual(self._attention(model, 4).obs_past_key.dtype, DType.uint(8))
+        self.assertEqual(self._attention(model, 4).obs_present_key.dtype, DType.uint(8))
 
-    def test_state_dict_round_trip_keeps_read_qparams_and_local_producer_binding(self):
+    def test_state_dict_round_trip_keeps_compute_qparams_and_local_producer_binding(
+        self,
+    ):
         model = self._model()
         model.enable_calibration()
-        prefill = model(input_ids=torch.tensor([[1, 3, 5]]), use_cache=True)
-        model(
-            input_ids=torch.tensor([[7]]),
-            past_key_values=prefill.past_key_values,
-            use_cache=True,
-        )
+        model(input_ids=torch.tensor([[1, 3, 5]]), use_cache=True)
         model.freeze_qparams()
         checkpoint = io.BytesIO()
         torch.save(model, checkpoint)
@@ -113,10 +109,10 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
                     torch.equal(
                         self._attention(
                             copy_model, consumer_index
-                        ).obs_past_key._cached_scale,
+                        ).obs_present_key._cached_scale,
                         self._attention(
                             model, consumer_index
-                        ).obs_past_key._cached_scale,
+                        ).obs_present_key._cached_scale,
                     )
                 )
         saved = copy.deepcopy(model.state_dict())
@@ -132,7 +128,7 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
                 consumer.cache_storage_observers()[0],
                 self._attention(model, producer_index).obs_new_k,
             )
-            for name in ("obs_past_key", "obs_past_value"):
+            for name in ("obs_present_key", "obs_present_value"):
                 before = getattr(original, name)
                 after = getattr(consumer, name)
                 self.assertTrue(after.has_qparams)
@@ -146,7 +142,7 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
         consumer = self._attention(restored, 4)
         self.assertIs(consumer.cache_storage_observers()[0], source.obs_new_k)
         self.assertEqual(source.obs_new_k.min_val.dtype, torch.float64)
-        self.assertEqual(consumer.obs_past_key.min_val.dtype, torch.float64)
+        self.assertEqual(consumer.obs_present_key.min_val.dtype, torch.float64)
 
 
 if __name__ == "__main__":

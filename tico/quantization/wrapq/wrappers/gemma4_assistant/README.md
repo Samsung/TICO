@@ -37,11 +37,12 @@ quantizes the embedding copy and the ordered sparse head reads the single
 fake-quantized `lm_head` weight source.
 
 The existing adapter uses an FP target. The backbone explicitly declares its
-shared KV input as external floating-point storage, independently of its
-`past_*` read and `present_*` attention observers. It never uses the assistant's
-dormant `new_*` observers as a target cache policy. Quantized target-cache input
-requires an explicit producer storage contract; the FP target declaration does
-not provide one. See the [Gemma4 cache contract](../../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries).
+shared KV input as external floating-point storage with IdentityObserver
+boundaries. Each layer explicitly converts FP KV directly to its own
+`present_*` attention compute grid. There is no intermediate read observer, and
+the assistant's dormant `new_*` observers never define target storage. Quantized
+target-cache input requires an explicit producer storage contract; the FP target
+declaration does not provide one. See the [Gemma4 cache contract](../../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries).
 
 ## NPU / host partition
 

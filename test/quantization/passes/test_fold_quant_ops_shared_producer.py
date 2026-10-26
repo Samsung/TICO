@@ -14,6 +14,7 @@
 
 """Do not round an unquantized residual when only its other branch requests Q."""
 
+import io
 import unittest
 
 import numpy as np
@@ -70,7 +71,125 @@ class _DistinctConcatDomains(torch.nn.Module):
         return torch.fake_quantize_per_tensor_affine(combined, 0.3, 128, 0, 255)
 
 
+class _ExternalFloatInput(torch.nn.Module):
+    def __init__(self, *, preserve_float: bool):
+        super().__init__()
+        self.preserve_float = preserve_float
+
+    def forward(self, value):
+        if self.preserve_float:
+            with (
+                torch.fx.traceback.preserve_node_meta(),
+                torch.fx.traceback.annotate({"tico_preserve_float_input": True}),
+            ):
+                return torch.fake_quantize_per_tensor_affine(
+                    value, 0.125, 0, -32768, 32767
+                )
+        return torch.fake_quantize_per_tensor_affine(value, 0.125, 0, -32768, 32767)
+
+
 class FoldQuantOpsSharedProducerTest(unittest.TestCase):
+    def test_marked_single_user_float_input_retains_explicit_quantize(self):
+        for strict in (True, False):
+            for preserve_float in (True, False):
+                with self.subTest(strict=strict, preserve_float=preserve_float):
+                    program = torch.export.export(
+                        _ExternalFloatInput(preserve_float=preserve_float).eval(),
+                        (torch.tensor([0.22, -0.44]),),
+                        strict=strict,
+                    )
+                    DecomposeFakeQuantize().call(program)
+                    dequantize = next(
+                        node
+                        for node in program.graph.nodes
+                        if node.target
+                        == torch.ops.quantized_decomposed.dequantize_per_tensor.default
+                    )
+                    self.assertEqual(
+                        dequantize.meta.get("custom", {}).get(
+                            "tico_preserve_float_input", False
+                        ),
+                        preserve_float,
+                    )
+                    FoldQuantOps().call(program)
+                    source = next(
+                        node for node in program.graph.nodes if node.op == "placeholder"
+                    )
+                    quantize = [
+                        node
+                        for node in program.graph.nodes
+                        if node.target
+                        == torch.ops.quantized_decomposed.quantize_per_tensor.default
+                    ]
+                    if preserve_float:
+                        self.assertNotIn(QPARAM_KEY, source.meta)
+                        self.assertEqual(source.meta["val"].dtype, torch.float32)
+                        self.assertEqual(len(quantize), 1)
+                        self.assertIs(quantize[0].args[0], source)
+                        self.assertEqual(quantize[0].meta[QPARAM_KEY].scale, [0.125])
+                        FoldQuantOps().call(program)
+                        self.assertIs(quantize[0].args[0], source)
+                    else:
+                        self.assertEqual(source.meta[QPARAM_KEY].scale, [0.125])
+                        self.assertEqual(source.meta[QPARAM_KEY].dtype, "int16")
+                        self.assertEqual(quantize, [])
+
+    def test_public_conversion_preserves_declared_float_input_and_cpu_values(self):
+        inputs = np.array([0.22, -0.44], dtype=np.float32)
+        expected_float = np.array([0.25, -0.5], dtype=np.float32)
+        expected_integer = np.array([2, -4], dtype=np.int16)
+        for strict in (True, False):
+            for preserve_float in (True, False):
+                with self.subTest(strict=strict, preserve_float=preserve_float):
+                    module = _ExternalFloatInput(preserve_float=preserve_float).eval()
+                    exported = torch.export.export(
+                        module, (torch.from_numpy(inputs),), strict=strict
+                    )
+                    checkpoint = io.BytesIO()
+                    torch.export.save(exported, checkpoint)
+                    checkpoint.seek(0)
+                    restored = torch.export.load(checkpoint)
+                    marked = [
+                        node
+                        for node in restored.graph.nodes
+                        if node.meta.get("custom", {}).get("tico_preserve_float_input")
+                    ]
+                    self.assertEqual(bool(marked), preserve_float)
+                    converted = tico.convert_from_exported_program(restored)
+                    document = CircleDocument.from_bytes(converted.circle_binary)
+                    self.assertTrue(document.verify().ok)
+                    runtime = CircleReferenceRuntime(document)
+                    source = runtime.program.tensor(runtime.program.inputs[0])
+                    target = runtime.program.tensor(runtime.program.outputs[0])
+                    self.assertEqual(target.dtype, np.int16)
+                    self.assertIsNotNone(target.quantization)
+                    assert target.quantization is not None
+                    self.assertEqual(target.quantization.scale, (0.125,))
+                    self.assertEqual(target.quantization.zero_point, (0,))
+                    if preserve_float:
+                        self.assertEqual(source.dtype, np.float32)
+                        self.assertIsNone(source.quantization)
+                        self.assertEqual(
+                            [op.name for op in runtime.program.operators], ["QUANTIZE"]
+                        )
+                        bridge = runtime.program.operators[0]
+                        self.assertEqual(bridge.inputs, runtime.program.inputs)
+                        self.assertEqual(bridge.outputs, runtime.program.outputs)
+                    else:
+                        self.assertEqual(source.dtype, np.int16)
+                        self.assertIsNotNone(source.quantization)
+                        self.assertEqual(runtime.program.operators, ())
+                    actual = runtime.run(
+                        [inputs], mode=ExecutionMode.FAKE_QUANTIZE
+                    ).outputs[0]
+                    np.testing.assert_array_equal(actual, expected_float)
+                    np.testing.assert_array_equal(
+                        actual, module(torch.from_numpy(inputs)).numpy()
+                    )
+                    native_input = inputs if preserve_float else expected_integer
+                    native = runtime.run([native_input]).outputs[0]
+                    np.testing.assert_array_equal(native, expected_integer)
+
     def test_preserves_raw_branch_and_explicit_float_input_bridge(self):
         program = torch.export.export(
             _SharedFloatResidual().eval(), (torch.tensor([0.25, 0.75]),)
