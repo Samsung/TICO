@@ -89,16 +89,18 @@ workflow. The script refuses implicit casting and does not download models.
 | --- | --- | --- |
 | LLaMA with a canonical model-level rotary source | Both checkouts must load the checkpoint and support its rotary source | Supported directly |
 | LLaMA with legacy layer tables or an unverified rotary snapshot | Baseline must support the original checkpoint; opt in to candidate-only `--migrate-llama-rope` | Same explicit migration required |
-| Qwen3-VL with supported static rotary provenance and valid required cache observers | Both checkouts must support the saved wrapper and requested stage boundaries | Supported when the requested stage's readiness checks pass |
+| Qwen3-VL with supported static rotary provenance and calibrated storage/compute observers | Both checkouts must support the two-domain saved wrapper and requested stage boundaries | Supported when the requested stage's readiness checks pass |
+| Qwen3-VL with legacy `obs_past_key/value` observers | Reprepare and recalibrate using the two-domain wrapper before comparison | Rejected with migration guidance; no automatic qparam repair |
 | Qwen3-VL without static tables or a supported rotary snapshot | Unsupported for static export | Explicit provenance error |
 | Gemma4 with compatible PLE/shared-KV metadata and valid required storage/read observers | Both checkouts must support the checkpoint's producer/consumer policies | Supported when the requested stage's readiness checks pass |
 | Any checkpoint missing observer state or calibration coverage required by the requested quantized stage | Reprepare and calibrate the required path before comparing that stage | Rejected with calibration guidance; no automatic repair |
 
 Readiness depends on the requested stage and quantization policy. An explicitly
 unquantized cache does not require affine calibration statistics. A valid
-prefill-only checkpoint does not establish cached-decode readiness. In
-particular, frozen flags or finite clamped scales alone do not prove that a
-past-cache observer collected representative nonempty KV tensors.
+prefill-only Qwen3-VL checkpoint can establish cached-decode readiness when both
+storage and compute observers have valid statistics. Families with independent
+past-cache observers still require their calibration coverage. Frozen flags or
+finite clamped scales alone do not establish observed affine ranges.
 
 A new checkpoint is not numerically interchangeable with an old one merely
 because the recipe is the same. Do not independently recalibrate each checkout

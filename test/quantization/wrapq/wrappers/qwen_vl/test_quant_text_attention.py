@@ -13,18 +13,25 @@
 # limitations under the License.
 
 import inspect
+import io
+import itertools
 import unittest
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from transformers.cache_utils import DynamicCache
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention
 
 from unittest.mock import patch
 
 import torch
+from tico.quantization.config.specs import affine, mx
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
@@ -46,6 +53,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        torch.manual_seed(71)
         from transformers.models.qwen3_vl.configuration_qwen3_vl import (
             Qwen3VLTextConfig,
         )
@@ -58,7 +66,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
             head_dim=4,
             attention_bias=False,
             attention_dropout=0.0,
-            max_position_embeddings=2048,
+            max_position_embeddings=16,
         )
 
         # Ensure eager attention implementation so outputs are deterministic
@@ -76,6 +84,9 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         cls.num_heads = cfg.num_attention_heads
         assert cfg.num_key_value_heads is not None
         cls.num_kv_heads = cfg.num_key_value_heads
+
+    def setUp(self):
+        torch.manual_seed(71)
 
     def _rand_rope(self, B: int, S: int):
         """Create synthetic RoPE tables with Qwen text-attention shapes."""
@@ -147,8 +158,8 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         qattn.freeze_qparams()
         self.assertIs(qattn._mode, Mode.QUANT)
 
-    def test_cache_calibration_accepts_visible_additive_biases(self):
-        """Observe finite biased prefix positions while excluding masked slots."""
+    def test_cache_calibration_does_not_filter_masked_past_positions(self):
+        """Compute statistics cover all past positions; storage observes new KV."""
         qattn = QuantQwen3VLTextAttention(self.fp_attn)
         fill = float(qattn.qcfg.attention_mask_fill_value)
         past_k = torch.tensor([1000.0, 1.0, 2.0, -1000.0]).reshape(1, 1, 4, 1)
@@ -171,14 +182,19 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
                     use_cache=True,
                     cache_output_mode="delta",
                 )
-                past_key = qattn.obs_past_key
-                past_value = qattn.obs_past_value
-                assert isinstance(past_key, AffineObserverBase)
-                assert isinstance(past_value, AffineObserverBase)
-                self.assertEqual(past_key.min_val.item(), 1.0)
-                self.assertEqual(past_key.max_val.item(), 2.0)
-                self.assertEqual(past_value.min_val.item(), 3.0)
-                self.assertEqual(past_value.max_val.item(), 4.0)
+                for observer, extent in (
+                    (qattn.obs_present_key, 1000.0),
+                    (qattn.obs_present_value, 3000.0),
+                ):
+                    assert isinstance(observer, AffineObserverBase)
+                    self.assertEqual(observer.min_val.item(), -extent)
+                    self.assertEqual(observer.max_val.item(), extent)
+                for observer in (qattn.obs_new_k, qattn.obs_new_v):
+                    assert isinstance(observer, AffineObserverBase)
+                    self.assertEqual(observer.min_val.item(), 0.0)
+                    self.assertEqual(observer.max_val.item(), 0.0)
+                self.assertFalse(hasattr(qattn, "obs_past_key"))
+                self.assertFalse(hasattr(qattn, "obs_past_value"))
 
     def test_default_attention_profile_is_unrolled(self):
         """Verify that the default profile keeps the NPU-export-friendly layout."""
@@ -477,12 +493,13 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         x0 = torch.randn(B, S0, self.hidden_size)
         pos0 = self._rand_rope(B, S0)
         with torch.no_grad():
-            out0, attn0 = qattn(
+            out0, attn0, _ = qattn(
                 x0,
                 pos0,
                 attention_mask=None,
                 past_key_values=cache,
                 cache_position=torch.arange(S0),
+                use_cache=True,
             )
         self.assertEqual(out0.shape, (B, S0, self.hidden_size))
         self.assertEqual(attn0.shape, (B, self.num_heads, S0, S0))
@@ -498,12 +515,13 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         x1 = torch.randn(B, S1, self.hidden_size)
         pos1 = self._rand_rope(B, S1)
         with torch.no_grad():
-            out1, attn1 = qattn(
+            out1, attn1, _ = qattn(
                 x1,
                 pos1,
                 attention_mask=None,
                 past_key_values=cache,
                 cache_position=torch.tensor([S0]),
+                use_cache=True,
             )
         self.assertEqual(out1.shape, (B, S1, self.hidden_size))
         self.assertEqual(attn1.shape, (B, self.num_heads, S1, S0 + 1))
@@ -553,18 +571,20 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
                 attention_mask=None,
                 past_key_values=cache,
                 cache_position=torch.arange(3),
+                use_cache=True,
             )
 
         # Now decode with q_len=2, so k_len should be 5.
         x1 = torch.randn(B, 2, self.hidden_size)
         pos1 = self._rand_rope(B, 2)
         with torch.no_grad():
-            _, attn_w = qattn(
+            _, attn_w, _ = qattn(
                 x1,
                 pos1,
                 attention_mask=None,
                 past_key_values=cache,
                 cache_position=torch.arange(3, 5),
+                use_cache=True,
             )
 
         self.assertEqual(attn_w.shape, (B, self.num_heads, 2, 5))
@@ -602,3 +622,368 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         assert out[0, 0, 2, 1].item() == 0.0
         assert out[0, 0, 2, 2].item() == 0.0
         assert out[0, 0, 2, 3].item() == -100.0
+
+    def _prefill_calibrated(self, *, dtype=DType.uint(8), layout="unrolled"):
+        qcfg = make_affine_ptq_config(
+            dtype=dtype,
+            model_args={"attention": {"layout": layout}},
+        )
+        attention = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg).eval()
+        attention.enable_calibration()
+        with torch.no_grad():
+            attention(
+                torch.randn(2, 4, self.hidden_size),
+                self._rand_rope(2, 4),
+                use_cache=False,
+            )
+        attention.freeze_qparams()
+        return attention
+
+    @staticmethod
+    def _dynamic_kv(cache: "DynamicCache") -> tuple[torch.Tensor, torch.Tensor]:
+        keys = getattr(cache.layers[0], "keys", None)
+        values = getattr(cache.layers[0], "values", None)
+        assert isinstance(keys, torch.Tensor)
+        assert isinstance(values, torch.Tensor)
+        return keys, values
+
+    def test_prefill_without_cache_output_calibrates_only_storage_and_compute(self):
+        for layout in ("batched", "unrolled"):
+            with self.subTest(layout=layout):
+                attention = self._prefill_calibrated(layout=layout)
+                names = dict(attention.named_observers(recurse=False))
+                self.assertNotIn("past_key", names)
+                self.assertNotIn("past_value", names)
+                for storage_name, compute_name in (
+                    ("new_k", "present_key"),
+                    ("new_v", "present_value"),
+                ):
+                    storage = names[storage_name]
+                    compute = names[compute_name]
+                    self.assertIsNot(storage, compute)
+                    assert isinstance(storage, AffineObserverBase)
+                    assert isinstance(compute, AffineObserverBase)
+                    for observer in (storage, compute):
+                        self.assertTrue(torch.isfinite(observer.min_val).all())
+                        self.assertTrue(torch.isfinite(observer.max_val).all())
+                        self.assertTrue(observer.has_qparams)
+                        self.assertFalse(observer.enabled)
+                    torch.testing.assert_close(storage.min_val, compute.min_val)
+                    torch.testing.assert_close(storage.max_val, compute.max_val)
+                attention.require_calibrated_cache()
+                self.assertIsInstance(
+                    attention.as_export_module("decode"), torch.nn.Module
+                )
+
+    def test_storage_contract_across_cache_types_layouts_and_output_modes(self):
+        """A prefill and two decodes keep S-grid storage identical for tuple/HF."""
+        from transformers.cache_utils import DynamicCache
+
+        for dtype, layout, equal_grids, output_mode in itertools.product(
+            (DType.uint(8), DType.int(16)),
+            ("batched", "unrolled"),
+            (False, True),
+            ("delta", "present"),
+        ):
+            with self.subTest(
+                dtype=dtype, layout=layout, equal=equal_grids, mode=output_mode
+            ), torch.no_grad():
+                attention = self._prefill_calibrated(dtype=dtype, layout=layout)
+                storage_zp = 0 if dtype.signed else 113
+                compute_zp = storage_zp if equal_grids else (0 if dtype.signed else 91)
+                for observer in (attention.obs_new_k, attention.obs_new_v):
+                    assert isinstance(observer, AffineObserverBase)
+                    observer.load_qparams(
+                        torch.tensor(0.09375), torch.tensor(storage_zp)
+                    )
+                for observer in (
+                    attention.obs_present_key,
+                    attention.obs_present_value,
+                ):
+                    assert isinstance(observer, AffineObserverBase)
+                    observer.load_qparams(
+                        torch.tensor(0.09375 if equal_grids else 0.21875),
+                        torch.tensor(compute_zp),
+                    )
+                frozen = {
+                    name: (observer._cached_scale.clone(), observer._cached_zp.clone())
+                    for name, observer in attention.named_observers(recurse=False)
+                    if isinstance(observer, AffineObserverBase)
+                }
+                hf_cache = DynamicCache(config=attention.config)
+                tuple_cache = None
+                length = 0
+                for query_length in (3, 1, 1):
+                    hidden = torch.randn(2, query_length, self.hidden_size)
+                    rope = self._rand_rope(2, query_length)
+                    keep = torch.ones(2, length + query_length, dtype=torch.bool)
+                    # A real padding slot persists through both cached decodes.
+                    keep[0, 0] = False
+                    _, _, delta = attention(
+                        hidden, rope, use_cache=True, cache_output_mode="delta"
+                    )
+                    expected_cache = (
+                        delta
+                        if tuple_cache is None
+                        else tuple(
+                            torch.cat((past, new), dim=2)
+                            for past, new in zip(tuple_cache, delta)
+                        )
+                    )
+                    static_result = attention(
+                        hidden,
+                        rope,
+                        attention_mask=keep,
+                        past_key_values=tuple_cache,
+                        use_cache=True,
+                        cache_output_mode=output_mode,
+                    )
+                    hf_result = attention(
+                        hidden,
+                        rope,
+                        attention_mask=keep,
+                        past_key_values=hf_cache,
+                        cache_position=torch.arange(length, length + query_length),
+                        use_cache=True,
+                        cache_output_mode=output_mode,
+                    )
+                    for static_tensor, hf_tensor in zip(
+                        static_result[:2], hf_result[:2]
+                    ):
+                        # The same attention graph must see the same C-grid inputs.
+                        torch.testing.assert_close(
+                            static_tensor, hf_tensor, atol=0, rtol=0
+                        )
+                    expected_output = (
+                        delta if output_mode == "delta" else expected_cache
+                    )
+                    hf_output = hf_result[2]
+                    if output_mode == "present":
+                        self.assertIs(hf_output, hf_cache)
+                        hf_output = self._dynamic_kv(hf_cache)
+                    for actual, expected in zip(static_result[2], expected_output):
+                        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                    for actual, expected in zip(hf_output, expected_output):
+                        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                    for actual, expected, observer in zip(
+                        self._dynamic_kv(hf_cache),
+                        expected_cache,
+                        (attention.obs_new_k, attention.obs_new_v),
+                    ):
+                        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                        torch.testing.assert_close(
+                            actual, observer.fake_quant(actual), atol=0, rtol=0
+                        )
+                    tuple_cache = expected_cache
+                    length += query_length
+                self.assertEqual(hf_cache.get_seq_length(), 5)
+                for name, observer in attention.named_observers(recurse=False):
+                    if isinstance(observer, AffineObserverBase):
+                        scale, zero_point = frozen[name]
+                        torch.testing.assert_close(
+                            observer._cached_scale, scale, atol=0, rtol=0
+                        )
+                        torch.testing.assert_close(
+                            observer._cached_zp, zero_point, atol=0, rtol=0
+                        )
+
+    def test_use_cache_false_reads_without_mutating_dynamic_cache(self):
+        from transformers.cache_utils import DynamicCache
+
+        for layout in ("batched", "unrolled"):
+            with self.subTest(layout=layout), torch.no_grad():
+                attention = self._prefill_calibrated(layout=layout)
+                cache = DynamicCache(config=attention.config)
+                attention(
+                    torch.randn(1, 3, self.hidden_size),
+                    self._rand_rope(1, 3),
+                    past_key_values=cache,
+                    use_cache=True,
+                )
+                past = tuple(value.clone() for value in self._dynamic_kv(cache))
+                hidden = torch.randn(1, 1, self.hidden_size)
+                rope = self._rand_rope(1, 1)
+                expected = attention(
+                    hidden, rope, past_key_values=past, use_cache=False
+                )
+                actual = attention(hidden, rope, past_key_values=cache, use_cache=False)
+                self.assertEqual(len(actual), 2)
+                for value, reference in zip(actual, expected):
+                    torch.testing.assert_close(value, reference, atol=0, rtol=0)
+                self.assertEqual(cache.get_seq_length(), 3)
+                for actual, expected in zip(self._dynamic_kv(cache), past):
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                empty_cache = DynamicCache(config=attention.config)
+                attention(hidden, rope, past_key_values=empty_cache, use_cache=False)
+                self.assertEqual(empty_cache.get_seq_length(), 0)
+
+    def test_obsolete_past_overrides_are_rejected_with_migration_guidance(self):
+        for name in ("past_key", "past_value"):
+            with self.subTest(observer=name):
+                qcfg = make_affine_ptq_config(
+                    overrides={name: {"dtype": DType.uint(8)}}
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "new_k.*new_v.*present_key.*present_value"
+                ):
+                    QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
+
+    def test_obsolete_state_dict_rejected_even_for_nonstrict_nested_load(self):
+        for strict, prefix in itertools.product((False, True), ("", "attention.")):
+            with self.subTest(strict=strict, prefix=prefix):
+                attention = self._prefill_calibrated()
+                target = (
+                    torch.nn.ModuleDict({"attention": attention})
+                    if prefix
+                    else attention
+                )
+                state = target.state_dict()
+                state[prefix + "obs_past_key.min_val"] = torch.tensor(-1.0)
+                state[prefix + "obs_past_value.max_val"] = torch.tensor(1.0)
+                with self.assertRaisesRegex(RuntimeError, "reprepare.*recalibrate"):
+                    target.load_state_dict(state, strict=strict)
+
+    def test_obsolete_serialized_module_requires_repreparation(self):
+        for name in ("obs_past_key", "obs_past_value"):
+            with self.subTest(observer=name):
+                attention = self._prefill_calibrated()
+                attention.add_module(name, MinMaxObserver(name=name))
+                checkpoint = io.BytesIO()
+                torch.save(attention, checkpoint)
+                checkpoint.seek(0)
+                with self.assertRaisesRegex(RuntimeError, "reprepare.*recalibrate"):
+                    torch.load(checkpoint, weights_only=False)
+
+    def test_two_domain_checkpoints_preserve_frozen_qparams_and_outputs(self):
+        attention = self._prefill_calibrated()
+        hidden = torch.randn(1, 2, self.hidden_size)
+        rope = self._rand_rope(1, 2)
+        # Materialize the per-channel projection observer buffer shapes before
+        # loading, as required by the existing affine observer state-dict API.
+        state_clone = self._prefill_calibrated()
+        state_clone.load_state_dict(attention.state_dict())
+        state_clone.freeze_qparams()
+        checkpoint = io.BytesIO()
+        torch.save(attention, checkpoint)
+        checkpoint.seek(0)
+        module_clone = torch.load(checkpoint, weights_only=False)
+        with torch.no_grad():
+            expected = attention(hidden, rope, use_cache=True)
+            for clone in (state_clone, module_clone):
+                actual = clone(hidden, rope, use_cache=True)
+                for value, reference in zip(
+                    actual[:2] + actual[2], expected[:2] + expected[2]
+                ):
+                    torch.testing.assert_close(value, reference, atol=0, rtol=0)
+                for name in ("new_k", "new_v", "present_key", "present_value"):
+                    original = attention.get_observer(name)
+                    restored = clone.get_observer(name)
+                    assert isinstance(original, AffineObserverBase)
+                    assert isinstance(restored, AffineObserverBase)
+                    torch.testing.assert_close(
+                        original._cached_scale, restored._cached_scale, atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        original._cached_zp, restored._cached_zp, atol=0, rtol=0
+                    )
+
+    def test_matching_token_local_mx_cache_policies_preserve_tuple_hf_parity(self):
+        from transformers.cache_utils import DynamicCache
+
+        qcfg = make_affine_ptq_config(
+            overrides={
+                name: mx(elem_format="int8", axis=-1)
+                for name in ("new_k", "new_v", "present_key", "present_value")
+            }
+        )
+        attention = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg).eval()
+        attention.enable_calibration()
+        hidden = torch.randn(1, 3, self.hidden_size)
+        rope = self._rand_rope(1, 3)
+        attention(hidden, rope, use_cache=False)
+        attention.freeze_qparams()
+        cache = DynamicCache(config=attention.config)
+        with torch.no_grad():
+            _, _, past = attention(hidden, rope, use_cache=True)
+            attention(hidden, rope, past_key_values=cache, use_cache=True)
+            hidden = torch.randn(1, 1, self.hidden_size)
+            rope = self._rand_rope(1, 1)
+            expected = attention(hidden, rope, past_key_values=past, use_cache=True)
+            actual = attention(hidden, rope, past_key_values=cache, use_cache=True)
+        for value, reference in zip(actual[:2], expected[:2]):
+            torch.testing.assert_close(value, reference, atol=0, rtol=0)
+        for value, reference in zip(self._dynamic_kv(cache), expected[2]):
+            torch.testing.assert_close(value, reference, atol=0, rtol=0)
+
+    def test_unsupported_mx_cache_grid_combinations_are_explicit(self):
+        token_mx = mx(elem_format="int8", axis=-1)
+        affine_policy = affine(DType.uint(8))
+        for storage, compute in (
+            (token_mx, affine_policy),
+            (affine_policy, token_mx),
+            (token_mx, mx(elem_format="int4", axis=-1)),
+            (mx(elem_format="int8", axis=2), mx(elem_format="int8", axis=2)),
+        ):
+            with self.subTest(storage=storage, compute=compute):
+                qcfg = make_affine_ptq_config(
+                    overrides={
+                        "new_k": storage,
+                        "new_v": storage,
+                        "present_key": compute,
+                        "present_value": compute,
+                    }
+                )
+                with self.assertRaisesRegex((ValueError, RuntimeError), "MX"):
+                    attention = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
+                    attention.enable_calibration()
+                    attention(
+                        torch.randn(1, 2, self.hidden_size), self._rand_rope(1, 2)
+                    )
+                    attention.freeze_qparams()
+                    attention.as_export_module("decode")
+
+    def test_legacy_stateless_cache_checkpoint_metadata_requires_repreparation(self):
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                qcfg = make_affine_ptq_config(
+                    overrides={
+                        name: mx(elem_format="int8", axis=-1)
+                        for name in ("new_k", "new_v", "present_key", "present_value")
+                    }
+                )
+                attention = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
+                attention.add_module("obs_past_key", MXObserver(name="past_key"))
+                attention.add_module("obs_past_value", MXObserver(name="past_value"))
+                source = torch.nn.ModuleDict({"attention": attention})
+                target = torch.nn.ModuleDict(
+                    {"attention": QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)}
+                )
+                state = source.state_dict()
+                # Stateless legacy observers leave no tensor keys to identify
+                # the obsolete contract, so the module version must protect it.
+                self.assertFalse(any("obs_past_" in key for key in state))
+                getattr(state, "_metadata")["attention"]["version"] = 1
+                with self.assertRaisesRegex(RuntimeError, "reprepare.*recalibrate"):
+                    target.load_state_dict(state, strict=strict)
+
+    def test_affine_cache_channel_axis_cannot_span_sequence(self):
+        for axis in (2, -2):
+            with self.subTest(axis=axis):
+                qcfg = make_affine_ptq_config(
+                    overrides={
+                        name: affine(
+                            DType.int(16),
+                            qscheme=QScheme.PER_CHANNEL_SYMM,
+                            channel_axis=axis,
+                        )
+                        for name in ("new_k", "new_v", "present_key", "present_value")
+                    }
+                )
+                with self.assertRaisesRegex((ValueError, RuntimeError), "sequence"):
+                    attention = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
+                    attention.enable_calibration()
+                    attention(
+                        torch.randn(1, 2, self.hidden_size), self._rand_rope(1, 2)
+                    )
+                    attention.freeze_qparams()
+                    attention.as_export_module("decode")

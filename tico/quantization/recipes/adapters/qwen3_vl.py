@@ -191,10 +191,10 @@ class Qwen3VLAdapter(ModelAdapter):
     ) -> None:
         """Reserve trailing dataset tokens for connected cache calibration.
 
-        The default one-token decode covers the static past-K/V boundary. Zero
-        explicitly requests prompt-only calibration. Short samples clamp the
-        decode count to leave at least one prefill token; a one-token sample
-        cannot calibrate a nonempty past boundary. No extra tokens are generated.
+        The default one-token decode adds decode activation coverage. Zero
+        requests prompt-only calibration, which also collects both KV storage
+        and attention-compute grids. Short samples clamp the decode count to
+        leave at least one prefill token. No extra tokens are generated.
         """
         decode_steps = int(
             stage_cfg.get(
