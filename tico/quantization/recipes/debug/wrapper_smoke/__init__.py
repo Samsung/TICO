@@ -14,7 +14,7 @@
 
 """Wrapper-level smoke checks for quantization wrappers."""
 
-from .case import CaseAvailability, ForwardInput, WrapperSmokeCase
+from .case import CaseAvailability, ExportInvocation, ForwardInput, WrapperSmokeCase
 from .registry import case_names, get_case, list_cases
 from .result import WrapperSmokeResult
 from .runner import run_wrapper_smoke, run_wrapper_smoke_suite
@@ -22,6 +22,7 @@ from .runner import run_wrapper_smoke, run_wrapper_smoke_suite
 __all__ = [
     "CaseAvailability",
     "ForwardInput",
+    "ExportInvocation",
     "WrapperSmokeCase",
     "WrapperSmokeResult",
     "case_names",

@@ -15,7 +15,7 @@
 """Smoke cases for Qwen3-VL wrapper checks."""
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Tuple, TYPE_CHECKING
+from typing import Any, cast, Mapping, Tuple, TYPE_CHECKING
 
 import torch
 
@@ -25,9 +25,14 @@ if TYPE_CHECKING:
         Qwen3VLVisionModel,
     )
 
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
+        QuantQwen3VLTextAttention,
+    )
+
 
 from tico.quantization.recipes.debug.wrapper_smoke.case import (
     CaseAvailability,
+    ExportInvocation,
     ForwardInput,
     WrapperSmokeCase,
 )
@@ -416,10 +421,10 @@ def _rope(seq_len: int, head_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _text_rope(
-    batch_size: int, seq_len: int, head_dim: int
+    batch_size: int, seq_len: int, head_dim: int, *, device=None, dtype=None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Create synthetic text RoPE embeddings."""
-    emb = torch.randn(batch_size, seq_len, head_dim)
+    emb = torch.randn(batch_size, seq_len, head_dim, device=device, dtype=dtype)
     return emb.cos(), emb.sin()
 
 
@@ -586,11 +591,6 @@ def _create_image_input(
     return example
 
 
-def _causal_mask(seq_len: int, fill_value: float = -120.0) -> torch.Tensor:
-    mask = torch.full((1, 1, seq_len, seq_len), fill_value)
-    return torch.triu(mask, diagonal=1)
-
-
 class QwenBaseCase(WrapperSmokeCase):
     """Base class for Qwen3-VL wrapper smoke cases with size profiles."""
 
@@ -710,7 +710,117 @@ class QwenBaseCase(WrapperSmokeCase):
         return f"{self.name}.{profile}.q.circle"
 
 
-class QwenTextAttentionBaseCase(QwenBaseCase):
+def _text_static_decoder_sample(
+    module: torch.nn.Module,
+    *,
+    batch_size: int,
+    query_len: int,
+    key_len: int,
+    mask_rank: int,
+) -> ForwardInput:
+    """Build host inputs for Qwen text attention and decoder-layer static ABIs.
+
+    Qwen text mRoPE has already combined its three position axes at this boundary:
+    each cosine/sine tensor is [B, Q, head_dim]. Decode retains a fixed cache
+    capacity and masks unused slots, matching the staged production exporter.
+    """
+    wrapped = getattr(module, "wrapped", module)
+    attention = getattr(wrapped, "self_attn", wrapped)
+    attention = cast(
+        "QuantQwen3VLTextAttention", getattr(attention, "wrapped", attention)
+    )
+    config = attention.config
+    parameter = next(wrapped.parameters())
+    device, dtype = parameter.device, parameter.dtype
+    past_len = key_len - query_len
+    if past_len < 0 or mask_rank not in (3, 4):
+        raise ValueError("Invalid Qwen static decoder sample dimensions.")
+    hidden = torch.randn(
+        batch_size, query_len, config.hidden_size, device=device, dtype=dtype
+    )
+    rope = _text_rope(
+        batch_size, query_len, config.head_dim, device=device, dtype=dtype
+    )
+    fill_value = float(attention.qcfg.attention_mask_fill_value)
+    mask = torch.full(
+        (batch_size, 1, query_len, key_len),
+        fill_value,
+        device=device,
+        dtype=dtype,
+    ).triu_(past_len + 1)
+    kwargs: dict[str, Any] = {"position_embeddings": rope}
+    if past_len:
+        # Physical cache capacity is K-1; only the prefix is populated by the host.
+        valid_past_len = max(key_len // 2, 1)
+        mask[..., valid_past_len:past_len] = fill_value
+        past_k = torch.randn(
+            batch_size,
+            attention.num_kv_heads,
+            past_len,
+            config.head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        kwargs.update(
+            past_key_values=(past_k, torch.randn_like(past_k)), use_cache=True
+        )
+    kwargs["attention_mask"] = mask.squeeze(1) if mask_rank == 3 else mask
+    return ForwardInput((hidden,), kwargs)
+
+
+class QwenTextStaticCase(QwenBaseCase):
+    """Couple guarded Qwen text adapters with explicit, named host inputs."""
+
+    export_mode = "prefill"
+    seq_len = 8
+    decode_mask_rank = 4
+
+    def _sample(self, prepared: torch.nn.Module) -> ForwardInput:
+        """Use the same family builder for calibration, evaluation, and export."""
+        decode = self.export_mode == "decode"
+        return _text_static_decoder_sample(
+            prepared,
+            batch_size=1,
+            query_len=1 if decode else self.seq_len,
+            key_len=self.seq_len,
+            mask_rank=self.decode_mask_rank if decode else 4,
+        )
+
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Construct the guarded text adapter for this export mode."""
+        wrapped = getattr(quantized, "wrapped", quantized)
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        assert callable(as_export_module)
+        return as_export_module(self.export_mode).eval()
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Retain host tensors and remove eager-only cache control flags."""
+        return ForwardInput(
+            eval_sample.args,
+            {
+                name: value
+                for name, value in eval_sample.kwargs.items()
+                if name in {"attention_mask", "position_embeddings", "past_key_values"}
+            },
+        )
+
+    def export_invocation(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ExportInvocation:
+        """Assemble the adapter and the exact host tensors used in eager checks."""
+        return ExportInvocation(
+            self.export_module(quantized, cfg), self.export_input(eval_sample, cfg)
+        )
+
+
+class QwenTextAttentionBaseCase(QwenTextStaticCase):
     """Base class for Qwen3-VL text attention smoke cases."""
 
     tags: tuple[str, ...] = ("qwen3_vl", "text", "attention")
@@ -728,18 +838,6 @@ class QwenTextAttentionBaseCase(QwenBaseCase):
         module = Qwen3VLTextAttention(self.text_cfg, layer_idx=0).eval()
         return module, clone_module(module)
 
-    def export_module(
-        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
-    ) -> torch.nn.Module:
-        """Export the wrapped text attention module in the case-specific mode."""
-        wrapped = getattr(quantized, "wrapped", quantized)
-        as_export_module = getattr(wrapped, "as_export_module", None)
-        return (
-            as_export_module(self.export_mode).eval()
-            if callable(as_export_module)
-            else quantized
-        )
-
 
 class QwenTextAttentionPrefillCase(QwenTextAttentionBaseCase):
     """Smoke case for the Qwen3-VL text attention prefill wrapper path."""
@@ -749,38 +847,24 @@ class QwenTextAttentionPrefillCase(QwenTextAttentionBaseCase):
     tags = ("qwen3_vl", "text", "attention", "prefill")
     export_mode = "prefill"
 
-    def _sample(self) -> ForwardInput:
-        """Create one synthetic prefill text attention input."""
-        hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
-        rope = _text_rope(1, self.seq_len, self.text_cfg.head_dim)
-        return ForwardInput((hidden, rope))
-
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create prefill text attention calibration samples."""
         count = self._calibration_sample_count(cfg, default=3)
-        return [self._sample() for _ in range(count)]
+        return [self._sample(prepared) for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the prefill text attention evaluation sample."""
-        return self._sample()
+        return self._sample(prepared)
 
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
     ) -> Any:
         """Run the original text attention prefill signature with an explicit mask."""
-        hidden, rope = sample.args
-        mask = _causal_mask(hidden.shape[1])
-        return reference(hidden, position_embeddings=rope, attention_mask=mask)[0]
-
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create positional prefill export inputs for the text attention adapter."""
-        return ForwardInput(eval_sample.args)
+        return reference(*sample.args, **dict(sample.kwargs))[0]
 
 
 class QwenTextAttentionDecodeCase(QwenTextAttentionBaseCase):
@@ -793,49 +877,20 @@ class QwenTextAttentionDecodeCase(QwenTextAttentionBaseCase):
     tags = ("qwen3_vl", "text", "attention", "decode")
     compare_reference_source = "prepared"
     export_mode = "decode"
-
-    def _sample(self) -> ForwardInput:
-        """Create one synthetic static decode text attention input."""
-        hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
-        rope = _text_rope(1, 1, self.text_cfg.head_dim)
-        mask = torch.zeros(1, 1, self.seq_len)
-        past_k = torch.randn(
-            1,
-            self.text_cfg.num_key_value_heads,
-            self.seq_len - 1,
-            self.text_cfg.head_dim,
-        )
-        past_v = torch.randn_like(past_k)
-        return ForwardInput(
-            (hidden, rope),
-            {
-                "attention_mask": mask,
-                "past_key_values": (past_k, past_v),
-                "use_cache": True,
-            },
-        )
+    decode_mask_rank = 3
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create static decode text attention calibration samples."""
         count = self._calibration_sample_count(cfg, default=3)
-        return [self._sample() for _ in range(count)]
+        return [self._sample(prepared) for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the static decode text attention evaluation sample."""
-        return self._sample()
-
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create positional static decode inputs expected by the export adapter."""
-        hidden, pos = eval_sample.args
-        mask = eval_sample.kwargs["attention_mask"]
-        past = eval_sample.kwargs["past_key_values"]
-        return ForwardInput((hidden, pos, mask, past))
+        return self._sample(prepared)
 
 
 class QwenTextMLPCase(QwenBaseCase):
@@ -883,7 +938,7 @@ class QwenTextMLPCase(QwenBaseCase):
         return self._sample()
 
 
-class QwenTextDecoderLayerBaseCase(QwenBaseCase):
+class QwenTextDecoderLayerBaseCase(QwenTextStaticCase):
     """Base class for Qwen3-VL text decoder-layer smoke cases."""
 
     tags: tuple[str, ...] = ("qwen3_vl", "text", "decoder_layer")
@@ -904,18 +959,6 @@ class QwenTextDecoderLayerBaseCase(QwenBaseCase):
         module = Qwen3VLTextDecoderLayer(self.text_cfg, layer_idx=0).eval()
         return module, clone_module(module)
 
-    def export_module(
-        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
-    ) -> torch.nn.Module:
-        """Export the wrapped text decoder layer in the case-specific mode."""
-        wrapped = getattr(quantized, "wrapped", quantized)
-        as_export_module = getattr(wrapped, "as_export_module", None)
-        return (
-            as_export_module(self.export_mode).eval()
-            if callable(as_export_module)
-            else quantized
-        )
-
 
 class QwenTextDecoderLayerPrefillCase(QwenTextDecoderLayerBaseCase):
     """Smoke case for the Qwen3-VL text decoder-layer prefill wrapper path."""
@@ -925,43 +968,18 @@ class QwenTextDecoderLayerPrefillCase(QwenTextDecoderLayerBaseCase):
     tags = ("qwen3_vl", "text", "decoder_layer", "prefill")
     export_mode = "prefill"
 
-    def _sample(self) -> ForwardInput:
-        """Create one synthetic text decoder-layer prefill input."""
-        hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
-        pos = _text_rope(1, self.seq_len, self.text_cfg.head_dim)
-        mask = _causal_mask(self.seq_len)
-        position_ids = torch.arange(self.seq_len).unsqueeze(0)
-        return ForwardInput(
-            (),
-            {
-                "hidden_states": hidden,
-                "position_embeddings": pos,
-                "attention_mask": mask,
-                "position_ids": position_ids,
-            },
-        )
-
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create text decoder-layer prefill calibration samples."""
         count = self._calibration_sample_count(cfg, default=5)
-        return [self._sample() for _ in range(count)]
+        return [self._sample(prepared) for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the text decoder-layer prefill evaluation sample."""
-        return self._sample()
-
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create positional prefill inputs expected by the export adapter."""
-        hidden = eval_sample.kwargs["hidden_states"]
-        mask = eval_sample.kwargs["attention_mask"]
-        pos = eval_sample.kwargs["position_embeddings"]
-        return ForwardInput((hidden, mask, pos))
+        return self._sample(prepared)
 
 
 class QwenTextDecoderLayerDecodeCase(QwenTextDecoderLayerBaseCase):
@@ -979,53 +997,18 @@ class QwenTextDecoderLayerDecodeCase(QwenTextDecoderLayerBaseCase):
         if hasattr(wrapped, "return_type"):
             wrapped.return_type = "tuple"
 
-    def _sample(self) -> ForwardInput:
-        """Create one synthetic static decode text decoder-layer input."""
-        hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
-        pos = _text_rope(1, 1, self.text_cfg.head_dim)
-        mask = torch.zeros(1, 1, 1, self.seq_len)
-        position_ids = torch.full((1, 1), self.seq_len - 1, dtype=torch.long)
-        past_k = torch.randn(
-            1,
-            self.text_cfg.num_key_value_heads,
-            self.seq_len - 1,
-            self.text_cfg.head_dim,
-        )
-        past_v = torch.randn_like(past_k)
-        return ForwardInput(
-            (),
-            {
-                "hidden_states": hidden,
-                "position_embeddings": pos,
-                "attention_mask": mask,
-                "position_ids": position_ids,
-                "past_key_values": (past_k, past_v),
-                "use_cache": True,
-            },
-        )
-
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create text decoder-layer decode calibration samples."""
         count = self._calibration_sample_count(cfg, default=3)
-        return [self._sample() for _ in range(count)]
+        return [self._sample(prepared) for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the text decoder-layer decode evaluation sample."""
-        return self._sample()
-
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create positional static decode inputs expected by the export adapter."""
-        hidden = eval_sample.kwargs["hidden_states"]
-        mask = eval_sample.kwargs["attention_mask"]
-        pos = eval_sample.kwargs["position_embeddings"]
-        past = eval_sample.kwargs["past_key_values"]
-        return ForwardInput((hidden, mask, pos, past))
+        return self._sample(prepared)
 
 
 class QwenTextModelCase(QwenBaseCase):
