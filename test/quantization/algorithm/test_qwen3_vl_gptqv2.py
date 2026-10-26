@@ -327,6 +327,68 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
         self.assertLessEqual(stats["peak"], 3)
 
     @torch.no_grad()
+    def test_retry_does_not_retain_failed_attempt_tensors(self):
+        """A failed attempt's temporaries must not inflate the next attempt.
+
+        Regression guard: when the final cholesky of an attempt fails, the
+        retry loop must not carry the stale inverse (or the failed frame via
+        a retained exception) into the next attempt — at most three N x N
+        tensors may be live at any time during the retry path.
+        """
+        import weakref
+
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+
+        live: weakref.WeakSet = weakref.WeakSet()
+        stats = {"peak": 0}
+        real_cholesky = torch.linalg.cholesky
+        real_inverse = torch.cholesky_inverse
+        real_clone = torch.Tensor.clone
+
+        def track(t):
+            live.add(t)
+            stats["peak"] = max(stats["peak"], len(live))
+            return t
+
+        upper_calls = {"n": 0}
+
+        def cholesky_spy(m, *args, **kwargs):
+            if kwargs.get("upper"):
+                upper_calls["n"] += 1
+                if upper_calls["n"] == 1:
+                    # Fail the first attempt at its last step, when the
+                    # inverse has already been built (worst case for stale
+                    # retention).
+                    raise RuntimeError("simulated numerical failure")
+            return track(real_cholesky(m, *args, **kwargs))
+
+        def inverse_spy(m, *args, **kwargs):
+            return track(real_inverse(m, *args, **kwargs))
+
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+        h_shape = gptq.H.shape
+
+        def clone_spy(t, *args, **kwargs):
+            out = real_clone(t, *args, **kwargs)
+            if out.shape == h_shape:
+                track(out)
+            return out
+
+        live.add(gptq.H)
+        stats["peak"] = 1
+        with (
+            unittest.mock.patch("torch.linalg.cholesky", cholesky_spy),
+            unittest.mock.patch("torch.cholesky_inverse", inverse_spy),
+            unittest.mock.patch("torch.Tensor.clone", clone_spy),
+        ):
+            gptq.fasterquant(blocksize=3, percdamp=0.01, percdamp_max=0.5, groupsize=-1)
+
+        self.assertGreaterEqual(upper_calls["n"], 2)  # a retry really happened
+        self.assertLessEqual(stats["peak"], 3)
+
+    @torch.no_grad()
     def test_failed_retry_attempt_tensors_released_without_gc(self):
         """A successful retry must not keep failed-attempt tensors alive.
 

@@ -648,8 +648,11 @@ class TestRecipeStages(unittest.TestCase):
                 calls["config"] = config
                 return model_arg
 
-            with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-                gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+            with (
+                patch.object(gptq_mod, "prepare", fake_prepare),
+                patch.object(
+                    gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+                ),
             ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     GPTQStage().run(ctx, stage_cfg)

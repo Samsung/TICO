@@ -320,7 +320,6 @@ class GPTQ:
             dtype=self.hessian_dtype,
         )
         self.nsamples = 0
-        self.observation_count = 0
         self.effective_observation_count = 0.0
         self.percdamp_used: Optional[float] = None
         self.quantizer: Quantizer = Quantizer()
@@ -411,7 +410,6 @@ class GPTQ:
             inp = _conv3d_input_to_unfolded(self.layer, inp)
 
         observations = int(inp.shape[1])
-        self.observation_count += observations
         self.effective_observation_count += float(observations)
 
         # GPTQv2: Apply the same reshaping to native_inp
@@ -556,6 +554,24 @@ class GPTQ:
             )
         return diag, diag_mean
 
+    def _factorize_hessian_inverse_once(
+        self,
+        h: torch.Tensor,
+        diag: torch.Tensor,
+        diag_mean: torch.Tensor,
+        percdamp: float,
+    ) -> torch.Tensor:
+        """Run one attempt; keep its temporary tensors in this frame only."""
+        h_try = h.clone()
+        h_try[diag, diag] += percdamp * diag_mean
+        chol = torch.linalg.cholesky(h_try)
+        del h_try
+        hinv = torch.cholesky_inverse(chol)
+        del chol
+        hinv = torch.linalg.cholesky(hinv, upper=True)
+        self._validate_hinv(hinv, percdamp)
+        return hinv
+
     def _factorize_hessian_inverse(
         self,
         h: torch.Tensor,
@@ -564,20 +580,7 @@ class GPTQ:
         retry_factor: float = 2.5,
         max_retries: int = 5,
     ) -> torch.Tensor:
-        """
-        Build the Cholesky factor of the damped inverse Hessian with retries.
-
-        This is the auto-mode path: ``percdamp_max`` acts as a retry ceiling,
-        independent of any clamp the caller applied to ``percdamp``. The
-        ceiling is always attempted before giving up: if the attempt budget
-        (``max_retries``) is exhausted first, one final attempt is made at
-        the ceiling itself (at most ``max_retries + 1`` attempts in total).
-        The undamped ``h`` is retained for retries while per-attempt
-        temporaries are released as early as possible, so at most three N x N
-        tensors are
-        live at once. The static single-attempt path is inlined in
-        ``fasterquant`` to preserve its legacy two-tensor memory profile.
-        """
+        """Retry auto-mode factorization without retaining failed attempts."""
         if percdamp_max is None:
             raise ValueError(
                 "percdamp_max is required for the retry path; the static "
@@ -593,41 +596,31 @@ class GPTQ:
         cur_percdamp = float(percdamp)
         ceiling = float(percdamp_max)
         attempts = 0
-        last_error: Optional[Exception] = None
+        last_error_text = ""
 
         while True:
             attempts += 1
             try:
-                h_try = h.clone()
-                h_try[diag, diag] += cur_percdamp * diag_mean
-                chol = torch.linalg.cholesky(h_try)
-                del h_try  # damped copy no longer needed once chol exists
-                hinv = torch.cholesky_inverse(chol)
-                del chol  # lower factor no longer needed once the inverse exists
-                hinv = torch.linalg.cholesky(hinv, upper=True)
-                self._validate_hinv(hinv, cur_percdamp)
-                self.percdamp_used = cur_percdamp
-                # Drop a retained failed-attempt exception before returning:
-                # its traceback references this frame (and thus the Hessian
-                # tensors in its locals), forming a reference cycle that
-                # would otherwise keep those tensors alive until cyclic
-                # garbage collection.
-                last_error = None
-                return hinv
+                hinv = self._factorize_hessian_inverse_once(
+                    h, diag, diag_mean, cur_percdamp
+                )
             except torch.OutOfMemoryError:
-                # Retrying with larger damping cannot fix an OOM (each attempt
-                # allocates fresh N x N temporaries); do not mask it as a
-                # factorization failure.
+                # Damping cannot fix an OOM. Preserve the original exception.
                 raise
             except RuntimeError as exc:
-                last_error = exc
+                # Keep diagnostic text only, not the exception or traceback.
+                # Python clears `exc` when this handler exits, allowing the
+                # failed helper frame and its temporaries to be released
+                # before the next attempt allocates anything.
+                last_error_text = f"{type(exc).__name__}: {exc}"
+            else:
+                self.percdamp_used = cur_percdamp
+                return hinv
 
+            # Keep the existing escalation policy and final ceiling attempt.
             if cur_percdamp >= ceiling:
                 break
             if attempts >= max_retries:
-                # Attempt budget exhausted before natural escalation reached
-                # the configured ceiling: spend one final attempt at the
-                # ceiling itself so the retry policy always honors it.
                 cur_percdamp = ceiling
             else:
                 cur_percdamp = min(ceiling, cur_percdamp * retry_factor)
@@ -639,8 +632,9 @@ class GPTQ:
             f"retry_ceiling={percdamp_max}. "
             "The final attempt used the configured retry ceiling. "
             "Increase percdamp or raise the retry ceiling "
-            "(auto_percdamp_retry_max)."
-        ) from last_error
+            "(auto_percdamp_retry_max). "
+            f"Last error: {last_error_text}"
+        ) from None
 
     @torch.no_grad()
     def fasterquant(
