@@ -3586,7 +3586,7 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     )
 
     q_m = convert(q_m)
-    print_minmax_values(q_m)
+    #print_minmax_values(q_m)
     
     return q_m
 

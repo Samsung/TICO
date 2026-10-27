@@ -25,7 +25,7 @@ from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.validate_args_kwargs import CatArgs, PermuteArgs, ReshapeArgs
+from tico.utils.validate_args_kwargs import CatArgs, PermuteArgs, ReshapeArgs, SliceArgs
 
 
 @trace_graph_diff_on_pass
@@ -40,6 +40,11 @@ class PropagateQParamBackward(PassBase):
     AFTER)
 
     node (with meta[QPARAM_KEY]) -> reshape (with meta[QPARAM_KEY])
+
+    This is required for graph inputs that are read through qparam-carrying
+    ops (e.g. the int16 KV-cache state read through a ``slice``): the input
+    placeholder must carry the same qparam so the Circle writer stores the
+    input as quantized (the runtime provides the value on that grid).
     """
 
     def __init__(self):
@@ -78,6 +83,9 @@ class PropagateQParamBackward(PassBase):
             elif node.target == torch.ops.aten.reshape.default:
                 args = ReshapeArgs(*node.args, **node.kwargs)
                 _propagate_qparam_if_possible(node, args.input)
+            elif node.target == torch.ops.aten.slice.Tensor:
+                slice_args = SliceArgs(*node.args, **node.kwargs)
+                _propagate_qparam_if_possible(node, slice_args.input)
             elif node.target == torch.ops.aten.permute.default:
                 permute_args = PermuteArgs(*node.args, **node.kwargs)
                 _propagate_qparam_if_possible(node, permute_args.input)
