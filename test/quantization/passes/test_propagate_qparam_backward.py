@@ -153,6 +153,74 @@ class CatTest(SingleOpPropagateQParamBackwardTest):
         self.run_test(inputs)
 
 
+class _SharedConcatSource(torch.nn.Module):
+    def __init__(self, *, producer=False, view=False):
+        super().__init__()
+        self.producer = producer
+        self.view = view
+
+    def forward(self, left, right):
+        source = torch.relu(left) if self.producer else left
+        operand = source.reshape(2, 3) if self.view else source
+        return torch.cat((operand, right)), source, right
+
+
+class ConcatEstablishedDomainTest(unittest.TestCase):
+    def test_inputs_and_shared_producers_keep_their_established_domains(self):
+        for producer in (False, True):
+            for view in (False, True):
+                with self.subTest(producer=producer, view=view):
+                    program = torch.export.export(
+                        _SharedConcatSource(producer=producer, view=view),
+                        (torch.ones(2, 3), torch.ones(2, 3)),
+                    )
+                    ConvertLayoutOpToReshape().call(program)
+                    concat = next(
+                        node
+                        for node in program.graph.nodes
+                        if node.target == torch.ops.aten.cat.default
+                    )
+                    output = next(
+                        node for node in program.graph.nodes if node.op == "output"
+                    )
+                    source = output.args[0][1]
+                    first, second = concat.args[0]
+                    original = QuantParam(scale=[0.125], zero_point=[3], dtype="int16")
+                    source.meta[QPARAM_KEY] = copy.deepcopy(original)
+                    first.meta[QPARAM_KEY] = copy.deepcopy(original)
+                    concat.meta[QPARAM_KEY] = QuantParam(
+                        scale=[0.5], zero_point=[-7], dtype="int16"
+                    )
+                    second.meta[QPARAM_KEY] = copy.deepcopy(concat.meta[QPARAM_KEY])
+
+                    PropagateQParamBackward().call(program)
+
+                    self.assertEqual(source.meta[QPARAM_KEY], original)
+                    self.assertEqual(first.meta[QPARAM_KEY], original)
+                    self.assertIs(output.args[0][1], source)
+                    self.assertEqual(second.meta[QPARAM_KEY], concat.meta[QPARAM_KEY])
+
+    def test_only_unannotated_concat_inputs_inherit_the_output_domain(self):
+        program = torch.export.export(CatModule(), (torch.ones(2, 3), torch.ones(2, 3)))
+        concat = next(
+            node
+            for node in program.graph.nodes
+            if node.target == torch.ops.aten.cat.default
+        )
+        first, second = concat.args[0]
+        original = QuantParam(scale=[0.125], zero_point=[3], dtype="int16")
+        first.meta[QPARAM_KEY] = original
+        concat.meta[QPARAM_KEY] = QuantParam(
+            scale=[0.5], zero_point=[-7], dtype="int16"
+        )
+
+        PropagateQParamBackward().call(program)
+
+        self.assertIs(first.meta[QPARAM_KEY], original)
+        self.assertEqual(second.meta[QPARAM_KEY], concat.meta[QPARAM_KEY])
+        self.assertIsNot(second.meta[QPARAM_KEY], concat.meta[QPARAM_KEY])
+
+
 class PermuteModule(torch.nn.Module):
     def __init__(self):
         super().__init__()

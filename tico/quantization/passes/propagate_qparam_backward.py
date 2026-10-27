@@ -195,6 +195,20 @@ class PropagateQParamBackward(PassBase):
                     continue
 
                 for concat_input in concat_inputs:
+                    # An established producer domain also belongs to its other
+                    # consumers and to graph input/output ABIs. Concat converts
+                    # such inputs on its own edges instead of relabeling them.
+                    # Explicit Quantize boundaries retain their private-retarget
+                    # contract; unannotated inputs can still inherit the domain.
+                    schema = getattr(concat_input.target, "_schema", None)
+                    if QPARAM_KEY in concat_input.meta and getattr(
+                        schema, "name", None
+                    ) not in {
+                        "circle_custom::quantize_mx",
+                        "quantized_decomposed::quantize_per_tensor",
+                        "quantized_decomposed::quantize_per_channel",
+                    }:
+                        continue
                     _propagate_qparam_if_possible(node, concat_input)
             elif node.target == torch.ops.aten.reshape.default:
                 args = ReshapeArgs(*node.args, **node.kwargs)

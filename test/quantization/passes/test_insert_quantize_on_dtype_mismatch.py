@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import unittest
 
 import torch
+from tico.ops import Concat
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
@@ -597,6 +599,170 @@ class CatTest(InsertQuantizeOnDtypeMismatchTest):
         target_pass = InsertQuantizeOnDtypeMismatch()
         with self.assertRaises(NotYetSupportedError):
             target_pass.call(self.ep)
+
+
+class _CatWithSharedSources(torch.nn.Module):
+    def __init__(self, *, width=False, repeat=False):
+        super().__init__()
+        self.width = width
+        self.repeat = repeat
+        self.concat = Concat(dim=1, allow_distinct_input_qparams=True)
+
+    def forward(self, left, right):
+        inputs = (left, left, right) if self.repeat else (left, right)
+        combined = self.concat(inputs) if self.width else torch.cat(inputs, dim=1)
+        return combined, left, right
+
+
+class ConcatAffineDomainTest(unittest.TestCase):
+    @staticmethod
+    def _export(dtype="int16", *, width=False, repeat=False):
+        program = torch.export.export(
+            _CatWithSharedSources(width=width, repeat=repeat),
+            (torch.ones(1, 2, 4), torch.ones(1, 3, 4)),
+        )
+        concat = next(
+            node
+            for node in program.graph.nodes
+            if node.target == torch.ops.aten.cat.default
+        )
+        left, right = tuple(
+            node for node in program.graph.nodes if node.op == "placeholder"
+        )
+        target = _make_qparam(dtype, scale=0.5, zp=29)
+        left.meta[QPARAM_KEY] = _make_qparam(dtype, scale=0.125, zp=3)
+        right.meta[QPARAM_KEY] = copy.deepcopy(target)
+        concat.meta[QPARAM_KEY] = target
+        return program, concat, left, right
+
+    def test_scale_and_zero_point_mismatches_use_real_consumer_edge_quantize(self):
+        for dtype in ("uint8", "int16"):
+            for scale_only in (False, True):
+                with self.subTest(dtype=dtype, scale_only=scale_only):
+                    program, concat, left, right = self._export(dtype)
+                    target = concat.meta[QPARAM_KEY]
+                    original = left.meta[QPARAM_KEY]
+                    if scale_only:
+                        original.zero_point = copy.deepcopy(target.zero_point)
+                    else:
+                        original.scale = copy.deepcopy(target.scale)
+                    saved = copy.deepcopy(original)
+
+                    InsertQuantizeOnDtypeMismatch().call(program)
+
+                    quantize, unchanged = concat.args[0]
+                    self.assertIs(unchanged, right)
+                    self.assertEqual(
+                        quantize.target,
+                        torch.ops.quantized_decomposed.quantize_per_tensor.default,
+                    )
+                    self.assertIs(quantize.args[0], left)
+                    self.assertEqual(quantize.meta[QPARAM_KEY], target)
+                    self.assertIsNot(quantize.meta[QPARAM_KEY], target)
+                    self.assertEqual(quantize.args[1:3], (0.5, 29))
+                    self.assertEqual(quantize.args[5], getattr(torch, dtype))
+                    self.assertIs(left.meta[QPARAM_KEY], original)
+                    self.assertEqual(left.meta[QPARAM_KEY], saved)
+                    output = next(
+                        node for node in program.graph.nodes if node.op == "output"
+                    )
+                    self.assertEqual(output.args[0][1:], (left, right))
+                    values = torch.tensor([-0.25, 0, 0.75])
+                    codes = quantize.target(values, *quantize.args[1:])
+                    lower, upper = (0, 255) if dtype == "uint8" else (-32768, 32767)
+                    expected = (torch.round(values / 0.5) + 29).clamp(lower, upper)
+                    torch.testing.assert_close(
+                        codes, expected.to(getattr(torch, dtype))
+                    )
+
+    def test_same_domain_ignores_calibration_range_metadata_and_is_idempotent(self):
+        program, concat, left, right = self._export()
+        left.meta[QPARAM_KEY] = copy.deepcopy(concat.meta[QPARAM_KEY])
+        left.meta[QPARAM_KEY].min = [-1]
+        right.meta[QPARAM_KEY].max = [2]
+        original_inputs = concat.args[0]
+        for _ in range(2):
+            InsertQuantizeOnDtypeMismatch().call(program)
+            self.assertEqual(concat.args[0], original_inputs)
+            self.assertFalse(
+                any(
+                    node.target
+                    == torch.ops.quantized_decomposed.quantize_per_tensor.default
+                    for node in program.graph.nodes
+                )
+            )
+
+    def test_repeated_shared_input_uses_one_quantize_without_changing_other_users(self):
+        program, concat, left, right = self._export(repeat=True)
+        for _ in range(2):
+            InsertQuantizeOnDtypeMismatch().call(program)
+            first, repeated, unchanged = concat.args[0]
+            self.assertIs(first, repeated)
+            self.assertIs(first.args[0], left)
+            self.assertIs(unchanged, right)
+            self.assertEqual(left.meta[QPARAM_KEY].scale, [0.125])
+            self.assertEqual(
+                sum(
+                    node.target
+                    == torch.ops.quantized_decomposed.quantize_per_tensor.default
+                    for node in program.graph.nodes
+                ),
+                1,
+            )
+
+    def test_output_dtype_bridge_also_aligns_the_new_concat_input_domain(self):
+        program, concat, left, right = self._export()
+        concat.meta[QPARAM_KEY] = _make_qparam("uint8", scale=0.25, zp=128)
+        original = copy.deepcopy(left.meta[QPARAM_KEY])
+
+        InsertQuantizeOnDtypeMismatch().call(program)
+
+        self.assertEqual(concat.meta[QPARAM_KEY].dtype, "int16")
+        for edge in concat.args[0]:
+            self.assertEqual(
+                edge.target, torch.ops.quantized_decomposed.quantize_per_tensor.default
+            )
+            self.assertEqual(edge.meta[QPARAM_KEY], concat.meta[QPARAM_KEY])
+            self.assertEqual(edge.args[5], torch.int16)
+        output = next(node for node in program.graph.nodes if node.op == "output")
+        final_quantize = output.args[0][0]
+        self.assertIs(final_quantize.args[0], concat)
+        self.assertEqual(final_quantize.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(final_quantize.args[1:3], (0.25, 128))
+        self.assertEqual(left.meta[QPARAM_KEY], original)
+
+    def test_width_direction_exception_keeps_distinct_input_grids(self):
+        program, concat, left, right = self._export(width=True)
+        original = concat.args[0]
+
+        InsertQuantizeOnDtypeMismatch().call(program)
+
+        self.assertEqual(concat.args[0], original)
+        self.assertEqual(left.meta[QPARAM_KEY].scale, [0.125])
+        self.assertEqual(right.meta[QPARAM_KEY].scale, [0.5])
+
+    def test_non_affine_or_missing_domains_do_not_gain_affine_bridges(self):
+        for kind in ("per_channel", "mixed_mx", "missing"):
+            with self.subTest(kind=kind):
+                program, concat, left, right = self._export()
+                if kind == "per_channel":
+                    left.meta[QPARAM_KEY].quantized_dimension = 1
+                elif kind == "mixed_mx":
+                    right.meta[QPARAM_KEY] = _make_qparam("mxint8")
+                else:
+                    del right.meta[QPARAM_KEY]
+                original = concat.args[0]
+
+                InsertQuantizeOnDtypeMismatch().call(program)
+
+                self.assertEqual(concat.args[0], original)
+                self.assertFalse(
+                    any(
+                        node.target
+                        == torch.ops.quantized_decomposed.quantize_per_tensor.default
+                        for node in program.graph.nodes
+                    )
+                )
 
 
 class LinearDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):

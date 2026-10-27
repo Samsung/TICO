@@ -24,6 +24,7 @@ from typing import Any
 import torch
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.concat_qparam import is_width_direction_concat
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
@@ -332,20 +333,43 @@ def _cat_handler(node, logger):
 
     assert len(tensors) > 0
     in_dtype = qparam_dtype(tensors[0])
-    if in_dtype == qparam_dtype(node):
-        return
-
     if any(qparam_dtype(x) != in_dtype for x in tensors):
         return
 
-    if in_dtype == "int16" and qparam_dtype(node) == "uint8":
-        quantize = _insert_quantize_op_after(node)
+    if in_dtype != qparam_dtype(node):
+        if in_dtype == "int16" and qparam_dtype(node) == "uint8":
+            quantize = _insert_quantize_op_after(node)
 
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
-        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
-    else:
-        raise NotYetSupportedError("Unsupported dtype")
+            quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+            node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+            logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+        else:
+            raise NotYetSupportedError("Unsupported dtype")
+
+    # Matching dtypes can still describe different affine grids. Keep the
+    # producers' domains and align only this consumer's input edges to Concat.
+    # The backend's width-direction exception permits distinct input grids.
+    if in_dtype not in {"uint8", "int16"} or is_width_direction_concat(node, cat_args):
+        return
+    output_qparam = node.meta[QPARAM_KEY]
+    qparams = [output_qparam, *(tensor.meta[QPARAM_KEY] for tensor in tensors)]
+    if any(
+        qparam.quantized_dimension is not None
+        or qparam.scale is None
+        or len(qparam.scale) != 1
+        or qparam.zero_point is None
+        or len(qparam.zero_point) != 1
+        for qparam in qparams
+    ):
+        return
+    for tensor in dict.fromkeys(tensors):
+        input_qparam = tensor.meta[QPARAM_KEY]
+        if (
+            input_qparam.scale != output_qparam.scale
+            or input_qparam.zero_point != output_qparam.zero_point
+        ):
+            _insert_quantize_op_before(node, tensor)
+            logger.debug(f"{tensor.name} is requantized on its edge to {node.name}.")
 
 
 def _bmm_handler(node, logger):
