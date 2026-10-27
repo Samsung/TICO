@@ -108,6 +108,57 @@ a `component: vision` policy with `allow_empty: true`.
 Do not use `allow_empty: true` for required overrides, because it can hide
 configuration mistakes.
 
+## Gemma4 INT16 cache with MX attention
+
+Keep `activation: int16` for the residual stream and producer `new_k`/`new_v`
+storage boundaries, then override the attention operands:
+
+```yaml
+override_policies:
+  - target:
+      component: text
+      layers: all
+      module: self_attn
+      observers: [softmax, attn_weights]
+    spec: {kind: mx, elem_format: int8, axis: -1}
+  - target:
+      component: text
+      layers: all
+      module: self_attn
+      observers: [present_value]
+    spec: {kind: mx, elem_format: int8, axis: -2}
+```
+
+The probability key axis (`-1`) and full-V sequence axis (`-2`) are the
+`P @ V` reduction dimensions in both attention layouts. The result and residual
+stream retain the base INT16 policy. `present_value` owns attention V; no
+additional `attn_value` observer is needed.
+
+In eager execution, raw current V branches into storage and computation. During cached
+decode, the compute branch concatenates the existing storage V values with raw
+current V, then applies MX once to the full sequence. Circle export represents
+the concatenation in an affine tensor domain and retains the full-sequence MX
+requantization. Quantizing partial past/current MX blocks before concatenation
+would change their shared exponents. Returned deltas, full cache returns, and
+shared-KV storage retain the frozen `new_*` grid.
+
+An initial affine Q-DQ marker defines a producer's serialized tensor domain,
+including shared producers and graph inputs. It does not preserve a separate
+FLOAT32 branch merely because eager fake quantization exposes raw values there.
+Use the serialized input dtypes and qparams when comparing or chaining artifacts;
+see the [quantized Circle contract](../../../../docs/design.md#102-conversion-time-quantized-graph-legalization).
+
+This MX compute path supports INT8 elements on the sequence axis with the
+default max shared-exponent and nearest-rounding policy, and per-tensor
+UINT8/INT16 affine storage. MX persistent storage and MX key computation remain
+unsupported. There are no independent `past_*` observer roles. Prefill-only
+calibration establishes storage and compute policies; positive cached decode
+counts optionally broaden activation-statistics coverage. The Circle reference
+runtime does not currently provide an MX value codec, so MX export and eager
+parity checks do not establish whole-Circle numerical or integer-backend parity.
+See the [Gemma4 KV cache contract](../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries)
+for binding, cache returns, and state loading.
+
 ## Diagnostics
 
 Set `print_overrides: true` on the PTQ stage to print the normalized final

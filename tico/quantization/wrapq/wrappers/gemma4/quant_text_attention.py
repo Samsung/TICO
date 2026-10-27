@@ -26,6 +26,7 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.identity import IdentityObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4TextAttentionDecodeExportAdapter,
@@ -593,7 +594,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
             or observer.qscheme.is_per_channel()
         ):
             raise ValueError(
-                "Gemma4 cache storage/compute currently supports per-tensor affine policies only; MX and per-channel cache conversion are unsupported."
+                "Gemma4 cache storage and affine compute require per-tensor affine policies; MX storage and per-channel cache conversion are unsupported."
             )
         if not observer.fake_quant_enabled:
             raise ValueError(
@@ -620,18 +621,42 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 f"Gemma4 {observer.name} has invalid frozen cache qparams; reprepare and recalibrate."
             )
 
+    def _validate_compute_observer(self, observer: ObserverBase) -> None:
+        """Allow sequence-block MX only at the complete attention-V boundary."""
+        if not isinstance(observer, MXObserver):
+            self._validate_frozen_observer(observer)
+            return
+        if (
+            observer is not self.obs_present_value
+            or observer.elem_format != "int8"
+            or observer.axis not in (-2, 2)
+            or observer.shared_exp_method != "max"
+            or observer.round != "nearest"
+            or not observer.fake_quant_enabled
+        ):
+            raise ValueError(
+                "Gemma4 MX compute supports present_value=MXINT8 with sequence axis=-2, max shared exponent, nearest rounding, and enabled fake quantization only; storage and present_key require per-tensor affine policies."
+            )
+
     def validate_export_cache(self, mode: str) -> None:
         """Validate the storage owner and direct storage-to-compute contract."""
         self._validate_cache_observers()
         if self._mode is not Mode.QUANT:
             return
         storage = self.cache_storage_observers()
-        for group in (
+        for storage_observer, compute_observer in (
             (storage[0], self.obs_present_key),
             (storage[1], self.obs_present_value),
         ):
-            for observer in group:
-                self._validate_frozen_observer(observer)
+            self._validate_frozen_observer(storage_observer)
+            self._validate_compute_observer(compute_observer)
+            if isinstance(compute_observer, MXObserver):
+                if isinstance(storage_observer, IdentityObserver):
+                    raise ValueError(
+                        "Gemma4 MX attention V requires per-tensor affine storage."
+                    )
+                continue
+            group = (storage_observer, compute_observer)
             identities = [isinstance(observer, IdentityObserver) for observer in group]
             float_input_conversion = identities[0] and not identities[1]
             if any(identities) and not all(identities) and not float_input_conversion:
@@ -693,8 +718,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
     def _observer_grid_policy(
         observer: ObserverBase,
     ) -> tuple[str, str, str, Optional[int], tuple[tuple[str, Any], ...]]:
-        # Record the built-in affine observers' calibration options as well as
-        # their grid type. Statistics and lifecycle flags are saved separately.
+        # Record calibration options and MX block policy as well as grid type.
+        # Statistics and lifecycle flags are saved separately.
         options = tuple(
             (name, getattr(observer, name))
             for name in (
@@ -706,6 +731,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 "max_samples",
                 "samples_per_batch",
                 "seed",
+                "elem_format",
+                "axis",
+                "shared_exp_method",
+                "round",
             )
             if hasattr(observer, name)
         )
@@ -834,6 +863,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
         if state.get("frozen", False):
             for name in names:
                 observer = getattr(self, f"obs_{name}")
+                if isinstance(observer, MXObserver):
+                    # MX compute owns block policy, not affine scale/zero-point.
+                    self._validate_compute_observer(observer)
+                    continue
                 if not isinstance(observer, IdentityObserver) and name not in state.get(
                     "qparams", {}
                 ):
@@ -1002,12 +1035,15 @@ class QuantGemma4TextAttention(QuantModuleBase):
         else:
             past = self._read_cache_key_value(past)
             read_k, read_v = past
-            # Both concat inputs must share the actual compute grid. These are
-            # value conversions; the original new_* delta branch stays intact.
+            # Affine compute converts both operands to C before concat. Sequence
+            # MX blocks can cross past/current, so assemble S values and raw
+            # current V first and apply the full-V boundary once below.
             if self._mode is Mode.QUANT:
-                read_k, read_v = self._cache_to_compute((read_k, read_v))
+                read_k = self._fq(read_k, self.obs_present_key)
                 current_k = self._fq(current_k, self.obs_present_key)
-                current_v = self._fq(current_v, self.obs_present_value)
+                if not isinstance(self.obs_present_value, MXObserver):
+                    read_v = self._fq(read_v, self.obs_present_value)
+                    current_v = self._fq(current_v, self.obs_present_value)
             compute = (
                 self._fq(torch.cat((read_k, current_k), dim=-2), self.obs_present_key),
                 self._fq(

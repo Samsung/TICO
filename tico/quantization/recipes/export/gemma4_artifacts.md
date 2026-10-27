@@ -66,25 +66,60 @@ Gemma4 text attention has two independent KV quantization domains:
 | Domain | Tensor and qparam owner |
 |---|---|
 | Storage S: `new_k`, `new_v` | Current projected KV written to persistent storage. The producer owns the cache input/output dtype, scale, zero-point, and granularity. |
-| Compute C: `present_key`, `present_value` | KV used by this attention layer. Both Concat operands and its output use this grid. |
+| Compute C: `present_key`, `present_value` | KV used by this attention layer. Affine computation converts both Concat operands to C; sequence-axis MX V converts the complete assembled tensor. |
 
-Current raw KV branches before storage quantization: one branch applies `new_*`
-to produce the persistent storage delta, and another applies `present_*`
-directly for attention. Current attention KV therefore avoids rounding through
-the storage grid. Existing cache inputs are explicitly converted from S to C;
-there is no intermediate read grid. `past_key` and `past_value` observer
-overrides are rejected with migration guidance. Configure `new_*` for storage
-and `present_*` for computation, then reprepare and recalibrate.
+In eager execution, current raw KV branches before storage quantization: one
+branch applies `new_*` to produce the persistent storage delta, and another
+applies `present_*` directly for attention. Current attention KV therefore
+avoids rounding through the storage grid. Existing cache inputs are converted
+from S to C; there is no intermediate read grid. `past_key` and `past_value`
+observer overrides are rejected with migration guidance. Configure `new_*` for
+storage and `present_*` for computation, then reprepare and recalibrate.
+
+Circle export follows the
+[quantized tensor-domain contract](../../../../docs/design.md#102-conversion-time-quantized-graph-legalization).
+An initial affine Q-DQ marker annotates a producer or input tensor, including its
+other users; later markers retain genuine requantization between different
+domains.
+For a boundary-only graph with no upstream current-KV domain, the first storage
+marker can therefore define the current input's serialized S ABI. Comparisons
+must respect that encoded input domain. Export does not introduce a FLOAT32
+branch to reproduce raw-input eager semantics.
 
 The static host copies/slices prefill and decode deltas without requantizing
 them. Prefill KV outputs, decode cache inputs and deltas, and shared consumer
 inputs therefore use the producer's frozen `new_*` qparams. Supported Circle
 cache conversions use per-tensor UINT8/INT16 affine policies, or a consistently
 unquantized cache path. An explicitly declared external float source can also
-feed an affine compute boundary. MX, per-channel cache grids, and unsupported
-affine-to-identity paths are rejected rather than serialized with mismatched
-Concat qparams. Disabling fake quantization on an affine cache boundary is also
-rejected; use an explicit supported identity policy for a float path.
+feed an affine compute boundary. MX storage, per-channel cache grids, and
+unsupported affine-to-identity paths are rejected rather than serialized with
+mismatched Concat qparams. Disabling fake quantization on an affine cache
+boundary is also rejected; use an explicit supported identity policy for a
+float path.
+
+With per-tensor UINT8/INT16 affine storage, `present_value` also supports MXINT8
+on the sequence axis (`axis: -2`), using max shared exponents and nearest
+rounding. During cached decode, existing storage V values and raw current V
+are assembled before applying MX once to the full sequence in eager execution.
+Circle export keeps the assembled tensor in an affine domain and retains an
+explicit full-tensor MX conversion, without reconstructing float inputs.
+When concat inputs have different established affine domains, explicit
+requantization on the concat edges aligns them without changing producer or
+cache input/output qparams.
+It does not concatenate separately quantized partial MX blocks. Empty-cache
+prefill converts current V directly, and a shared consumer converts its supplied
+full storage V directly. The affine `present_*` path retains its existing
+per-operand conversions, and persistent storage always retains S.
+
+Together with MXINT8 probabilities on the key axis (`axis: -1`), this supports
+MXINT8 × MXINT8 attention with an INT16 result and INT16 persistent cache.
+MX key computation and MX persistent cache remain unsupported. See the
+[policy example](../../examples/configs/PTQ_OVERRIDE_POLICIES.md#gemma4-int16-cache-with-mx-attention)
+for observer settings. Eager fake-quantization and ExportedProgram parity can
+be checked on CPU, but the built-in Circle reference runtime currently lacks
+an MX value codec. These eager checks do not establish equivalence with a
+serialized artifact whose input ABI differs. Structural MX export does not
+establish whole-Circle numerical parity or integer target-backend correctness.
 
 The full prepared text model binds each shared consumer to the corresponding
 KV-owning layer of the same layer type, keeping full and sliding sources
@@ -126,7 +161,9 @@ precedence. Missing storage or compute qparams require calibration; no scales
 are synthesized or copied between unrelated observers.
 
 Checkpoint schema version 2 persists storage/compute observer policies and
-frozen qparams together with the source-binding contract. Recreate the same
+frozen affine qparams together with the source-binding contract. MX compute
+policies include their format, axis, shared-exponent method, and rounding;
+they do not require affine scale/zero-point entries. Recreate the same
 prepared model/configuration before loading a state dict so shared source
 bindings are rebuilt. After `restored.load_state_dict(...)`, call
 `restored.freeze_qparams()` to enter quantized mode before inference or export;
