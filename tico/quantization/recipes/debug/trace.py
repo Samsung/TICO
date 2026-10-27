@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 from tico.quantization import convert, prepare
 from tico.quantization.evaluation.metric import compute_peir
+from tico.quantization.recipes.config import stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.override_policies import apply_ptq_override_policies
 from tico.quantization.wrapq.utils.introspection import (
@@ -170,7 +171,12 @@ def trace_ptq_parity(
     fp_model = ctx.model.eval()
     q_model = copy.deepcopy(ctx.model).eval()
     ptq_stage_cfg = next(
-        (s for s in ctx.cfg.get("pipeline", []) if s.get("name") == "ptq"), None
+        (
+            s
+            for s in ctx.cfg.get("pipeline", [])
+            if stage_name_matches(s.get("name"), "ptq")
+        ),
+        None,
     )
     if ptq_stage_cfg is None:
         raise RuntimeError("Trace mode requires a PTQ stage in the recipe config.")

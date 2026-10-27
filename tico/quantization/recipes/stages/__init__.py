@@ -1,3 +1,4 @@
+from tico.quantization.recipes.config import normalize_stage_name
 from tico.quantization.recipes.stages.base import Stage
 from tico.quantization.recipes.stages.cle import CLEStage
 from tico.quantization.recipes.stages.gptq import GPTQStage
@@ -15,7 +16,7 @@ _STAGE_REGISTRY = {
 
 
 def get_stage(name: str) -> Stage:
-    key = name.lower()
+    key = normalize_stage_name(name)
     if key not in _STAGE_REGISTRY:
         raise KeyError(
             f"Unknown quantization stage: {name}. available={sorted(_STAGE_REGISTRY)}"

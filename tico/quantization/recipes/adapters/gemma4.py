@@ -24,6 +24,7 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.config import stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
 from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
@@ -333,7 +334,8 @@ class Gemma4Adapter(ModelAdapter):
             stages = [
                 stage
                 for stage in ctx.cfg.get("pipeline", [])
-                if stage.get("name") == "ptq" and stage.get("enabled", True)
+                if stage_name_matches(stage.get("name"), "ptq")
+                and stage.get("enabled", True)
             ]
             if len(stages) > 1:
                 counts = {

@@ -21,6 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.config import stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.llm import build_wikitext_calibration_inputs
 from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
@@ -158,7 +159,9 @@ class LlamaAdapter(ModelAdapter):
         for stage in cfg.get("pipeline", []):
             if not isinstance(stage, Mapping):
                 continue
-            if stage.get("name") == "ptq" and stage.get("enabled", True):
+            if stage_name_matches(stage.get("name"), "ptq") and stage.get(
+                "enabled", True
+            ):
                 return int(stage.get("decode_calibration_steps", decode_steps))
 
         return decode_steps
@@ -465,7 +468,7 @@ class LlamaAdapter(ModelAdapter):
 
 def _find_ptq_profile(cfg: dict[str, Any]) -> str:
     for stage in cfg.get("pipeline", []):
-        if stage.get("name") == "ptq":
+        if stage_name_matches(stage.get("name"), "ptq"):
             return str(
                 stage.get(
                     "profile", cfg.get("model_args", {}).get("profile", "npu_export")
@@ -476,6 +479,6 @@ def _find_ptq_profile(cfg: dict[str, Any]) -> str:
 
 def _is_stage_enabled(cfg: dict[str, Any], stage_name: str) -> bool:
     for stage in cfg.get("pipeline", []):
-        if stage.get("name") == stage_name:
+        if stage_name_matches(stage.get("name"), stage_name):
             return bool(stage.get("enabled", True))
     return False

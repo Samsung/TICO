@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.recipes.config import stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.override_policies import apply_ptq_override_policies
 from tico.quantization.recipes.qparams import (
@@ -45,7 +46,7 @@ def _find_enabled_stage(
     for stage_cfg in cfg.get("pipeline", []):
         if not isinstance(stage_cfg, Mapping):
             continue
-        if stage_cfg.get("name") != stage_name:
+        if not stage_name_matches(stage_cfg.get("name"), stage_name):
             continue
         if not stage_cfg.get("enabled", True):
             continue

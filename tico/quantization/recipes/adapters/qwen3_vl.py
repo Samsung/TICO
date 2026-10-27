@@ -24,6 +24,7 @@ from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.config.qwen3_vl_spinquant import Qwen3VLSpinQuantConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.config import stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
 from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
@@ -736,6 +737,8 @@ def _load_torch_object(path: str | None) -> Any:
 
 def _find_stage(cfg: dict[str, Any], stage_name: str) -> Mapping[str, Any] | None:
     for stage in cfg.get("pipeline", []):
-        if isinstance(stage, Mapping) and stage.get("name") == stage_name:
+        if isinstance(stage, Mapping) and stage_name_matches(
+            stage.get("name"), stage_name
+        ):
             return stage
     return None
