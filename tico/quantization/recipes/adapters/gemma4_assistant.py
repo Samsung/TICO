@@ -26,6 +26,7 @@ from tico.quantization.config.gemma4_assistant_builders import (
     build_gemma4_assistant_ptq_config,
 )
 from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.config import stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.llm import build_wikitext_calibration_inputs
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
@@ -528,7 +529,9 @@ class Gemma4AssistantAdapter(ModelAdapter):
     def _quantization_profile(cfg: Mapping[str, Any]) -> dict[str, Any]:
         """Summarize the effective PTQ dtypes for the manifest."""
         for stage_cfg in cfg.get("pipeline", []):
-            if isinstance(stage_cfg, Mapping) and stage_cfg.get("name") == "ptq":
+            if isinstance(stage_cfg, Mapping) and stage_name_matches(
+                stage_cfg.get("name"), "ptq"
+            ):
                 keys = (
                     "activation",
                     "weight",

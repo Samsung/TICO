@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tico.quantization.recipes.adapters import resolve_adapter
-from tico.quantization.recipes.config import save_effective_config
+from tico.quantization.recipes.config import save_effective_config, stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.dataset_usage import validate_recipe_dataset_usage
 from tico.quantization.recipes.evaluation.selection import (
@@ -34,7 +34,9 @@ def _find_stage(
 ) -> Mapping[str, Any] | None:
     """Return the first pipeline stage with the requested name."""
     for stage_cfg in cfg.get("pipeline", []):
-        if isinstance(stage_cfg, Mapping) and stage_cfg.get("name") == stage_name:
+        if isinstance(stage_cfg, Mapping) and stage_name_matches(
+            stage_cfg.get("name"), stage_name
+        ):
             return stage_cfg
     return None
 

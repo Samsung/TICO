@@ -18,6 +18,11 @@ pipeline:
 Each item in `pipeline` is dispatched to a `Stage` implementation under
 `recipes/stages/`.
 
+Stage dispatch and recipe stage lookups are case-insensitive, so `PTQ` and `ptq`
+identify the same stage. Names are not trimmed. Each consumer retains its own
+enabled-stage and first-match rules. Dotted CLI overrides address list-item names
+exactly as written in the config, so `pipeline.PTQ.enabled` addresses `name: PTQ`.
+
 ## Stage contract
 
 ```python

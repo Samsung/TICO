@@ -27,6 +27,18 @@ except ImportError:  # pragma: no cover
 Config = dict[str, Any]
 
 
+def normalize_stage_name(name: str) -> str:
+    """Return the case-insensitive identity accepted by stage dispatch."""
+    return name.lower()
+
+
+def stage_name_matches(value: Any, name: str) -> bool:
+    """Match a config stage name without changing the config or trimming it."""
+    return isinstance(value, str) and normalize_stage_name(
+        value
+    ) == normalize_stage_name(name)
+
+
 def load_recipe_config(
     path: str | Path, overrides: Sequence[str] | None = None
 ) -> Config:
