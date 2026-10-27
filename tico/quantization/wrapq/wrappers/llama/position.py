@@ -38,6 +38,18 @@ def build_causal_mask(
     )
 
 
+def is_binary_attention_mask(attention_mask: torch.Tensor) -> bool:
+    """Recognize keep masks without treating integer values as additive biases."""
+    return attention_mask.dtype in (
+        torch.bool,
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    )
+
+
 def combine_binary_attention_mask(
     causal_mask: torch.Tensor,
     attention_mask: torch.Tensor,
@@ -45,13 +57,15 @@ def combine_binary_attention_mask(
     fill_value: float,
 ) -> torch.Tensor:
     """Combine a causal mask with a binary token or query/key mask."""
-    valid = attention_mask != 0
+    valid = attention_mask.to(torch.bool)
     if valid.dim() == 2:
         valid = valid.unsqueeze(1)
     elif valid.dim() == 4 and valid.size(1) == 1:
         valid = valid.squeeze(1)
-    additive = torch.zeros_like(valid, dtype=torch.float32).masked_fill(
-        ~valid, fill_value
+    additive = torch.where(
+        valid,
+        torch.zeros_like(valid, dtype=torch.float32),
+        torch.full_like(valid, fill_value, dtype=torch.float32),
     )
     return torch.clamp(causal_mask + additive, min=fill_value)
 

@@ -102,6 +102,13 @@ returns signed float32 tensor differences at every depth, including tensors in l
 tuples, dictionaries, and object fields. The default returns tensor difference
 statistics. `compare_side_by_side()` uses full differences for `interesting_modules`.
 
+LLaMA attention, decoder-layer, and model wrappers interpret boolean and integer
+(`uint8`, `int8`, `int16`, `int32`, `int64`) attention masks as keep masks: zero
+masks a position and nonzero keeps it, subject to causality. Token masks of shape
+`(B, K)` and query/key masks of shape `(B, Q, K)` or `(B, 1, Q, K)` share this
+behavior. Floating-point masks remain additive biases; callers supply their
+causal and padding constraints explicitly.
+
 LLaMA attention keeps persistent KV-cache storage in the `new_k`/`new_v`
 quantization domains for prefill outputs, decode inputs, and both delta and full
 cache outputs. Attention converts past and current KV tensors independently to

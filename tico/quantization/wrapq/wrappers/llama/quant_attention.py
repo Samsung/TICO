@@ -41,6 +41,7 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
 from tico.quantization.wrapq.wrappers.llama.position import (
     build_causal_mask,
     combine_binary_attention_mask,
+    is_binary_attention_mask,
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -631,7 +632,7 @@ class QuantLlamaAttention(QuantModuleBase):
             )
             return self._fq(mask, self.obs_attn_mask)
 
-        if attention_mask.dtype in (torch.bool, torch.int64):
+        if is_binary_attention_mask(attention_mask):
             causal_mask = build_causal_mask(
                 q_len=q_len,
                 k_len=k_len,
