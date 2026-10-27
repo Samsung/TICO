@@ -20,6 +20,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.registry import lookup
 
 
 class PTQWrapHelper:
@@ -49,10 +50,8 @@ class PTQWrapHelper:
         """
         assert not isinstance(root, QuantModuleBase), "The module is already wrapped."
 
-        try:
+        if lookup(type(root)) is not None:
             return PTQWrapper(root, qcfg=qcfg, fp_name=fp_name)
-        except NotImplementedError:
-            pass
 
         # Case A: HuggingFace-style transformers: model.model.layers
         lm = getattr(root, "model", None)
@@ -215,11 +214,15 @@ class PTQWrapHelper:
         Attempt to wrap a boundary with PTQWrapper.
 
         Behavior:
-          - If PTQWrapper succeeds: return wrapped module.
-          - If PTQWrapper raises NotImplementedError:
-              * raise_on_fail=True  -> re-raise
+          - If a wrapper is registered: construct it and propagate its errors.
+          - If no wrapper is registered:
+              * raise_on_fail=True  -> raise the missing-wrapper diagnostic
               * raise_on_fail=False -> return original module
         """
+        if lookup(type(module)) is not None:
+            return PTQWrapper(module, qcfg=qcfg_for_child, fp_name=fp_name)
+
+        # Keep the missing-wrapper diagnostic and its original cause.
         try:
             return PTQWrapper(module, qcfg=qcfg_for_child, fp_name=fp_name)
         except NotImplementedError as e:

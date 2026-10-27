@@ -379,6 +379,29 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "dense decoder layers only"):
             QuantGemma4TextDecoderLayer(fp_layer)
 
+    def test_prepare_preserves_moe_decoder_rejection(self):
+        """Public preparation must honor the registered wrapper's MoE rejection."""
+        from tico.quantization import prepare
+
+        for strict_wrap in (True, False):
+            with self.subTest(strict_wrap=strict_wrap):
+                cfg = _make_text_config(
+                    enable_moe_block=True,
+                    num_experts=2,
+                    top_k_experts=1,
+                    moe_intermediate_size=16,
+                )
+                fp_layer = self._make_layer(cfg)
+                original_attention = fp_layer.self_attn
+
+                with self.assertRaisesRegex(
+                    NotImplementedError, "dense decoder layers only"
+                ):
+                    prepare(fp_layer, PTQConfig(strict_wrap=strict_wrap))
+
+                self.assertIs(fp_layer.self_attn, original_attention)
+                self.assertFalse(hasattr(fp_layer, "tico_quantizer"))
+
 
 if __name__ == "__main__":
     unittest.main()

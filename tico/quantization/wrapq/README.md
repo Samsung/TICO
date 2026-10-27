@@ -63,6 +63,12 @@ same calibration and conversion routines while maintaining per-family specializa
 Each wrapper is registered automatically and discovered dynamically through the PTQ registry, 
 so extending PTQ for a new model family simply requires subclassing and registration.
 
+For unregistered module types, `strict_wrap` controls whether unsupported wrapping
+boundaries raise an error or allow the existing recursive traversal to continue.
+Once a registered wrapper is selected, its constructor errors propagate unchanged
+in either mode. A wrapper's `NotImplementedError` for an unsupported model variant
+therefore fails preparation immediately, including with `strict_wrap=False`.
+
 ---
 
 ## 4. Simple API Usage
