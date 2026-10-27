@@ -224,7 +224,8 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         """
         attention = cast("QuantQwen3VLTextAttention", self.self_attn.wrapped)
         if mode == "prefill":
-            attention.require_calibrated_cache()
+            if return_kv:
+                attention.require_calibrated_cache()
             return Qwen3VLTextDecoderLayerPrefillExportAdapter(
                 self,
                 return_kv=return_kv,

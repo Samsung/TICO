@@ -255,12 +255,15 @@ def model_output_to_serializable(
         return data
 
     if isinstance(x, AffineObserverBase):
+        snapshot = x.frozen_state
         data.update(
             {
                 "name": x.name,
                 "dtype": str(x.dtype),
                 "qscheme": str(x.qscheme),
                 "channel_axis": str(x.channel_axis),
+                "frozen": snapshot is not None,
+                "provenance": None if snapshot is None else snapshot.provenance,
                 "min_val": model_output_to_serializable(
                     x.min_val,
                     include_tensor_content=include_tensor_content,
@@ -271,15 +274,23 @@ def model_output_to_serializable(
                     include_tensor_content=include_tensor_content,
                     include_type=include_type,
                 ),
-                "scale": model_output_to_serializable(
-                    x._cached_scale,
-                    include_tensor_content=include_tensor_content,
-                    include_type=include_type,
+                "scale": (
+                    None
+                    if snapshot is None
+                    else model_output_to_serializable(
+                        snapshot.scale,
+                        include_tensor_content=include_tensor_content,
+                        include_type=include_type,
+                    )
                 ),
-                "zp": model_output_to_serializable(
-                    x._cached_zp,
-                    include_tensor_content=include_tensor_content,
-                    include_type=include_type,
+                "zp": (
+                    None
+                    if snapshot is None
+                    else model_output_to_serializable(
+                        snapshot.zero_point,
+                        include_tensor_content=include_tensor_content,
+                        include_type=include_type,
+                    )
                 ),
             }
         )

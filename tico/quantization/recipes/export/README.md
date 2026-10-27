@@ -26,6 +26,18 @@ Export helpers should not:
 The model adapter decides **which** artifacts to export. The export helper
 decides **how** to write an artifact.
 
+Quantized export consumes validated WrapQ frozen snapshots. It does not derive
+activation grids, resume calibration, or repair incomplete checkpoints. Recipe
+checkpoint entrypoints validate the common frozen-state contract before export;
+legacy state that cannot preserve every admitted site's exact grid requires
+repreparing and recalibrating the original float model. Frozen state-dict loads
+restore wrapper mode and capability readiness without another freeze.
+
+Constants generated for a static export profile have separate local observers
+finalized through the common validator. For example, Gemma4 pooler profiles own
+their pooling matrices and grids while sharing the source's frozen activation
+snapshots. Constructing or exporting a profile must not change source snapshots.
+
 For LLaMA, Qwen3-VL, and Gemma4, `export.max_seq_len` owns static text capacity.
 It defaults independently to `min(2048, model context)` and never reads
 `calibration.seq_len` or `evaluation.max_seq_len`. LLaMA full-model export also

@@ -143,10 +143,7 @@ class TestQwen3VLEagerContext(unittest.TestCase):
                 )
         wrapped.freeze_qparams()
         observers = dict(wrapped.named_observers())
-        frozen = {
-            name: {key: value.clone() for key, value in obs.state_dict().items()}
-            for name, obs in observers.items()
-        }
+        frozen = {name: obs.frozen_state for name, obs in observers.items()}
 
         ids = torch.randint(1, 32, (1, 13))
         with torch.no_grad():
@@ -166,11 +163,32 @@ class TestQwen3VLEagerContext(unittest.TestCase):
         self.assertEqual(model.config.max_position_embeddings, 4)
         for name, obs in observers.items():
             self.assertFalse(obs.enabled)
-            for key, value in obs.state_dict().items():
-                with self.subTest(observer=name, buffer=key):
-                    torch.testing.assert_close(
-                        value, frozen[name][key], atol=0, rtol=0, equal_nan=True
-                    )
+            before = frozen[name]
+            after = obs.frozen_state
+            with self.subTest(observer=name):
+                if before is None:
+                    self.assertIsNone(after)
+                    continue
+                self.assertIsNotNone(after)
+                assert after is not None
+                for field in (
+                    "kind",
+                    "policy",
+                    "provenance",
+                    "locked",
+                    "fake_quant_enabled",
+                    "observed_shape",
+                ):
+                    self.assertEqual(getattr(after, field), getattr(before, field))
+                for field in ("scale", "zero_point", "clipping_bounds"):
+                    expected = getattr(before, field)
+                    actual = getattr(after, field)
+                    if expected is None:
+                        self.assertIsNone(actual)
+                    else:
+                        torch.testing.assert_close(
+                            actual, expected, atol=0, rtol=0, equal_nan=True
+                        )
 
     def test_attention_causal_offset_uses_actual_cache_span(self):
         """Chunked decode masks only future keys after the real cached prefix."""

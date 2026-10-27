@@ -132,6 +132,9 @@ def connected_qwen(checkpoint: Path, artifacts: Path, root: Path, capacity: int)
     torch.set_num_threads(1)
     root.mkdir(parents=True, exist_ok=False)
     model = torch.load(checkpoint, map_location="cpu", weights_only=False).eval()
+    from tico.quantization.wrapq.lifecycle import validate_frozen_model
+
+    validate_frozen_model(model)
     initial = _state_contract(model)
     top, multimodal_model, vision, text = _unwrap_qwen3_vl_components(model)
     stages = _Stages(artifacts, root)

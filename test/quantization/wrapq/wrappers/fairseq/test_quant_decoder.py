@@ -371,6 +371,8 @@ class TestQuantFairseqDecoder(unittest.TestCase):
                 continue
             self.assertTrue(m._mode == Mode.CALIB)
 
+        prev, enc = self._mk_inputs()
+        dec(prev, encoder_out=enc)
         dec.freeze_qparams()
         self.assertEqual(dec._mode, Mode.QUANT)
         for m in dec.modules():

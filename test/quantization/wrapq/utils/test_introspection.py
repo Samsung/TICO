@@ -779,6 +779,33 @@ class TestModelOutputToSerializable(unittest.TestCase):
         self.assertIn("inner", result["outer"])
         self.assertEqual(result["outer"]["inner"]["type"], "Tensor")  # type: ignore[index]
 
+    def test_observer_inspection_reads_only_committed_snapshot(self):
+        from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+        from tico.quantization.wrapq.utils.introspection import (
+            model_output_to_serializable,
+        )
+
+        observer = MinMaxObserver(name="activation")
+        unready = model_output_to_serializable(observer, include_type=False)
+        assert isinstance(unready, dict)
+        self.assertFalse(unready["frozen"])
+        self.assertIsNone(unready["provenance"])
+        self.assertIsNone(unready["scale"])
+        self.assertIsNone(observer.frozen_state)
+        observer.load_qparams(torch.tensor(0.25), torch.tensor(7), lock=True)
+        ready = model_output_to_serializable(observer, include_type=False)
+        assert isinstance(ready, dict)
+        self.assertTrue(ready["frozen"])
+        self.assertEqual(ready["provenance"], "imported")
+        self.assertEqual(ready["scale"]["value"], 0.25)
+        self.assertEqual(ready["zp"]["value"], 7)
+        snapshot = observer.require_frozen()
+        assert snapshot.scale is not None and snapshot.zero_point is not None
+        self.assertTrue(torch.equal(snapshot.scale, torch.tensor(0.25)))
+        self.assertTrue(
+            torch.equal(snapshot.zero_point, torch.tensor(7, dtype=torch.int))
+        )
+
 
 class TestModuleInputOutput(unittest.TestCase):
     """Unit tests for ModuleInputOutput NamedTuple."""

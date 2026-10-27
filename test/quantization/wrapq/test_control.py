@@ -60,6 +60,16 @@ class FakeQuantControlTest(unittest.TestCase):
             self.assertFalse(site.observer.fake_quant_enabled)
         self.assertTrue(site.observer.fake_quant_enabled)
 
+    def test_restore_cannot_enable_an_unobserved_frozen_bypass(self) -> None:
+        model = OneObserverModule()
+        model.enable_calibration()
+        state = FakeQuantState(model)
+        state.set_all(False)
+        model.freeze_qparams()
+        with self.assertRaisesRegex(RuntimeError, "no frozen grid"):
+            state.restore()
+        self.assertFalse(model.obs_act_out.fake_quant_enabled)
+
     def test_selector_can_match_owner_module_type(self) -> None:
         """Select a site through its owning quantized wrapper type."""
         model = nn.Sequential(OneObserverModule())

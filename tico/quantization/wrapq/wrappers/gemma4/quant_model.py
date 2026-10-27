@@ -145,6 +145,8 @@ class QuantGemma4Model(QuantModuleBase):
     ):
         """Return projected image soft tokens."""
         assert self.vision_tower is not None, "vision_tower is not available"
+        if self._mode is Mode.QUANT:
+            self.require_capability("vision")
         vision_outputs = self.vision_tower(
             pixel_values=pixel_values,
             pixel_position_ids=image_position_ids,
@@ -165,6 +167,8 @@ class QuantGemma4Model(QuantModuleBase):
         projects the last hidden state via ``embed_vision``.
         """
         assert self.vision_tower is not None, "vision_tower is not available"
+        if self._mode is Mode.QUANT:
+            self.require_capability("vision")
         pixel_values_videos = pixel_values_videos.flatten(0, 1)
         if video_position_ids is not None:
             video_position_ids = video_position_ids.flatten(0, 1)
@@ -277,6 +281,12 @@ class QuantGemma4Model(QuantModuleBase):
             raise ValueError(
                 "You cannot specify per_layer_inputs if input_ids is provided."
             )
+
+        if self._mode is Mode.QUANT and (
+            pixel_values is not None or pixel_values_videos is not None
+        ):
+            self.require_capability("vision")
+            self.require_capability("multimodal_fusion")
 
         # --- Token embedding with placeholder replacement -----------------
         # QuantGemma4TextModel is the concrete type behind the PTQWrapper.
@@ -544,9 +554,7 @@ class QuantGemma4Model(QuantModuleBase):
         """
         assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
 
-        # Make sure that all observers are calibrated.
-        for obs in self._all_observers():
-            assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
+        self.require_capability("required")
 
         text_model = cast("QuantGemma4TextModel", self.language_model.wrapped)
         text_config = self.config.get_text_config()
@@ -588,4 +596,24 @@ class QuantGemma4Model(QuantModuleBase):
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""
-        return (self.obs_mm_fusion, self.obs_per_layer_inputs)
+        observers = [self.obs_mm_fusion]
+        if self.config.get_text_config().hidden_size_per_layer_input:
+            observers.append(self.obs_per_layer_inputs)
+        return tuple(observers)
+
+    def local_observer_groups(self):
+        return {
+            "required": tuple(
+                obs for obs in self._all_observers() if obs is not self.obs_mm_fusion
+            ),
+            "multimodal_fusion": (self.obs_mm_fusion,),
+        }
+
+    def _conditional_quant_subtrees(self):
+        return {
+            "vision": tuple(
+                module
+                for module in (self.vision_tower, self.embed_vision)
+                if module is not None
+            )
+        }

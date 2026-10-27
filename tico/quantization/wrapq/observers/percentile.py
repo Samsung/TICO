@@ -17,12 +17,13 @@
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
 from tico.quantization.wrapq.dtypes import DType, UINT8
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import ObserverNotReadyError
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -217,7 +218,7 @@ class PercentileObserver(AffineObserverBase):
     def _clipping_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate scalar clipping bounds from retained samples."""
         if self._samples_cpu.numel() == 0:
-            raise RuntimeError(
+            raise ObserverNotReadyError(
                 f"No calibration values were collected for observer {self.name!r}."
             )
 
@@ -269,15 +270,39 @@ class PercentileObserver(AffineObserverBase):
         maximum = torch.maximum(maximum, maximum.new_tensor(0.0))
         return minimum, maximum
 
-    def _qparam_bounds(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Select clipped bounds without replacing the observed extrema."""
-        minimum, maximum = self._clipping_bounds()
-        minimum = minimum.to(self.min_val.device, self.min_val.dtype)
-        maximum = maximum.to(self.max_val.device, self.max_val.dtype)
-        self.clip_min_val.copy_(minimum)
-        self.clip_max_val.copy_(maximum)
+    def _policy(self) -> tuple:
+        return super()._policy() + (
+            self.percentile,
+            self.lower_percentile,
+            self.upper_percentile,
+            self.max_samples,
+            self.samples_per_batch,
+            self.seed,
+        )
 
-        return minimum, maximum
+    def _statistics_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
+        minimum, maximum = self._clipping_bounds()
+        return minimum.to(self.min_val), maximum.to(self.max_val)
+
+    def install_candidate(self, state) -> None:
+        super().install_candidate(state)
+        if state.clipping_bounds is not None:
+            self.clip_min_val = (
+                state.clipping_bounds[0].detach().clone().to(self.clip_min_val)
+            )
+            self.clip_max_val = (
+                state.clipping_bounds[1].detach().clone().to(self.clip_max_val)
+            )
+
+    def set_extra_state(self, state) -> None:
+        super().set_extra_state(state)
+        bounds = self._frozen_clipping_bounds
+        if self._frozen and bounds is not None:
+            self.clip_min_val = bounds[0].detach().clone().to(self.clip_min_val)
+            self.clip_max_val = bounds[1].detach().clone().to(self.clip_max_val)
+        elif not self._frozen and bool(torch.isfinite(self.min_val).any()):
+            # Min/max cannot resume a reservoir/RNG that is intentionally unsaved.
+            self._requires_recalibration = True
 
     def extra_repr(self) -> str:
         """Return percentile-specific settings for module summaries."""

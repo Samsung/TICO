@@ -45,8 +45,7 @@ class QuantEmbedding(QuantModuleBase):
         self.act_out_obs = self._make_obs("act_out")
         self.module = fp
 
-    def enable_calibration(self) -> None:
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
         # immediately capture the fixed weight range
         self.weight_obs.collect(self.module.weight)
 

@@ -757,9 +757,11 @@ class TestQuantQwen3VLModel(unittest.TestCase):
         input_ids, attention_mask = self._create_text_only_input()
         _ = q_model(input_ids=input_ids, attention_mask=attention_mask)
 
-        # Freeze and check qparams exist for multimodal fusion observer
+        # Text-only calibration does not manufacture a multimodal grid.
         q_model.freeze_qparams()
-        self.assertTrue(q_model.obs_mm_fusion.has_qparams)
+        self.assertFalse(q_model.obs_mm_fusion.has_qparams)
+        self.assertFalse(q_model.has_capability("vision"))
+        q_model(input_ids=input_ids, attention_mask=attention_mask)
 
     def test_activation_stats_collected_with_images(self):
         """Test that activation statistics are collected during calibration (with images)."""
@@ -804,8 +806,8 @@ class TestQuantQwen3VLModel(unittest.TestCase):
 
         q_model.freeze_qparams()
 
-        # Verify that observer has quantization parameters
-        self.assertTrue(q_model.obs_mm_fusion.has_qparams)
+        self.assertFalse(q_model.obs_mm_fusion.has_qparams)
+        self.assertFalse(q_model.has_capability("vision"))
 
     # -------------------------------------------------------------------------
     # Config override tests

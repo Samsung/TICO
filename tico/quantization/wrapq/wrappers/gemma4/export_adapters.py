@@ -806,14 +806,16 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
         enclosing vision-model export.
     """
 
+    wrapped: "QuantGemma4VisionPooler"
+
     def __init__(
         self,
         wrapped_pooler: nn.Module,
     ):
         wrapped_pooler = cast("QuantGemma4VisionPooler", wrapped_pooler)
         super().__init__()
-        self.wrapped = wrapped_pooler
-        self.num_valid_outputs = int(wrapped_pooler.num_valid_outputs)
+        self.wrapped = cast("QuantGemma4VisionPooler", wrapped_pooler)
+        self.num_valid_outputs = self.wrapped.num_valid_outputs
 
     def forward(
         self,

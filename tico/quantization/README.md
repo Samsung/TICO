@@ -16,7 +16,7 @@ _prepare_ and _convert_.
       configuration. This involves setting up necessary observers or hooks, and may
       optionally use example inputs (provided as separate positional and keyword
       arguments), which is particularly useful for activation quantization.
-  - `convert(model, quant_config)`
+  - `convert(model)`
     - Converts the model that has been prepared and calibrated into its quantized form.
       This function leverages the statistics collected during calibration to perform the
       quantization transformation.
@@ -62,7 +62,7 @@ for d in dataset:
     prepared_model(d)
 
 # 3. Apply GPTQ
-quantized_model = convert(prepared_model, quant_config)
+quantized_model = convert(prepared_model)
 ```
 
 ## Purpose

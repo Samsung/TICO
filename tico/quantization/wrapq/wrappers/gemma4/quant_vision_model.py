@@ -114,9 +114,8 @@ class QuantGemma4VisionModel(QuantModuleBase):
             self._make_obs("std_scale") if self.config.standardize else None
         )
 
-    def enable_calibration(self) -> None:
-        """Enable calibration and collect static weight ranges."""
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
+        """Capture standardization constants after the common observer reset."""
         # Collect std_bias and std_scale statistics if standardize is enabled
         if (
             self.config.standardize
@@ -296,9 +295,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
             )
 
         if self._mode is Mode.QUANT:
-            # Make sure that all observers are calibrated.
-            for obs in self._all_observers():
-                assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
+            self.require_capability("required")
 
         if (
             pixel_position_ids.dim() != 3

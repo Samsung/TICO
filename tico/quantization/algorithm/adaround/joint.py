@@ -30,7 +30,7 @@ from tico.quantization.wrapq.control import (
     SiteRole,
 )
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.base import FrozenObserverState, ObserverBase
 
 _SUPPORTED_FAMILIES = frozenset({"regular_conv", "depthwise_conv"})
 
@@ -168,9 +168,12 @@ class LearnableScaleAdaRoundWeightQuantizer(AffineObserverBase):
             qscheme=original.qscheme,
             channel_axis=original.channel_axis,
         )
-        initial_scale, zero_point = original.compute_qparams()
+        initial_state = original.require_frozen()
+        initial_scale, zero_point = initial_state.scale, initial_state.zero_point
+        assert initial_scale is not None and zero_point is not None
         initial_scale = initial_scale.detach().clone()
         zero_point = zero_point.detach().clone().to(torch.int)
+        self.observe_shape(weight.shape)
         self.load_qparams(initial_scale, zero_point, lock=True)
         self.min_val = original.min_val.detach().clone()
         self.max_val = original.max_val.detach().clone()
@@ -263,6 +266,24 @@ class LearnableScaleAdaRoundWeightQuantizer(AffineObserverBase):
     def compute_qparams(self):
         """Return the current learned scale and fixed calibrated zero-point."""
         return self.learned_scale(), self._fixed_zero_point
+
+    @property
+    def frozen_state(self):
+        # The optimizer's mutable scale is not a committed deployment grid.
+        return None
+
+    def derive_candidate(self):
+        raise RuntimeError(
+            "Finalize learned AdaRound qparams into the original observer before freezing or export."
+        )
+
+    def get_extra_state(self):
+        raise RuntimeError(
+            "Finalize learned AdaRound qparams before saving deployment state; use the owning optimizer's state_snapshot for optimization checkpoints."
+        )
+
+    def validate_loaded_state(self) -> None:
+        self.derive_candidate()
 
     def soft_rounding(self) -> torch.Tensor:
         stretched = torch.sigmoid(self.alpha) * (self.zeta - self.gamma)
@@ -390,11 +411,7 @@ class _JointBinding:
     weight_module: nn.Conv2d
     original_observer: AffineObserverBase
     original_weight: torch.Tensor
-    original_scale: torch.Tensor
-    original_zero_point: torch.Tensor
-    original_qparams_locked: bool
-    original_enabled: bool
-    original_fake_quant_enabled: bool
+    original_state: FrozenObserverState
     proxy: LearnableScaleAdaRoundWeightQuantizer
 
 
@@ -566,7 +583,7 @@ class JointAdaRoundWeightSet:
                     lock=True,
                 )
                 binding.original_observer.fake_quant_enabled = (
-                    binding.original_fake_quant_enabled
+                    binding.original_state.fake_quant_enabled
                 )
             self._restore_observers()
         except Exception:
@@ -586,16 +603,7 @@ class JointAdaRoundWeightSet:
             for binding in self.bindings:
                 binding.weight_module.weight.copy_(binding.original_weight)
         for binding in self.bindings:
-            device = binding.original_observer.min_val.device
-            binding.original_observer.load_qparams(
-                binding.original_scale.to(device=device),
-                binding.original_zero_point.to(device=device),
-                lock=binding.original_qparams_locked,
-            )
-            binding.original_observer.enabled = binding.original_enabled
-            binding.original_observer.fake_quant_enabled = (
-                binding.original_fake_quant_enabled
-            )
+            binding.original_observer.install_candidate(binding.original_state)
         self._restore_observers()
 
     def _restore_observers(self) -> None:
@@ -691,7 +699,9 @@ def _build_binding(
         raise RuntimeError(
             f"No registered observer attribute aliases site {site.path!r}."
         )
-    original_scale, original_zero_point = site.observer.compute_qparams()
+    initial_state = site.observer.require_frozen()
+    original_scale, original_zero_point = initial_state.scale, initial_state.zero_point
+    assert original_scale is not None and original_zero_point is not None
     proxy = LearnableScaleAdaRoundWeightQuantizer(
         site.observer,
         weight_module.weight,
@@ -707,11 +717,7 @@ def _build_binding(
         weight_module=weight_module,
         original_observer=site.observer,
         original_weight=weight_module.weight.detach().clone(),
-        original_scale=original_scale.detach().clone(),
-        original_zero_point=original_zero_point.detach().clone(),
-        original_qparams_locked=bool(getattr(site.observer, "_qparams_locked", False)),
-        original_enabled=bool(site.observer.enabled),
-        original_fake_quant_enabled=bool(site.observer.fake_quant_enabled),
+        original_state=initial_state,
         proxy=proxy,
     )
 

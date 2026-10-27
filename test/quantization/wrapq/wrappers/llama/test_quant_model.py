@@ -19,6 +19,7 @@ The tests run only if *transformers* is available (they depend on the genuine
 
 import unittest
 from typing import cast, TYPE_CHECKING
+from unittest.mock import patch
 
 if TYPE_CHECKING:
     from transformers.models.llama.modeling_llama import LlamaModel
@@ -221,3 +222,61 @@ class TestQuantLlamaModel(unittest.TestCase):
         assert obs is not None
         self.assertEqual(obs.dtype, DType.uint(4))
         self.assertEqual(obs.qscheme, QScheme.PER_TENSOR_ASYMM)
+
+    def test_external_embeddings_do_not_require_token_lookup_calibration(self):
+        torch.manual_seed(103)
+        model = QuantLlamaModel(self.fp_model, qcfg=make_affine_ptq_config()).eval()
+        hidden = torch.randn(1, 3, 8)
+        model.enable_calibration()
+        model(inputs_embeds=hidden, use_cache=False, return_dict=False)
+        model.freeze_qparams()
+        self.assertFalse(model.has_capability("token_embeddings"))
+        self.assertTrue(model.has_capability("generated_rope"))
+        self.assertEqual(
+            model(inputs_embeds=hidden, use_cache=False, return_dict=False)[0].shape,
+            hidden.shape,
+        )
+        with patch.object(model.embed_tokens, "forward") as lookup:
+            with self.assertRaisesRegex(RuntimeError, "token_embeddings.*unavailable"):
+                model(input_ids=torch.zeros(1, 3, dtype=torch.long), use_cache=False)
+            lookup.assert_not_called()
+
+    def test_explicit_rope_does_not_require_generated_rope_calibration(self):
+        torch.manual_seed(104)
+        model = QuantLlamaModel(self.fp_model, qcfg=make_affine_ptq_config()).eval()
+        tokens = torch.arange(3).reshape(1, -1)
+        phase = torch.arange(12).float().reshape(1, 3, 4) * 0.1
+        sin = phase.sin()
+        if model.attn_options.rope == "pre_negated_sin":
+            sin[..., :2] = -sin[..., :2]
+        rope = phase.cos(), sin
+        model.enable_calibration()
+        model(
+            input_ids=tokens,
+            position_embeddings=rope,
+            use_cache=False,
+            return_dict=False,
+        )
+        model.freeze_qparams()
+        self.assertTrue(model.has_capability("token_embeddings"))
+        self.assertFalse(model.has_capability("generated_rope"))
+        expected = model(
+            input_ids=tokens,
+            position_embeddings=rope,
+            use_cache=False,
+            return_dict=False,
+        )[0]
+        hidden = model.embed_tokens(tokens)
+        actual = model(
+            inputs_embeds=hidden,
+            position_embeddings=rope,
+            use_cache=False,
+            return_dict=False,
+        )[0]
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        with patch.object(model.embed_tokens, "forward") as lookup:
+            with self.assertRaisesRegex(RuntimeError, "generated_rope.*unavailable"):
+                model(input_ids=tokens, use_cache=False)
+            lookup.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "generated_rope.*unavailable"):
+            model.get_position_embeddings_for(hidden, start=0)

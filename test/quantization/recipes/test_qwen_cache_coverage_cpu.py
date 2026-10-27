@@ -249,12 +249,22 @@ class TestQwenCacheCoverageCPU(unittest.TestCase):
         storage_key = _affine_storage_key(layer)
         storage_key.reset()
         storage_key.load_qparams(torch.tensor(1e-6), torch.tensor(0))
-        with self.assertRaisesRegex(RuntimeError, "new_k"):
+        # Imported compatible grids carry their own provenance; finite min/max
+        # is no longer a model-specific readiness requirement.
+        self.assertEqual(storage_key.require_frozen().provenance, "imported")
+        layer.require_calibrated_cache()
+        storage_key.reset()
+        layer.freeze_qparams()
+        with self.assertRaisesRegex(RuntimeError, "capability 'cache'"):
             layer.require_calibrated_cache()
         layer.obs_new_k.disable_fake_quant()
+        layer.freeze_qparams()
         layer.require_calibrated_cache()
+        self.assertEqual(layer.obs_new_k.require_frozen().kind, "bypass")
         layer.obs_new_k = IdentityObserver(name="new_k")
+        layer.freeze_qparams()
         layer.require_calibrated_cache()
+        self.assertEqual(layer.obs_new_k.require_frozen().kind, "identity")
         layer._mode = Mode.NO_QUANT
         layer.obs_new_k = MinMaxObserver(name="new_k")
         layer.require_calibrated_cache()

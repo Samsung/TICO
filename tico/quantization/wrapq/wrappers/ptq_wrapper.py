@@ -55,8 +55,8 @@ class PTQWrapper(QuantModuleBase):
     def _all_observers(self):
         """
         PTQWrapper itself owns NO observers (transparent node).
-        Returning an empty iterator prevents double-processing when parents
-        traverse the tree and then recurse into `self.wrapped`.
+        The coordinator visits `self.wrapped` as a separate owner; diagnostic
+        enumeration remains transparent through named_observers().
         """
         return ()  # no local observers
 

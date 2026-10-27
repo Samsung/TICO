@@ -77,6 +77,7 @@ class TestQuantModuleBase(unittest.TestCase):
         self.assertTrue(math.isinf(self.qm.obs.min_val.item()))
         self.assertTrue(math.isinf(self.qm.obs.max_val.item()))
 
+        self.qm(self.x)
         self.qm.freeze_qparams()
         self.assertIs(self.qm._mode, Mode.QUANT)
         self.assertTrue(self.qm.obs.has_qparams)
@@ -91,6 +92,7 @@ class TestQuantModuleBase(unittest.TestCase):
         self.assertLess(lo, hi)  # stats updated
 
         # QUANT pass – output must differ from FP32
+        self.qm(self.x)
         self.qm.freeze_qparams()
         q_out = self.qm(self.x)
         fp_out = self.x * 2.0
@@ -129,6 +131,7 @@ class TestQuantModuleBase(unittest.TestCase):
         self.qm.enable_calibration()
         self.assertEqual(self.qm.extra_repr(), "mode=calib")
 
+        self.qm(self.x)
         self.qm.freeze_qparams()
         self.assertEqual(self.qm.extra_repr(), "mode=quant")
 
@@ -230,10 +233,7 @@ class ChildQM(QuantModuleBase):
 
 class OuterQM(QuantModuleBase):
     """
-    Wrapper that itself owns a child QuantModuleBase.
-    The base helper MUST yield `OuterQM` from its parent, but must NOT
-    descend into `.inner` at that level (recursion happens when OuterQM
-    receives enable_calibration()/freeze_qparams()).
+    Wrapper with both local sites and a separately owned quantized child.
     """
 
     def __init__(self, qcfg: PTQConfig | None = None):
@@ -252,12 +252,8 @@ class TopWithContainers(QuantModuleBase):
     """
     Top-level wrapper that mixes plain containers and quant leaves.
 
-    Expected "immediate quant descendants" (skipping pure containers):
-      - leaf_direct
-      - seq[0], seq[2]
-      - mlist[1], mlist[2][0]
-      - mdict['q']
-      - outer  (but NOT outer.inner at this level)
+    Lifecycle ownership covers every depth while diagnostic names retain
+    container prefixes.
     """
 
     def __init__(self, qcfg: PTQConfig | None = None):
@@ -303,74 +299,48 @@ class TestChildQuantModulesDiscovery(unittest.TestCase):
         torch.manual_seed(0)
         self.top = TopWithContainers()
 
-    def _ids(self, mods):
-        return {id(m) for m in mods}
-
-    def test_yields_immediate_descendants_across_containers(self):
-        found = list(self.top._child_quant_modules())
-        # All yielded must be QuantModuleBase
-        self.assertTrue(all(isinstance(m, QuantModuleBase) for m in found))
-
-        # Build expected set
-        expected = {
-            id(self.top.leaf_direct),
-            id(self.top.seq[0]),
-            id(self.top.seq[2]),
-            id(self.top.mlist[1]),
-            id(self.top.mlist[2][0]),  # type: ignore[index]
-            id(self.top.mdict["q"]),
-            id(self.top.outer),  # but NOT outer.inner at this level
-        }
-
-        self.assertSetEqual(
-            self._ids(found),
-            expected,
-            "Did not yield the exact immediate quant descendants",
-        )
-
-        # No duplicates
-        self.assertEqual(len(found), len(set(found)), "Duplicate modules were yielded")
-
-    def test_does_not_descend_into_quant_modules(self):
-        found = list(self.top._child_quant_modules())
-        inner = self.top.outer.inner
-        self.assertNotIn(
-            inner,
-            found,
-            "Should not descend into a found QuantModuleBase (outer.inner leaked)",
-        )
+    def test_diagnostic_names_across_arbitrary_containers(self):
+        self.top.plain = nn.Module()
+        self.top.plain.leaf = ChildQM()
+        names = dict(self.top.named_observers())
+        self.assertIn("plain.leaf.leaf", names)
+        self.assertIn("outer.inner.leaf", names)
+        self.assertIn("seq.0.leaf", names)
+        self.assertIn("mlist.2.0.leaf", names)
 
     def test_lifecycle_propagates_through_containers(self):
         """
         enable_calibration()/freeze_qparams() should propagate to all quant modules,
-        including those behind containers; recursion into children of a found quant
-        module should happen via that module's own call.
+        including those behind containers; every owned quant module is visited by the coordinator.
         """
         # Before
-        for m in self.top._child_quant_modules():
+        for m in (m for m in self.top.modules() if isinstance(m, QuantModuleBase)):
             self.assertIs(m._mode, Mode.NO_QUANT)
 
         # Enable calibration at top — should reach *all* quant descendants
         self.top.enable_calibration()
 
-        # Level 1 descendants (returned by _child_quant_modules)
-        for m in self.top._child_quant_modules():
-            self.assertIs(m._mode, Mode.CALIB, "Level-1 descendant did not enter CALIB")
+        # All owned modules
+        for m in (m for m in self.top.modules() if isinstance(m, QuantModuleBase)):
+            self.assertIs(m._mode, Mode.CALIB, "Owned module did not enter CALIB")
 
-        # And also grandchildren via recursion (e.g., outer.inner)
+        # And also grandchildren through ownership traversal (e.g., outer.inner)
         self.assertIs(
             self.top.outer.inner._mode,
             Mode.CALIB,
-            "Grandchild quant module did not enter CALIB via recursion",
+            "Grandchild quant module did not enter CALIB through ownership traversal",
         )
 
         # Now freeze — everyone should be QUANT
+        for module in self.top.modules():
+            if isinstance(module, (ChildQM, OuterQM)):
+                module(torch.tensor([-1.0, 1.0]))
         self.top.freeze_qparams()
-        for m in self.top._child_quant_modules():
-            self.assertIs(m._mode, Mode.QUANT, "Level-1 descendant did not enter QUANT")
+        for m in (m for m in self.top.modules() if isinstance(m, QuantModuleBase)):
+            self.assertIs(m._mode, Mode.QUANT, "Owned module did not enter QUANT")
 
         self.assertIs(
             self.top.outer.inner._mode,
             Mode.QUANT,
-            "Grandchild quant module did not enter QUANT via recursion",
+            "Grandchild quant module did not enter QUANT through ownership traversal",
         )

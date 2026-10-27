@@ -137,6 +137,38 @@ class TestQuantGemma4TextModel(unittest.TestCase):
         self.assertIsInstance(prepared, PTQWrapper)
         self.assertIsInstance(prepared.wrapped, QuantGemma4TextModel)
 
+    def test_freeze_preserves_only_calibrated_input_capabilities(self):
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        for use_tokens in (True, False):
+            with self.subTest(use_tokens=use_tokens):
+                config = _make_text_config()
+                model = QuantGemma4TextModel(_make_text_model(config)).eval()
+                model.enable_calibration()
+                ids = torch.tensor([[1, 3, 5]])
+                embeddings = cast(
+                    torch.nn.Embedding, model.embed_tokens.wrapped.module
+                )(ids)
+                inputs = (
+                    {"input_ids": ids} if use_tokens else {"inputs_embeds": embeddings}
+                )
+                model(**inputs, use_cache=False)
+                model.freeze_qparams()
+                model(**inputs, use_cache=False)
+                self.assertEqual(model.has_capability("token_embeddings"), use_tokens)
+                self.assertEqual(
+                    model.has_capability("external_embeddings"), not use_tokens
+                )
+                unsupported = (
+                    {"inputs_embeds": embeddings} if use_tokens else {"input_ids": ids}
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "capability.*(external_embeddings|token_embeddings)"
+                ):
+                    model(**unsupported, use_cache=False)
+
     def test_no_quant_forward_matches_hf_text_model_with_input_ids(self):
         """Check that the wrapper matches Hugging Face text-model output."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (

@@ -351,6 +351,14 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
     def as_export_module(
         self, mode: ExportMode = "prefill", return_kv: bool = True
     ) -> nn.Module:
+        if return_kv or mode == "decode":
+            from tico.quantization.wrapq.wrappers.llama.quant_attention import (
+                QuantLlamaAttention,
+            )
+
+            for module in self.modules():
+                if isinstance(module, QuantLlamaAttention):
+                    module.require_capability("cache")
         if mode == "prefill":
             return QuantLlamaForCausalLMPrefillExportAdapter(self, return_kv=return_kv)
         elif mode == "decode":

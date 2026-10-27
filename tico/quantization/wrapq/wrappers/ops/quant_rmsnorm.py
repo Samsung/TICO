@@ -43,12 +43,11 @@ class QuantRMSNorm(QuantModuleBase):
         self.module = cast("LlamaRMSNorm | Qwen3VLTextRMSNorm", fp)
         self.eps = float(self.module.variance_epsilon)
 
-        self.obs_weight = self._make_obs("weight")
+        self.obs_weight = self._make_per_tensor_obs("weight")
         self.obs_act_in = self._make_obs("act_in")
         self.obs_act_out = self._make_obs("act_out")
 
-    def enable_calibration(self) -> None:
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
         # immediately capture the fixed weight range
         self.obs_weight.collect(self.module.weight)
 

@@ -244,6 +244,8 @@ class QuantGemma4ForCausalLM(QuantModuleBase, GenerationMixin):
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""
+        if self.config.final_logit_softcapping is None:
+            return (self.obs_logits,)
         return (
             self.obs_logit_softcapping_div,
             self.obs_logit_softcapping_tanh,

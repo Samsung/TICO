@@ -24,6 +24,7 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.qwen3_vl import (
     _has_qwen3_vl,
     _make_tiny_qwen3vl_config,
     _make_tiny_qwen3vl_model,
+    QwenVisionAttentionCase,
     QwenVisionModelCase,
     QwenVisionPatchEmbedCase,
 )
@@ -87,6 +88,18 @@ class TestQwen3VLWrapperSmokeInputs(unittest.TestCase):
             )
             self.assertEqual(pixel_values.ndim, 3)
 
+    def test_vision_attention_supplies_rope_by_name(self):
+        """The HF and wrapper signatures both receive the intended RoPE pair."""
+        case = QwenVisionAttentionCase()
+        module, reference = case.build({})
+        sample = case.eval_input(module, {})
+        self.assertEqual(len(sample.args), 2)
+        self.assertIs(sample.kwargs["position_embeddings"], case.position_embeddings)
+        with torch.no_grad():
+            actual = module(*sample.args, **dict(sample.kwargs))
+            expected = case.reference_forward(reference, sample)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     def test_vision_model_case_uses_batch_one_flattened_patches(self):
         """Vision-model calibration and export must share the rank-3 ABI."""
         case = QwenVisionModelCase()
@@ -113,6 +126,12 @@ class TestQwen3VLWrapperSmokeInputs(unittest.TestCase):
             self._expected_shape(cfg.vision_config, thw),
         )
         self.assertEqual(pixel_values.ndim, 3)
+        torch.testing.assert_close(
+            sample["mm_token_type_ids"],
+            (sample["input_ids"] == cfg.image_token_id).long(),
+            atol=0,
+            rtol=0,
+        )
         self.assertFalse(
             any(
                 isinstance(value, torch.Tensor) and value.ndim == 5

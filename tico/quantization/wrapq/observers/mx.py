@@ -14,7 +14,8 @@
 
 import torch
 
-from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.base import FrozenObserverState, ObserverBase
+from tico.utils.mx.formats import ElemFormat, RoundingMode
 from tico.utils.mx.mx_ops import quantize_mx
 
 
@@ -38,19 +39,61 @@ class MXObserver(ObserverBase):
         self.round = round
 
     def reset(self) -> None:
-        # No state to reset
-        return
+        self._reset_frozen_state()
 
     @torch.no_grad()
     def _update_stats(self, x: torch.Tensor) -> None:
         # No stats required
         return None
 
+    def _policy(self) -> tuple:
+        return super()._policy() + (
+            self.elem_format,
+            self.axis,
+            self.shared_exp_method,
+            self.round,
+        )
+
+    def _state_kind(self) -> str:
+        return "mx"
+
+    def derive_candidate(self) -> FrozenObserverState:
+        self._check_frozen_policy()
+        state = FrozenObserverState(
+            "mx",
+            self._policy(),
+            "stateless",
+            fake_quant_enabled=self.fake_quant_enabled,
+            observed_shape=self._observed_shape,
+        )
+        self.validate_candidate(state)
+        return state
+
+    def validate_candidate(self, state: FrozenObserverState) -> None:
+        super().validate_candidate(state)
+        if (
+            state.kind != "mx"
+            or state.provenance != "stateless"
+            or state.scale is not None
+            or self.elem_format not in ElemFormat.__members__
+            or self.round not in RoundingMode.string_enums()
+            or self.shared_exp_method not in ("max", "none")
+            or not isinstance(self.axis, int)
+        ):
+            raise RuntimeError(f"Observer {self.name!r}: invalid dynamic MX policy.")
+        if state.observed_shape is not None and not -len(
+            state.observed_shape
+        ) <= self.axis < len(state.observed_shape):
+            raise RuntimeError(
+                f"Observer {self.name!r}: invalid MX axis for observed rank."
+            )
+
     def compute_qparams(self):
-        # MX path does not produce affine qparams; keep interface contract.
+        self.install_candidate(self.derive_candidate())
         return None
 
     def fake_quant(self, x: torch.Tensor) -> torch.Tensor:
+        self._check_frozen_policy()
         if not self.fake_quant_enabled:
             return x
         return quantize_mx(

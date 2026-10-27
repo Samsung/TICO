@@ -44,6 +44,9 @@ class EMAObserver(AffineObserverBase):
         assert 0.0 < momentum < 1.0, "momentum must be in (0, 1)"
         self.momentum = momentum
 
+    def _policy(self) -> tuple:
+        return super()._policy() + (self.momentum,)
+
     @torch.no_grad()
     def _update_stats(self, x: torch.Tensor):
         if self.channel_axis is None:

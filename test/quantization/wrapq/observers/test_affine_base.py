@@ -174,6 +174,7 @@ class TestAffineObserverBase(unittest.TestCase):
             lock=True,
         )
 
+        obs.observe_shape((2, 3))
         scale, zero_point = obs.compute_qparams()
         self.assertEqual(scale.shape, torch.Size([2]))
         self.assertEqual(zero_point.shape, torch.Size([2]))

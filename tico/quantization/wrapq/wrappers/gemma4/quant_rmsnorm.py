@@ -43,13 +43,12 @@ class QuantGemma4RMSNorm(QuantModuleBase):
         self.eps = float(getattr(fp, "eps", getattr(fp, "variance_epsilon", 1e-6)))
         self.with_scale = hasattr(fp, "weight") and getattr(fp, "weight") is not None
 
-        self.obs_weight = self._make_obs("weight")
+        self.obs_weight = self._make_per_tensor_obs("weight")
         self.obs_act_in = self._make_obs("act_in")
         self.obs_act_out = self._make_obs("act_out")
 
-    def enable_calibration(self) -> None:
-        """Enable calibration and capture the static scale weight when it exists."""
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
+        """Capture the static scale weight when it exists."""
         if self.with_scale:
             self.obs_weight.collect(self.module.weight)
 

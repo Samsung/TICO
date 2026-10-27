@@ -27,22 +27,22 @@ class TestIdentityObserver(unittest.TestCase):
 
     def test_initial_state(self):
         self.assertFalse(self.obs.enabled, msg="Observer must start disabled")
-        self.assertTrue(self.obs.has_qparams, msg="Scale / ZP should be pre-cached")
-        self.assertEqual(self.obs._cached_scale.item(), 1.0)
-        self.assertEqual(self.obs._cached_zp.item(), 0)
+        self.assertIsNone(self.obs.frozen_state)
+        self.assertEqual(self.obs.derive_candidate().kind, "identity")
 
     def test_collect_is_noop(self):
         x = torch.randn(8, 16)
         self.obs.collect(x)  # should have *no* effect
         self.assertFalse(self.obs.enabled, msg="`enabled` flag must stay False")
-        # Scale / ZP remain unchanged
-        self.assertEqual(self.obs._cached_scale.item(), 1.0)
-        self.assertEqual(self.obs._cached_zp.item(), 0)
+        self.assertIsNone(self.obs.frozen_state)
 
-    def test_compute_qparams_constant(self):
-        scale, zp = self.obs.compute_qparams()
-        self.assertEqual(scale.item(), 1.0)
-        self.assertEqual(zp.item(), 0)
+    def test_explicit_stateless_readiness(self):
+        self.assertIsNone(self.obs.compute_qparams())
+        state = self.obs.require_frozen()
+        self.assertEqual(state.kind, "identity")
+        self.assertEqual(state.provenance, "stateless")
+        self.assertIsNone(state.scale)
+        self.assertIsNone(state.zero_point)
 
     def test_fake_quant_identity(self):
         x = torch.randn(4, 4)

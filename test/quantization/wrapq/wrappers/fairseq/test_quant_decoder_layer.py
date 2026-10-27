@@ -308,6 +308,22 @@ class TestQuantFairseqDecoderLayer(unittest.TestCase):
         self.assertEqual(out_x.shape, (self.T, self.B, self.E))
         self.assertIsNone(attn)  # need_attn=False → decoder returns None for attn
 
+    def test_external_past_requires_its_own_calibrated_capability(self):
+        layer, _ = self._build_layer()
+        x, enc, kpm = self._mk_inputs()
+        layer.enable_calibration()
+        layer(x, encoder_out=enc, encoder_padding_mask=kpm)
+        layer.freeze_qparams()
+        past = torch.zeros(self.B, self.H, 1, self.E // self.H)
+        with self.assertRaisesRegex(RuntimeError, "capability 'external_past'"):
+            layer.forward_external(
+                x[:1],
+                encoder_out=enc,
+                encoder_padding_mask=kpm,
+                prev_self_k=past,
+                prev_self_v=past,
+            )
+
     # 8) Lifecycle propagation: enable_calibration → freeze_qparams cascades to children
     def test_lifecycle_propagation(self):
         layer, _ = self._build_layer()
@@ -323,6 +339,8 @@ class TestQuantFairseqDecoderLayer(unittest.TestCase):
                 break
         self.assertTrue(enabled_seen)
 
+        x, enc, kpm = self._mk_inputs()
+        layer(x, encoder_out=enc, encoder_padding_mask=kpm, need_attn=True)
         layer.freeze_qparams()
         self.assertEqual(layer._mode, Mode.QUANT)
         # Ensure observers are now disabled

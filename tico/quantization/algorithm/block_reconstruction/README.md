@@ -4,6 +4,12 @@ This package provides block reconstruction for WrapQ models. It optimizes
 frozen per-tensor affine activation qparams against cached floating-point block
 outputs while keeping model parameters and weight qparams fixed.
 
+Optimization starts from committed observer snapshots. Temporary learnable
+observers expose differentiable projected grids; finalize them into the original
+observers before freezing or export. Learned grids are imported through common
+validation, while rollback restores exact snapshots without reconstructing grids
+from min/max statistics or changing calibration provenance.
+
 ## Core reconstruction
 
 - Cache both floating-point and quantized-prefix block inputs.

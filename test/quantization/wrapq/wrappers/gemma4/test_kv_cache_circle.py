@@ -170,10 +170,15 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                 shared_key_value=shared_key_value,
                 use_cache=True,
             )
-        for observer in attention.modules():
+        for _, observer in attention.named_observers():
             if isinstance(observer, AffineObserverBase):
-                _load(observer, 0.03125, 128)
-        for observer in (attention.obs_new_k, attention.obs_new_v):
+                _load(observer, 0.03125, 0 if observer.qscheme.is_symmetric() else 128)
+        storage_observers = (
+            ()
+            if attention.is_kv_shared_layer
+            else (attention.obs_new_k, attention.obs_new_v)
+        )
+        for observer in storage_observers:
             if observer.dtype == DType.int(16):
                 _load(observer, 0.09375, 0)
             else:

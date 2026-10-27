@@ -65,8 +65,7 @@ class TinyQuantBlock(QuantModuleBase):
             qscheme=QScheme.PER_TENSOR_ASYMM,
         )
 
-    def enable_calibration(self) -> None:
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
         self.obs_weight.collect(self.weight.detach())
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:

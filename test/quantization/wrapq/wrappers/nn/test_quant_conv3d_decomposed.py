@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import unittest
 import warnings
 from typing import cast, Union
@@ -220,7 +221,6 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
         # Calibration
         self.q_conv.enable_calibration()
         self.q_conv.obs_weight.compute_qparams()
-        self.q_conv.freeze_qparams()
 
         # Check that scale/zero_point have correct shape (per output channel)
         expected_num_channels = self.fp32.out_channels
@@ -672,6 +672,111 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
         diff = (fp_out - q_out).abs().mean().item()
         self.assertGreater(diff, 0.0, "Quantized output should differ from FP32")
         self.assertLess(diff, 0.7, "Quantization error should be reasonable")
+
+    def test_unit_temporal_kernel_has_no_unconsumed_accumulators(self):
+        layer = QuantConv3dDecomposed(nn.Conv3d(1, 2, (1, 2, 2)))
+        x = torch.arange(27, dtype=torch.float32).reshape(1, 1, 3, 3, 3) / 27
+        layer.enable_calibration()
+        layer(x)
+        layer.freeze_qparams()
+        self.assertEqual(layer._acc_obs, {})
+        self.assertIs(layer._mode, Mode.QUANT)
+        self.assertTrue(torch.isfinite(layer(x)).all())
+
+    def test_new_calibration_discards_old_temporal_profile(self):
+        layer = QuantConv3dDecomposed(nn.Conv3d(1, 2, (2, 2, 2), stride=2))
+        x = torch.arange(36, dtype=torch.float32).reshape(1, 1, 4, 3, 3) / 36
+        layer.enable_calibration()
+        layer(x)
+        layer.freeze_qparams()
+        layer.enable_calibration()
+        y = x[:, :, :2, :2, :2]
+        layer(y)
+        layer.freeze_qparams()
+        self.assertEqual(layer._input_slice_obs, {})
+        self.assertEqual(layer._conv2d_obs, {})
+        self.assertEqual(layer._acc_obs, {})
+        self.assertEqual(layer(y).shape, (1, 2, 1, 1, 1))
+
+    def test_dynamic_profile_snapshots_restore_into_fresh_wrapper(self):
+        layer = QuantConv3dDecomposed(nn.Conv3d(1, 2, (2, 2, 2)))
+        x = torch.arange(36, dtype=torch.float32).reshape(1, 1, 4, 3, 3) / 36
+        layer.enable_calibration()
+        layer(x)
+        layer.freeze_qparams()
+        state = copy.deepcopy(layer.state_dict())
+        restored = QuantConv3dDecomposed(nn.Conv3d(1, 2, (2, 2, 2)))
+        restored.load_state_dict(state)
+        self.assertEqual(restored._dynamic_profile, layer._dynamic_profile)
+        self.assertTrue(torch.equal(restored(x), layer(x)))
+        source_sites = dict(layer.named_observers())
+        restored_sites = dict(restored.named_observers())
+        self.assertEqual(source_sites.keys(), restored_sites.keys())
+        for name, source in source_sites.items():
+            before = source.require_frozen()
+            after = restored_sites[name].require_frozen()
+            assert before.scale is not None and after.scale is not None
+            assert before.zero_point is not None and after.zero_point is not None
+            self.assertTrue(torch.equal(before.scale, after.scale))
+            self.assertTrue(torch.equal(before.zero_point, after.zero_point))
+            self.assertEqual(before.provenance, after.provenance)
+            self.assertEqual(before.locked, after.locked)
+
+    def test_dynamic_profile_circle_restore_preserves_artifact_contract(self):
+        import numpy as np
+        import tico
+        from tico.circle import CircleDocument
+        from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
+
+        layer = QuantConv3dDecomposed(nn.Conv3d(1, 2, (2, 2, 2))).eval()
+        x = torch.arange(36, dtype=torch.float32).reshape(1, 1, 4, 3, 3) / 36
+        layer.enable_calibration()
+        layer(x)
+        layer.freeze_qparams()
+        restored = QuantConv3dDecomposed(nn.Conv3d(1, 2, (2, 2, 2))).eval()
+        restored.load_state_dict(copy.deepcopy(layer.state_dict()))
+        runtimes = []
+        for module in (layer, restored):
+            converted = tico.convert(module, (x,))
+            document = CircleDocument.from_bytes(converted.circle_binary)
+            document.verify()
+            runtimes.append(CircleReferenceRuntime(document))
+        before, after = runtimes
+        self.assertEqual(before.program.inputs, after.program.inputs)
+        self.assertEqual(before.program.outputs, after.program.outputs)
+        self.assertEqual(
+            [(t.shape, t.dtype, t.quantization) for t in before.program.tensors],
+            [(t.shape, t.dtype, t.quantization) for t in after.program.tensors],
+        )
+        self.assertEqual(
+            [(op.name, op.inputs, op.outputs) for op in before.program.operators],
+            [(op.name, op.inputs, op.outputs) for op in after.program.operators],
+        )
+        self.assertIn("CONV_2D", [op.name for op in before.program.operators])
+        self.assertNotIn("DEQUANTIZE", [op.name for op in before.program.operators])
+        self.assertEqual(before.input_tensors[0].dtype, np.dtype("uint8"))
+        self.assertEqual(before.output_tensors[0].dtype, np.dtype("uint8"))
+        for source, target in zip(before.program.tensors, after.program.tensors):
+            if source.is_constant:
+                np.testing.assert_array_equal(source.constant, target.constant)
+        np.testing.assert_array_equal(
+            before.run([x.numpy()], mode=ExecutionMode.FAKE_QUANTIZE).outputs[0],
+            after.run([x.numpy()], mode=ExecutionMode.FAKE_QUANTIZE).outputs[0],
+        )
+
+    def test_corrupt_dynamic_profile_rejects_nonstrict_restore(self):
+        layer = QuantConv3dDecomposed(nn.Conv3d(1, 2, (2, 2, 2)))
+        x = torch.arange(36, dtype=torch.float32).reshape(1, 1, 4, 3, 3) / 36
+        layer.enable_calibration()
+        layer(x)
+        layer.freeze_qparams()
+        state = copy.deepcopy(layer.state_dict())
+        state["_extra_state"]["conv3d_profile"] = (3, 3)
+        restored = QuantConv3dDecomposed(nn.Conv3d(1, 2, (2, 2, 2)))
+        with self.assertRaisesRegex(
+            RuntimeError, "Incompatible Conv3d observer profile"
+        ):
+            restored.load_state_dict(state, strict=False)
 
 
 if __name__ == "__main__":

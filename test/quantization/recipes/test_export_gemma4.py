@@ -34,6 +34,7 @@ import torch
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4PLEEmbeddingExportAdapter,
     Gemma4PLEProjectionExportAdapter,
@@ -160,12 +161,20 @@ class FakeText(torch.nn.Module):
                 "per_layer_model_projection_scale_tensor",
                 torch.tensor([0.25]),
             )
-            self.obs_per_layer_token_inputs = torch.nn.Identity()
-            self.obs_per_layer_projection = torch.nn.Identity()
-            self.obs_per_layer_inputs = torch.nn.Identity()
-            self.obs_per_layer_model_projection_scale = torch.nn.Identity()
-            self.obs_per_layer_input_scale = torch.nn.Identity()
-            self.obs_per_layer_sum = torch.nn.Identity()
+            self.obs_per_layer_token_inputs = IdentityObserver(
+                name="per_layer_token_inputs"
+            )
+            self.obs_per_layer_projection = IdentityObserver(
+                name="per_layer_projection"
+            )
+            self.obs_per_layer_inputs = IdentityObserver(name="per_layer_inputs")
+            self.obs_per_layer_model_projection_scale = IdentityObserver(
+                name="per_layer_model_projection_scale"
+            )
+            self.obs_per_layer_input_scale = IdentityObserver(
+                name="per_layer_input_scale"
+            )
+            self.obs_per_layer_sum = IdentityObserver(name="per_layer_sum")
         self.layers = torch.nn.ModuleList(
             [
                 FakePTQWrapper(
@@ -363,11 +372,13 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             ple_embedding_params["embed_tokens_per_layer.weight"],
             qtext.embed_tokens_per_layer.weight,
         )
-        projection_state = list(
-            modules["ple_projection_prefill.q.circle"].state_dict().keys()
-        )
+        projection_state = modules["ple_projection_prefill.q.circle"].state_dict()
         self.assertCountEqual(
-            projection_state,
+            [
+                name
+                for name, value in projection_state.items()
+                if isinstance(value, torch.Tensor)
+            ],
             [
                 "per_layer_model_projection.weight",
                 "per_layer_model_projection_scale_tensor",

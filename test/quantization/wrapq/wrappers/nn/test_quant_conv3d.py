@@ -153,7 +153,6 @@ class TestQuantConv3d(unittest.TestCase):
         # Calibration
         self.q_conv.enable_calibration()
         self.q_conv.obs_weight.compute_qparams()
-        self.q_conv.freeze_qparams()
 
         # Check that scale/zero_point have correct shape (per output channel)
         expected_num_channels = self.fp32.out_channels

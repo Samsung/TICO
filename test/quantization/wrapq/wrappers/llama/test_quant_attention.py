@@ -803,6 +803,43 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertLess(diff, 1.0)
         self.assertEqual(cal_out.shape, q_out.shape)
 
+    def test_uncalibrated_cache_capability_does_not_disable_no_cache_attention(self):
+        attention = QuantLlamaAttention(self.fp_attn, layer_idx=0)
+        attention.enable_calibration()
+        hidden = torch.randn(1, 3, self.hidden_size)
+        rope = self._rand_rope_for(attention, 1, 3)
+        attention(hidden, rope, use_cache=False)
+        attention.freeze_qparams()
+        self.assertFalse(attention.has_capability("cache"))
+        self.assertFalse(attention.obs_new_k.has_qparams)
+        self.assertEqual(
+            attention(hidden, rope, use_cache=False)[0].shape, hidden.shape
+        )
+        attention.as_export_module("prefill", return_kv=False)
+        with self.assertRaisesRegex(RuntimeError, "cache.*unavailable"):
+            attention(hidden, rope, use_cache=True)
+        with self.assertRaisesRegex(RuntimeError, "cache.*unavailable"):
+            attention.as_export_module("prefill", return_kv=True)
+        with self.assertRaisesRegex(RuntimeError, "cache.*unavailable"):
+            attention.as_export_module("decode", return_kv=False)
+        with self.assertRaisesRegex(RuntimeError, "cache.*unavailable"):
+            attention(
+                hidden, rope, past_key_value=self._rand_past(1, 1), use_cache=False
+            )
+
+    def test_partial_cache_group_is_unavailable_after_freeze(self):
+        attention = QuantLlamaAttention(self.fp_attn, layer_idx=0)
+        attention.enable_calibration()
+        hidden = torch.randn(1, 3, self.hidden_size)
+        rope = self._rand_rope_for(attention, 1, 3)
+        attention(hidden, rope, use_cache=False)
+        attention.obs_new_k.collect(torch.zeros(1, self.n_kv, 3, self.head_dim))
+        attention.freeze_qparams()
+        self.assertFalse(attention.has_capability("cache"))
+        self.assertFalse(attention.obs_new_k.has_qparams)
+        with self.assertRaisesRegex(RuntimeError, "cache.*unavailable"):
+            attention(hidden, rope, use_cache=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,7 +45,7 @@ from tico.quantization.wrapq.control import (
     SiteRole,
 )
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.base import FrozenObserverState, ObserverBase
 
 MetricsEvaluator = Callable[[], OutputMetrics]
 ProgressCallback = Callable[["GlobalWeightRefinementCheckpoint"], None]
@@ -543,11 +543,7 @@ class _GlobalBinding:
     weight_module: nn.Conv2d
     original_observer: AffineObserverBase
     entry_weight: torch.Tensor
-    entry_scale: torch.Tensor
-    entry_zero_point: torch.Tensor
-    entry_qparams_locked: bool
-    entry_enabled: bool
-    entry_fake_quant_enabled: bool
+    entry_state: FrozenObserverState
     proxy: CheckpointInitializedScaleAdaRoundQuantizer
 
 
@@ -877,7 +873,7 @@ class GlobalAdaRoundWeightSet:
                     lock=True,
                 )
                 binding.original_observer.fake_quant_enabled = (
-                    binding.entry_fake_quant_enabled
+                    binding.entry_state.fake_quant_enabled
                 )
             self._restore_observers()
         except Exception:
@@ -897,16 +893,7 @@ class GlobalAdaRoundWeightSet:
             for binding in self.bindings:
                 binding.weight_module.weight.copy_(binding.entry_weight)
         for binding in self.bindings:
-            device = binding.original_observer.min_val.device
-            binding.original_observer.load_qparams(
-                binding.entry_scale.to(device=device),
-                binding.entry_zero_point.to(device=device),
-                lock=binding.entry_qparams_locked,
-            )
-            binding.original_observer.enabled = binding.entry_enabled
-            binding.original_observer.fake_quant_enabled = (
-                binding.entry_fake_quant_enabled
-            )
+            binding.original_observer.install_candidate(binding.entry_state)
         self._restore_observers()
 
     def _restore_observers(self) -> None:
@@ -1702,7 +1689,9 @@ def _build_binding(
             f"FP source shape mismatch at {site.path!r}: "
             f"{tuple(source.shape)} != {tuple(weight_module.weight.shape)}."
         )
-    scale, zero_point = site.observer.compute_qparams()
+    initial_state = site.observer.require_frozen()
+    scale, zero_point = initial_state.scale, initial_state.zero_point
+    assert scale is not None and zero_point is not None
     entry_weight = weight_module.weight.detach().clone()
     with torch.no_grad():
         checkpoint_effective_weight = site.observer.fake_quant(entry_weight)
@@ -1738,11 +1727,7 @@ def _build_binding(
         weight_module=weight_module,
         original_observer=site.observer,
         entry_weight=entry_weight,
-        entry_scale=scale.detach().clone(),
-        entry_zero_point=zero_point.detach().clone(),
-        entry_qparams_locked=bool(site.observer._qparams_locked),
-        entry_enabled=bool(site.observer.enabled),
-        entry_fake_quant_enabled=bool(site.observer.fake_quant_enabled),
+        entry_state=initial_state,
         proxy=proxy,
     )
 

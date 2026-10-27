@@ -26,6 +26,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.recipes.export.circle import (
     convert_and_save_circle as _convert_and_save,
 )
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
@@ -296,7 +297,7 @@ def _small_tensor_values(tensor: torch.Tensor) -> dict[str, Any]:
     return metadata
 
 
-def _observer_manifest(observer: torch.nn.Module) -> dict[str, Any]:
+def _observer_manifest(observer: ObserverBase) -> dict[str, Any]:
     """Return the quantization contract owned by one boundary observer."""
     contract: dict[str, Any] = {
         "name": str(getattr(observer, "name", type(observer).__name__)),
@@ -312,16 +313,11 @@ def _observer_manifest(observer: torch.nn.Module) -> dict[str, Any]:
     if channel_axis is not None:
         contract["channel_axis"] = int(channel_axis)
 
-    scale = getattr(observer, "_cached_scale", None)
-    zero_point = getattr(observer, "_cached_zp", None)
-    if (
-        isinstance(scale, torch.Tensor)
-        and scale.numel()
-        and isinstance(zero_point, torch.Tensor)
-        and zero_point.numel()
-    ):
-        contract["scale"] = _small_tensor_values(scale)
-        contract["zero_point"] = _small_tensor_values(zero_point)
+    snapshot = observer.frozen_state
+    if snapshot is not None and snapshot.scale is not None:
+        assert snapshot.zero_point is not None
+        contract["scale"] = _small_tensor_values(snapshot.scale)
+        contract["zero_point"] = _small_tensor_values(snapshot.zero_point)
     return contract
 
 

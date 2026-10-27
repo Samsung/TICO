@@ -164,8 +164,12 @@ class QuantQwen3VLModel(QuantModuleBase):
                 "You must specify exactly one of input_ids or inputs_embeds"
             )
 
+        if pixel_values is not None or pixel_values_videos is not None:
+            self.require_capability("vision")
+
         # Generate input embeddings from token IDs
         if inputs_embeds is None:
+            self._text_model.require_capability("token_embeddings")
             assert hasattr(self._text_model, "embed_tokens") and isinstance(
                 self._text_model.embed_tokens, PTQWrapper
             )
@@ -742,6 +746,11 @@ class QuantQwen3VLModel(QuantModuleBase):
             return position_ids, mrope_deltas_tensor
 
     def _all_observers(self) -> Iterable:
-        """Yield all observers from this module and wrapped submodules."""
-        # Local observers
+        """Yield the local multimodal fusion site."""
         yield self.obs_mm_fusion
+
+    def local_observer_groups(self):
+        return {"required": (), "vision": (self.obs_mm_fusion,)}
+
+    def _conditional_quant_subtrees(self):
+        return {"vision": (self.visual,)}

@@ -196,6 +196,10 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
             Optional[torch.Tensor],
         ],
     ]:
+        if attn_mask is not None or self.use_static_causal:
+            self.require_capability("attention_mask")
+        if key_padding_mask is not None:
+            self.require_capability("key_padding_mask")
 
         if need_head_weights:
             need_weights = True
@@ -364,6 +368,19 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
         if return_new_kv:
             return out, attn_weights_out, new_k_bh, new_v_bh
         return out, attn_weights_out
+
+    def local_observer_groups(self):
+        attention_mask = (self.obs_causal_mask, self.obs_attn_mask_add)
+        key_padding_mask = (self.obs_kpm_in, self.obs_kp_mask_add)
+        conditional = attention_mask + key_padding_mask
+        required = tuple(obs for obs in self._all_observers() if obs not in conditional)
+        if self.use_static_causal:
+            required += attention_mask
+        return {
+            "required": required,
+            "attention_mask": attention_mask,
+            "key_padding_mask": key_padding_mask,
+        }
 
     def _all_observers(self):
         yield from (

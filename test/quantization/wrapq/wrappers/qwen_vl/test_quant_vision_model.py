@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import math
 import unittest
 from typing import cast, TYPE_CHECKING
@@ -27,6 +28,7 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
     Qwen3VLVisionPrefillExportAdapter,
 )
@@ -240,7 +242,13 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         self.assertIsNotNone(q_model.merger)
         self.assertEqual(
             len(q_model.deepstack_merger_list),
-            len(self.fp_model.deepstack_merger_list),
+            len(
+                {
+                    index
+                    for index in self.fp_model.config.deepstack_visual_indexes
+                    if 0 <= index < len(q_model.blocks)
+                }
+            ),
         )
 
     def test_as_export_module_returns_profile_owned_adapter(self):
@@ -585,3 +593,58 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         self.assertNotEqual(small.profile_key, large.profile_key)
         self.assertEqual(small.pos_embed_template.shape[0], 16)
         self.assertEqual(large.pos_embed_template.shape[0], 64)
+
+    def test_unreachable_deepstack_mergers_do_not_own_required_sites(self):
+        fp_model = copy.deepcopy(self.fp_model)
+        fp_model.config.deepstack_visual_indexes = (8, 0, 1)
+        fp_model.deepstack_visual_indexes = (8, 0, 1)
+        hidden, grid = self._create_test_inputs((1, 4, 4))
+        model = QuantQwen3VLVisionModel(fp_model, fp_name="vision").eval()
+        self.assertEqual(tuple(model.deepstack_merger_list.keys()), ("1", "2"))
+        self.assertEqual(
+            cast(PTQWrapper, model.deepstack_merger_list["1"]).wrapped.fp_name,
+            "vision.deepstack_merger_list.1",
+        )
+        model.enable_calibration()
+        with torch.no_grad():
+            model(hidden, grid)
+        model.freeze_qparams()
+        with torch.no_grad():
+            output = model(hidden, grid)
+        features = (
+            output.deepstack_features if model.has_deepstack_model_output else output[1]
+        )
+        self.assertEqual(len(features), 2)
+        self.assertEqual(tuple(features[0].shape), tuple(features[1].shape))
+        model.as_export_module("prefill", grid_thw=(1, 4, 4))
+
+    def test_reachable_deepstack_mergers_still_require_calibration(self):
+        fp_model = copy.deepcopy(self.fp_model)
+        fp_model.config.deepstack_visual_indexes = (8, 0, 1)
+        fp_model.deepstack_visual_indexes = (8, 0, 1)
+        model = QuantQwen3VLVisionModel(fp_model).eval()
+        model.enable_calibration()
+        hidden, grid = self._create_test_inputs((1, 4, 4))
+        model(hidden, grid)
+        merger = cast(PTQWrapper, model.deepstack_merger_list["1"]).wrapped
+        observer = merger.get_observer("linear_fc1.act_in")
+        assert observer is not None
+        observer.reset()
+        with self.assertRaisesRegex(RuntimeError, "act_in.*calibration"):
+            model.freeze_qparams()
+
+    def test_duplicate_deepstack_indices_keep_hf_first_merger_semantics(self):
+        fp_model = copy.deepcopy(self.fp_model)
+        fp_model.config.deepstack_visual_indexes = (0, 0, 1)
+        fp_model.deepstack_visual_indexes = (0, 0, 1)
+        model = QuantQwen3VLVisionModel(fp_model).eval()
+        self.assertEqual(tuple(model.deepstack_merger_list.keys()), ("0", "2"))
+        model.enable_calibration()
+        hidden, grid = self._create_test_inputs((1, 4, 4))
+        model(hidden, grid)
+        model.freeze_qparams()
+        output = model(hidden, grid)
+        features = (
+            output.deepstack_features if model.has_deepstack_model_output else output[1]
+        )
+        self.assertEqual(len(features), 2)

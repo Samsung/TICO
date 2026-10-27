@@ -72,7 +72,9 @@ class LearnableAffineObserver(ObserverBase):
         if minimum_scale <= 0.0 or not math.isfinite(minimum_scale):
             raise ValueError("minimum_scale must be finite and positive.")
 
-        scale, zero_point = original.compute_qparams()
+        initial_state = original.require_frozen()
+        scale, zero_point = initial_state.scale, initial_state.zero_point
+        assert scale is not None and zero_point is not None
         if scale.numel() != 1 or zero_point.numel() != 1:
             raise ValueError("Learnable affine qparams must be scalar values.")
         scale_value = scale.detach().to(dtype=torch.float32).reshape(())
@@ -142,6 +144,19 @@ class LearnableAffineObserver(ObserverBase):
         """Return projected backend-compatible qparams."""
         zero_point = torch.round(self.projected_zero_point).to(dtype=torch.int)
         return self.scale, zero_point
+
+    def derive_candidate(self):
+        raise RuntimeError(
+            "Finalize block reconstruction into its original observers before freezing or export."
+        )
+
+    def get_extra_state(self):
+        raise RuntimeError(
+            "Finalize block reconstruction before saving deployment state; use state_snapshot for optimization checkpoints."
+        )
+
+    def validate_loaded_state(self) -> None:
+        self.derive_candidate()
 
     def fake_quant(self, x: torch.Tensor) -> torch.Tensor:
         """Apply affine fake quantization with straight-through rounding."""
@@ -389,7 +404,9 @@ def _validate_tied_observers(
     observers: tuple[AffineObserverBase, ...],
 ) -> None:
     representative = observers[0]
-    reference_scale, reference_zp = representative.compute_qparams()
+    initial_state = representative.require_frozen()
+    reference_scale, reference_zp = initial_state.scale, initial_state.zero_point
+    assert reference_scale is not None and reference_zp is not None
     for observer in observers[1:]:
         if observer.dtype != representative.dtype:
             raise ValueError(f"Tied group {group.name!r} mixes activation dtypes.")
@@ -399,7 +416,9 @@ def _validate_tied_observers(
             raise ValueError(
                 f"Tied group {group.name!r} contains per-channel activation qparams."
             )
-        scale, zero_point = observer.compute_qparams()
+        initial_state = observer.require_frozen()
+        scale, zero_point = initial_state.scale, initial_state.zero_point
+        assert scale is not None and zero_point is not None
         if not torch.allclose(scale, reference_scale, rtol=1.0e-6, atol=1.0e-8):
             raise ValueError(
                 f"Tied group {group.name!r} starts from inconsistent scales."
@@ -424,17 +443,6 @@ def _store_qparams(
         device=observer.min_val.device,
         dtype=torch.int,
     )
-    qmin, qmax = observer.dtype.qmin, observer.dtype.qmax
-    if observer.qscheme.is_symmetric():
-        observer.min_val.copy_((-qmax * stored_scale).to(observer.min_val))
-        observer.max_val.copy_((qmax * stored_scale).to(observer.max_val))
-    else:
-        observer.min_val.copy_(
-            ((qmin - stored_zero_point) * stored_scale).to(observer.min_val)
-        )
-        observer.max_val.copy_(
-            ((qmax - stored_zero_point) * stored_scale).to(observer.max_val)
-        )
     observer.load_qparams(stored_scale, stored_zero_point, lock=True)
 
 

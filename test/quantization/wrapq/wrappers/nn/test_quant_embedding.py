@@ -70,6 +70,7 @@ class TestQuantEmbedding(unittest.TestCase):
 
         # calibration cycle
         self.q_emb.enable_calibration()
+        self.q_emb(self.x)
         self.q_emb.freeze_qparams()
 
         post_scale = self.q_emb.weight_obs._cached_scale

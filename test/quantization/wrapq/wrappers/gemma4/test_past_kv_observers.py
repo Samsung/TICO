@@ -608,18 +608,47 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
             ),
         ):
             self._forward(consumer, 3, shared=shared)
-            # Model traversal may visit the consumer before the producer.
-            consumer.freeze_qparams()
+            # A standalone consumer cannot freeze an unready external producer.
+            with self.assertRaisesRegex(RuntimeError, "not frozen"):
+                consumer.freeze_qparams()
         producer.freeze_qparams()
+        consumer.freeze_qparams()
         consumer.validate_export_cache("prefill")
         consumer.validate_export_cache("decode")
         for observer in (consumer.obs_new_k, consumer.obs_new_v):
             self.assertTrue(torch.isposinf(observer.min_val).all())
             self.assertTrue(torch.isneginf(observer.max_val).all())
             self.assertFalse(observer.has_qparams)
-        self.assertEqual(
-            set(consumer.get_extra_state()["qparams"]), {"present_key", "present_value"}
+        self.assertNotIn("qparams", consumer.get_extra_state())
+        self.assertNotIn(
+            consumer.obs_new_k, consumer.local_observer_groups()["required"]
         )
+
+    def test_common_freeze_resolves_reverse_order_shared_source_plan(self):
+        from tico.quantization.wrapq.lifecycle import freeze_qparams
+
+        config = _make_text_config(
+            num_hidden_layers=2,
+            layer_types=["full_attention"] * 2,
+            num_kv_shared_layers=1,
+        )
+        producer = self._make_attention(config=config)
+        consumer = self._make_attention(config=config, layer_idx=1)
+        consumer.bind_cache_source(producer)
+        root = torch.nn.Module()
+        root.add_module("consumer", consumer)
+        root.add_module("producer", producer)
+        producer.enable_calibration()
+        consumer.enable_calibration()
+        shared: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._forward(producer, 3, shared=shared)
+        self._forward(consumer, 3, shared=shared)
+        freeze_qparams(root)
+        self.assertIs(consumer.cache_storage_observers()[0], producer.obs_new_k)
+        self.assertIs(consumer._mode, Mode.QUANT)
+        self.assertIs(producer._mode, Mode.QUANT)
+        self.assertIsNone(consumer.obs_new_k.frozen_state)
+        consumer.validate_export_cache("decode")
 
     def test_invalid_tuple_lengths_are_rejected_explicitly(self):
         attention = self._make_attention()
@@ -664,9 +693,11 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
 
     def test_affine_storage_cannot_feed_identity_compute(self):
         attention = self._make_attention(overrides={"present_key": no_quant()})
-        self._calibrate(attention)
+        attention.enable_calibration()
+        self._forward(attention, 3)
         with self.assertRaisesRegex(ValueError, "identity|Identity|float"):
-            attention.validate_export_cache("decode")
+            attention.freeze_qparams()
+        self.assertIs(attention._mode, Mode.CALIB)
 
     def test_state_dict_round_trip_preserves_storage_and_compute_stats_and_qparams(
         self,
@@ -722,6 +753,42 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "producer storage qparams differ"):
             restored.load_state_dict(state)
 
+    def test_shared_source_binding_state_supports_bfloat16_buffers(self):
+        config = _make_text_config(
+            num_hidden_layers=2,
+            layer_types=["full_attention"] * 2,
+            num_kv_shared_layers=1,
+        )
+        producer = self._make_attention(config=config)
+        consumer = self._make_attention(config=config, layer_idx=1)
+        consumer.bind_cache_source(producer)
+        self._calibrate(producer)
+        consumer.enable_calibration()
+        shared: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._forward(producer, 3, shared=shared)
+        self._forward(consumer, 3, shared=shared)
+        consumer.freeze_qparams()
+        # Exercise source fingerprints and restored per-tensor grids without
+        # creating unsupported BF16 per-channel projection scales on CPU.
+        for observer in (
+            producer.obs_new_k,
+            producer.obs_new_v,
+            consumer.obs_present_key,
+            consumer.obs_present_value,
+        ):
+            observer.to(dtype=torch.bfloat16)
+        state = copy.deepcopy(consumer.state_dict())
+        restored = self._make_attention(config=config, layer_idx=1)
+        restored.bind_cache_source(producer)
+        restored.load_state_dict(state)
+        self.assertIs(restored.cache_storage_observers()[0], producer.obs_new_k)
+        torch.testing.assert_close(
+            restored.obs_present_key.require_frozen().scale,
+            consumer.obs_present_key.require_frozen().scale,
+            atol=0,
+            rtol=0,
+        )
+
     def test_state_rejects_changed_cache_observer_class_or_dtype(self):
         original = self._make_attention()
         self._calibrate(original)
@@ -734,9 +801,7 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
             with self.subTest(policy=policy):
                 restored = self._make_attention(overrides={"present_key": policy})
                 restored.enable_calibration()
-                with self.assertRaisesRegex(
-                    RuntimeError, "cache observer policy differs"
-                ):
+                with self.assertRaisesRegex(RuntimeError, "incompatible frozen policy"):
                     restored.load_state_dict(state)
 
     def test_three_domain_and_missing_schema_state_require_recalibration(self):
@@ -744,13 +809,7 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
         self._calibrate(original)
         state = copy.deepcopy(original.state_dict())
         old_state = copy.deepcopy(state)
-        old_state["_extra_state"]["version"] = 1
-        old_state["_extra_state"]["policies"]["past_key"] = old_state["_extra_state"][
-            "policies"
-        ]["new_k"]
-        old_state["_extra_state"]["qparams"]["past_key"] = old_state["_extra_state"][
-            "qparams"
-        ]["new_k"]
+        old_state["_extra_state"] = {"version": 2, "frozen": True, "qparams": {}}
         old_state["obs_past_key.min_val"] = torch.tensor(-1.0)
         missing_schema = {
             name: value for name, value in state.items() if name != "_extra_state"
@@ -774,7 +833,7 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
         restored = self._make_attention(
             overrides={"present_key": {"observer": EMAObserver, "momentum": 0.4}}
         )
-        with self.assertRaisesRegex(RuntimeError, "cache observer policy differs"):
+        with self.assertRaisesRegex(RuntimeError, "incompatible frozen policy"):
             restored.load_state_dict(copy.deepcopy(original.state_dict()))
 
     def test_legacy_serialized_module_is_rejected(self):
@@ -796,14 +855,17 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
         for name in ("new_k", "new_v", "present_key", "present_value"):
             with self.subTest(name=name):
                 state = copy.deepcopy(original.state_dict())
-                del state["_extra_state"]["qparams"][name]
-                with self.assertRaisesRegex(RuntimeError, "lacks frozen.*qparams"):
-                    self._make_attention().load_state_dict(state)
+                del state[f"obs_{name}._extra_state"]
+                for strict in (True, False):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "frozen|legacy|recalibrat"
+                    ):
+                        self._make_attention().load_state_dict(state, strict=strict)
 
     def test_missing_prefill_statistics_are_never_fabricated(self):
         attention = self._make_attention()
         attention.enable_calibration()
-        with self.assertRaisesRegex(RuntimeError, "no calibration statistics"):
+        with self.assertRaisesRegex(RuntimeError, "missing.*calibration statistics"):
             attention.freeze_qparams()
         self.assertFalse(attention.obs_new_k.has_qparams)
         self.assertFalse(attention.obs_present_key.has_qparams)
@@ -817,11 +879,8 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
         checkpoint.seek(0)
         loaded = torch.load(checkpoint, weights_only=False)
         for restored in (loaded, copy.deepcopy(original)):
-            self.assertGreaterEqual(restored.get_extra_state()["version"], 2)
-            self.assertEqual(
-                set(restored.get_extra_state()["policies"]),
-                {"new_k", "new_v", "present_key", "present_value"},
-            )
+            self.assertEqual(restored.get_extra_state()["gemma_cache"]["version"], 3)
+            self.assertNotIn("qparams", restored.get_extra_state())
             for name in ("new_k", "new_v", "present_key", "present_value"):
                 before, after = original.get_observer(name), restored.get_observer(name)
                 self.assertIsNot(before, after)
@@ -838,24 +897,27 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
             )
             restored.as_export_module("decode")
 
-    def test_invalid_loaded_compute_scales_fail_cached_inference_and_export(self):
+    def test_invalid_imported_compute_scales_reject_before_mutation(self):
         original = self._make_attention()
         self._calibrate(original)
         cache = self._forward(original, 3)[2]
+        expected = self._forward(original, 1, past=cache)[0]
         for scale in (float("nan"), 0.0, -0.25):
             with self.subTest(scale=scale):
                 attention = copy.deepcopy(original)
-                attention.obs_present_key.load_qparams(
-                    torch.tensor(scale), torch.tensor(0)
+                before = attention.obs_present_key.require_frozen()
+                with self.assertRaisesRegex(
+                    RuntimeError, "invalid scale|positive scale"
+                ):
+                    attention.obs_present_key.load_qparams(
+                        torch.tensor(scale), torch.tensor(0)
+                    )
+                after = attention.obs_present_key.require_frozen()
+                torch.testing.assert_close(after.scale, before.scale, atol=0, rtol=0)
+                torch.testing.assert_close(
+                    self._forward(attention, 1, past=cache)[0], expected, atol=0, rtol=0
                 )
-                with self.assertRaisesRegex(
-                    RuntimeError, "invalid frozen cache qparams"
-                ):
-                    self._forward(attention, 1, past=cache)
-                with self.assertRaisesRegex(
-                    RuntimeError, "invalid frozen cache qparams"
-                ):
-                    attention.as_export_module("decode")
+                attention.as_export_module("decode")
 
     def test_freeze_recomputes_compute_grid_after_optional_decode_calibration(self):
         attention = self._make_attention()
@@ -863,7 +925,9 @@ class TestGemma4KVCacheObservers(unittest.TestCase):
         cache = self._forward(attention, 3)[2]
         cache = self._forward(attention, 1, past=cache)[2]
         observers = (attention.obs_present_key, attention.obs_present_value)
-        early_scales = [observer.compute_qparams()[0].clone() for observer in observers]
+        early_scales = [
+            observer.derive_candidate().scale.clone() for observer in observers
+        ]
         # Feed a different real external cache through decode after an interim
         # qparam inspection. Never inject qparams or directly collect statistics.
         wider_cache = tuple(tensor * 32 for tensor in cache)

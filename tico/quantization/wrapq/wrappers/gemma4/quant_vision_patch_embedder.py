@@ -96,9 +96,8 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         self.obs_position_embeddings = self._make_obs("position_embeddings")
         self.obs_output = self._make_obs("output")
 
-    def enable_calibration(self) -> None:
-        """Enable calibration and collect the static embedding-table range."""
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
+        """Capture the static embedding-table range after the common reset."""
         self.obs_emb_table.collect(self.position_embedding_table)
 
     def _project_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:

@@ -45,8 +45,8 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
     def _model():
         layer_types = ["sliding_attention", "full_attention"] * 3
         config = _make_text_config(layer_types=layer_types, num_kv_shared_layers=2)
-        # Keep this fresh-model state_dict test inside the per-tensor contract;
-        # generic per-channel weight observers require shape materialization.
+        # These explicit scalar policies isolate shared cache-source restoration
+        # from differences in projection weight granularity.
         overrides = {"embed_tokens.weight": affine(DType.int(16))}
         for index in range(len(layer_types)):
             for name in ("q_proj", "k_proj", "v_proj", "o_proj"):

@@ -14,6 +14,7 @@
 
 import unittest
 from typing import cast, TYPE_CHECKING
+from unittest.mock import patch
 
 if TYPE_CHECKING:
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
@@ -356,10 +357,8 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         seq_len = 16
         input_ids = self._create_test_inputs(batch_size, seq_len)
 
-        # Calibrate without DeepStack
+        # Calibrate each capability that this test will execute.
         _ = q_model(input_ids=input_ids, use_cache=False)
-
-        q_model.freeze_qparams()
 
         # Test with DeepStack features
         visual_pos_masks = torch.zeros(batch_size, seq_len, dtype=torch.bool)
@@ -371,6 +370,16 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
                 8, self.hidden_size
             )  # 8 visual tokens (batch_size * 4 positions)
         ]
+
+        q_model(
+            input_ids=input_ids,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=[value.clone() for value in visual_embeds],
+            use_cache=False,
+        )
+        q_model.freeze_qparams()
+        self.assertTrue(q_model.has_capability("deepstack_0"))
+        self.assertFalse(q_model.has_capability("deepstack_1"))
 
         with torch.no_grad():
             q_out = q_model(
@@ -409,12 +418,12 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         input_ids = self._create_test_inputs()
         _ = q_model(input_ids=input_ids, use_cache=False)
 
-        q_model.freeze_qparams()
-
-        # Test with inputs_embeds
+        # External embeddings are an independent input domain.
         batch_size = 2
         seq_len = 16
         inputs_embeds = torch.randn(batch_size, seq_len, self.hidden_size)
+        q_model(inputs_embeds=inputs_embeds, use_cache=False)
+        q_model.freeze_qparams()
 
         with torch.no_grad():
             q_out = q_model(inputs_embeds=inputs_embeds, use_cache=False)
@@ -1002,3 +1011,28 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
                 (1, 8, self.hidden_size),
             ],
         )
+
+    def test_text_only_calibration_rejects_unobserved_input_capabilities(self):
+        model = QuantQwen3VLTextModel(self.fp_model)
+        model.enable_calibration()
+        input_ids = self._create_test_inputs(1, 3)
+        model(input_ids=input_ids, use_cache=False)
+        model.freeze_qparams()
+        self.assertTrue(model.has_capability("token_embeddings"))
+        self.assertFalse(model.has_capability("external_embeddings"))
+        self.assertFalse(model.has_capability("deepstack_0"))
+        self.assertEqual(
+            model(input_ids=input_ids, use_cache=False).last_hidden_state.shape,
+            (1, 3, self.hidden_size),
+        )
+        with self.assertRaisesRegex(RuntimeError, "external_embeddings.*unavailable"):
+            model(inputs_embeds=torch.zeros(1, 3, self.hidden_size), use_cache=False)
+        with patch.object(model.layers[0], "forward") as layer_forward:
+            with self.assertRaisesRegex(RuntimeError, "deepstack_0.*unavailable"):
+                model(
+                    input_ids=input_ids,
+                    use_cache=False,
+                    visual_pos_masks=torch.ones(1, 3, dtype=torch.bool),
+                    deepstack_visual_embeds=[torch.zeros(3, self.hidden_size)],
+                )
+            layer_forward.assert_not_called()

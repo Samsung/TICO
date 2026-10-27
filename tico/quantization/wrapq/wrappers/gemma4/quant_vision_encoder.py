@@ -329,9 +329,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
             )
 
         if self._mode is Mode.QUANT:
-            # Make sure that all observers are calibrated.
-            for obs in self._all_observers():
-                assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
+            self.require_capability("required")
 
         # Hugging Face casts vision RoPE to the hidden-state dtype. Match the
         # encoder compute dtype when baking static templates so BF16 models do

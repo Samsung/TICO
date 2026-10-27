@@ -70,6 +70,7 @@ class TestQuantLinear(unittest.TestCase):
 
         # calibration cycle
         self.q_lin.enable_calibration()
+        self.q_lin(self.x)
         self.q_lin.freeze_qparams()
 
         post_scale = self.q_lin.obs_weight._cached_scale

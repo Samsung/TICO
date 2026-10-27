@@ -38,6 +38,7 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.export_adapters import (
 )
 from tico.quantization.wrapq.wrappers.gemma4_assistant.quant_for_causal_lm import (
     QuantGemma4AssistantForCausalLM,
+    QuantGemma4AssistantLMHeadWeight,
 )
 from tico.quantization.wrapq.wrappers.gemma4_assistant.sparse_head import (
     SPARSE_HEAD_ARTIFACT_SCHEMA_VERSION,
@@ -143,16 +144,20 @@ def _quantized_lm_head_payload(
     assistant: QuantGemma4AssistantForCausalLM,
 ) -> dict[str, Any]:
     """Extract the integer tied LM-head weight and its qparams."""
-    quant_linear = cast(QuantLinear, assistant.lm_head.wrapped)
+    quant_linear = cast(
+        QuantLinear | QuantGemma4AssistantLMHeadWeight,
+        getattr(assistant.lm_head, "wrapped", assistant.lm_head),
+    )
     observer = cast(AffineObserverBase, quant_linear.obs_weight)
-    if not getattr(observer, "has_qparams", False):
-        raise RuntimeError(
-            "The assistant lm_head weight observer has no qparams. "
-            "Convert the model before exporting the sparse-head artifact."
-        )
+    snapshot = observer.require_frozen()
     weight = quant_linear.module.weight.detach().cpu()
-    scale = observer._cached_scale.detach().cpu()
-    zero_point = observer._cached_zp.detach().cpu()
+    if snapshot.scale is None or snapshot.zero_point is None:
+        raise RuntimeError(
+            "The sparse-head artifact requires an affine frozen lm_head weight grid; "
+            "enable weight quantization, reprepare and recalibrate."
+        )
+    scale = snapshot.scale.cpu()
+    zero_point = snapshot.zero_point.cpu()
     channel_axis = observer.channel_axis
     qmin, qmax = observer.dtype.qmin, observer.dtype.qmax
 

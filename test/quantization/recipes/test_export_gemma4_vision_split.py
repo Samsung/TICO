@@ -52,8 +52,7 @@ class FakeObserver(MinMaxObserver):
         super().__init__(
             name=name, dtype=DType.int(16), qscheme=QScheme.PER_TENSOR_SYMM
         )
-        self.register_buffer("_cached_scale", torch.tensor(step))
-        self.register_buffer("_cached_zp", torch.tensor(0, dtype=torch.int))
+        self.load_qparams(torch.tensor(step), torch.tensor(0, dtype=torch.int))
 
     def fake_quant(self, tensor: torch.Tensor) -> torch.Tensor:
         """Round a tensor to the configured fake-quantization step."""

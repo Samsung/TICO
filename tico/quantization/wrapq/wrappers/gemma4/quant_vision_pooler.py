@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
@@ -20,13 +21,16 @@ import torch.nn.functional as F
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPooler
+
+    from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+        Gemma4VisionPoolerPrefillExportAdapter,
+    )
 
 ExportMode = str
 
@@ -40,14 +44,13 @@ class QuantGemma4VisionPooler(QuantModuleBase):
     input and the pooled output so that activation quantization ranges are
     calibrated on both sides of the pooler.
 
-    TODO: Replace the delegation to ``self.module`` with a decomposed static
-    implementation once the exact Gemma4 pooler fields are finalized.  The
-    current delegation uses dynamic operations (``F.one_hot``, ``torch.div``)
-    that are not ``torch.export``-friendly.
+    Static export specializes the pooling matrix on an adapter-local view. Its
+    generated constant grid never changes the source model's frozen observers.
     """
 
     root_hidden_size: torch.Tensor
     pool_weights: torch.Tensor
+    num_valid_outputs: int
 
     def __init__(
         self,
@@ -313,7 +316,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         *,
         output_length: int,
         pixel_position_ids: torch.Tensor,
-    ) -> nn.Module:
+    ) -> "Gemma4VisionPoolerPrefillExportAdapter":
         if mode != "prefill":
             raise ValueError(f"Unsupported Gemma4 VisionPooler export mode: {mode!r}")
 
@@ -328,10 +331,8 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             )
 
         if self._mode is Mode.QUANT:
-            # Make sure that all observers are calibrated.
             for obs in self._all_observers():
-                if isinstance(obs, AffineObserverBase):
-                    assert obs.has_qparams
+                obs.require_frozen()
 
         # Precompute a numeric pooling matrix with padding already baked in.
         weights, num_valid_outputs = self._build_export_pool_weights(
@@ -339,16 +340,20 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             output_length=output_length,
             pixel_position_ids=pixel_position_ids,
         )
-        self.register_buffer("pool_weights", weights)
-        self.num_valid_outputs = num_valid_outputs
+        # Share the source's immutable activation snapshots and float module,
+        # while giving this profile independent registered state. Copying only
+        # the module dictionaries avoids duplicating model weights or samples.
+        specialized = copy.copy(self)
+        specialized._modules = self._modules.copy()
+        specialized._buffers = self._buffers.copy()
+        specialized.register_buffer("pool_weights", weights)
+        specialized.num_valid_outputs = num_valid_outputs
+        specialized.obs_pool_weight = self._make_obs("pool_weight")
 
         if self._mode is Mode.QUANT:
-            # Collect statistics about generated pool weights and compute qparams.
-            obs_pool_weight_enabled: bool = self.obs_pool_weight.enabled
-            self.obs_pool_weight.enabled = True
-            self.obs_pool_weight.reset()
-            self.obs_pool_weight.collect(self.pool_weights)
-            self.obs_pool_weight.compute_qparams()
-            self.obs_pool_weight.enabled = obs_pool_weight_enabled
+            specialized.obs_pool_weight.collect(weights)
+            specialized.obs_pool_weight.install_candidate(
+                specialized.obs_pool_weight.derive_candidate()
+            )
 
-        return Gemma4VisionPoolerPrefillExportAdapter(self)
+        return Gemma4VisionPoolerPrefillExportAdapter(specialized)

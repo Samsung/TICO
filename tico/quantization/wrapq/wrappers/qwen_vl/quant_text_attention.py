@@ -29,7 +29,6 @@ from tico.quantization.config.qwen3_vl_attention import (
 )
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
@@ -547,53 +546,9 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         return self._apply_storage_grid((past_k, past_v))
 
     def require_calibrated_cache(self) -> None:
-        """Reject frozen cache boundaries without usable calibration provenance.
-
-        Affine observers persist their observed ranges in checkpoints. Those
-        ranges, rather than a clamped or manually injected scale alone, establish
-        coverage, including legitimate constant tensors. MX is stateless and
-        identity or explicitly bypassed observers need no calibration.
-        """
-        if self._mode is not Mode.QUANT:
-            return
+        """Require the frozen storage capability, retaining Qwen cache policy."""
         self._validate_cache_observers()
-        observers = [
-            self.obs_new_k,
-            self.obs_new_v,
-            self.obs_present_key,
-            self.obs_present_value,
-        ]
-        for obs in observers:
-            if (
-                isinstance(obs, (IdentityObserver, MXObserver))
-                or not obs.fake_quant_enabled
-            ):
-                continue
-            valid = False
-            if isinstance(obs, AffineObserverBase):
-                valid = bool(
-                    obs.min_val.numel()
-                    and obs.max_val.numel()
-                    and torch.isfinite(obs.min_val).all()
-                    and torch.isfinite(obs.max_val).all()
-                    and (obs.min_val <= obs.max_val).all()
-                    and obs.has_qparams
-                    and torch.isfinite(obs._cached_scale).all()
-                    and (obs._cached_scale > 0).all()
-                    and obs._cached_zp.numel() == obs._cached_scale.numel()
-                    and (
-                        (obs._cached_zp >= obs.dtype.qmin)
-                        & (obs._cached_zp <= obs.dtype.qmax)
-                    ).all()
-                )
-            if not valid:
-                path = self.fp_name or f"text.layers.{self.layer_idx}.self_attn"
-                raise RuntimeError(
-                    f"Uncalibrated Qwen cache observer {path}.{obs.name} "
-                    f"({type(obs).__name__}). Recalibrate with the standard Qwen "
-                    "PTQ recipe (decode_calibration_steps=0 is supported); "
-                    "existing qparams are not repaired during execution/export."
-                )
+        self.require_capability("cache")
 
     def _validate_cache_shapes(
         self, past_k: torch.Tensor, past_v: torch.Tensor
@@ -964,7 +919,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         """
         del kwargs
 
-        if not torch.compiler.is_compiling():
+        if use_cache or past_key_values is not None:
             self.require_calibrated_cache()
 
         hidden = self._fq(hidden_states, self.obs_hidden)
@@ -1069,8 +1024,6 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             self.obs_k_sin,
             self.obs_k_rot,
             self.obs_causal_mask,
-            self.obs_logits_raw,
-            self.obs_scale,
             self.obs_logits,
             self.obs_mask_add,
             self.obs_softmax,
@@ -1082,6 +1035,17 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             self.obs_present_key,
             self.obs_present_value,
         )
+        if self.attn_options.scale_fusion == "none":
+            yield from (self.obs_logits_raw, self.obs_scale)
+
+    def local_observer_groups(self):
+        storage = (self.obs_new_k, self.obs_new_v)
+        return {
+            "required": tuple(
+                obs for obs in self._all_observers() if obs not in storage
+            ),
+            "cache": storage,
+        }
 
     def as_export_module(
         self,
@@ -1114,7 +1078,8 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             )
 
         if mode == "prefill":
-            self.require_calibrated_cache()
+            if return_kv:
+                self.require_calibrated_cache()
             return Qwen3VLTextAttentionPrefillExportAdapter(
                 self,
                 return_kv=return_kv,

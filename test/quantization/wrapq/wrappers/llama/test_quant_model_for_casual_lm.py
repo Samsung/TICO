@@ -233,3 +233,15 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         for key, value in new_key_values:
             self.assertEqual(key.shape, (batch_size, 1, 1, 4))
             self.assertEqual(value.shape, (batch_size, 1, 1, 4))
+
+    def test_cache_export_capability_is_requested_before_full_model_adapter(self):
+        model = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
+        model.enable_calibration()
+        inputs = torch.arange(self.seq_len).reshape(1, -1) % self.vocab_size
+        model(inputs, return_dict=True, use_cache=False)
+        model.freeze_qparams()
+        model.as_export_module("prefill", return_kv=False)
+        with self.assertRaisesRegex(RuntimeError, "cache.*unavailable"):
+            model.as_export_module("prefill", return_kv=True)
+        with self.assertRaisesRegex(RuntimeError, "cache.*unavailable"):
+            model.as_export_module("decode", return_kv=False)

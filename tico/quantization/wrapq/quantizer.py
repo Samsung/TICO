@@ -15,14 +15,11 @@
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
-from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
-from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 @register_quantizer(PTQConfig)
@@ -55,20 +52,14 @@ class PTQQuantizer(BaseQuantizer):
         # Wrap the tree (or single module) according to strictness policy
         model = self.wrapper.wrap_supported(model, self.qcfg)
 
-        # Switch all quant modules into calibration mode
-        if isinstance(model, QuantModuleBase):
-            model.enable_calibration()
-        for m in model.modules():
-            if isinstance(m, QuantModuleBase):
-                m.enable_calibration()
+        from tico.quantization.wrapq.lifecycle import enable_calibration
+
+        enable_calibration(model)
         return model
 
     @torch.no_grad()
     def convert(self, model):
-        # Freeze qparams across the tree (QUANT mode)
-        if isinstance(model, QuantModuleBase):
-            model.freeze_qparams()
-        for m in model.modules():
-            if isinstance(m, QuantModuleBase):
-                m.freeze_qparams()
+        from tico.quantization.wrapq.lifecycle import freeze_qparams
+
+        freeze_qparams(model)
         return model

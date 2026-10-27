@@ -23,6 +23,8 @@ from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.utils import set_seed, torch_dtype_from_name
 
+from tico.quantization.wrapq.lifecycle import validate_frozen_model
+
 _EXPORT_SOURCES = ("model", "checkpoint")
 
 
@@ -150,6 +152,7 @@ def main() -> None:
             map_location=device,
             weights_only=False,
         )
+        validate_frozen_model(checkpoint)
         if hasattr(checkpoint, "to"):
             checkpoint = checkpoint.to(device)
         ctx.model = checkpoint.eval()

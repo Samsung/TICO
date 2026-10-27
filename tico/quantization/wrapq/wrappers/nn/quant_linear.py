@@ -44,8 +44,7 @@ class QuantLinear(QuantModuleBase):
         self.obs_act_out = self._make_obs("act_out")
         self.module = fp
 
-    def enable_calibration(self) -> None:
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
         # immediately capture the fixed weight range
         self.obs_weight.collect(self.module.weight)
 

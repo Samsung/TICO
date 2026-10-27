@@ -17,8 +17,16 @@
 import unittest
 from unittest import mock
 
+import numpy as np
+
+import tico
 import torch
 import torch.nn as nn
+
+from tico.circle import CircleDocument
+from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
+from tico.circle.runtime.quantization import fake_quantize_array
+from tico.quantization.recipes.debug.export_regression import _state_contract
 
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
@@ -369,9 +377,10 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
         )
 
         self.assertIsInstance(export_module, Gemma4VisionPoolerPrefillExportAdapter)
-        self.assertTrue(hasattr(q_pooler, "pool_weights"))
+        self.assertFalse(hasattr(q_pooler, "pool_weights"))
+        self.assertTrue(hasattr(export_module.wrapped, "pool_weights"))
         self.assertFalse(hasattr(q_pooler, "pool_mask"))
-        self.assertEqual(q_pooler.num_valid_outputs, self.output_length)
+        self.assertEqual(export_module.num_valid_outputs, self.output_length)
 
     def test_as_export_module_rejects_calibration_mode(self):
         """Export should reject CALIB mode because its qparams are incomplete."""
@@ -408,8 +417,8 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
         )
         self.assertIsInstance(adapter, Gemma4VisionPoolerPrefillExportAdapter)
 
-    def test_as_export_module_precomputes_buffers_on_wrapper(self):
-        """as_export_module should register only numeric static pooling state."""
+    def test_as_export_module_precomputes_profile_local_buffers(self):
+        """Each export owns numeric pooling state without changing its source."""
         fp_pooler = _make_pooler()
         q_pooler = QuantGemma4VisionPooler(fp_pooler).eval()
         q_pooler.enable_calibration()
@@ -420,19 +429,124 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
         q_pooler.freeze_qparams()
 
         pixel_pos_ids = _pixel_position_ids(self.batch_size, self.seq_len)
-        _ = q_pooler.as_export_module(
+        initial = _state_contract(q_pooler)
+        adapter = q_pooler.as_export_module(
             output_length=self.output_length,
             pixel_position_ids=pixel_pos_ids,
         )
 
-        # Buffers should be on the wrapper
-        self.assertTrue(hasattr(q_pooler, "pool_weights"))
+        self.assertEqual(initial, _state_contract(q_pooler))
+        self.assertFalse(hasattr(q_pooler, "pool_weights"))
         self.assertFalse(hasattr(q_pooler, "pool_mask"))
         self.assertEqual(
-            q_pooler.pool_weights.shape, (1, self.output_length, self.seq_len)
+            adapter.wrapped.pool_weights.shape, (1, self.output_length, self.seq_len)
         )
-        self.assertEqual(q_pooler.num_valid_outputs, self.output_length)
-        self.assertEqual(q_pooler.pool_weights.dtype, torch.float32)
+        self.assertEqual(adapter.num_valid_outputs, self.output_length)
+        self.assertEqual(adapter.wrapped.pool_weights.dtype, torch.float32)
+
+    def test_profile_exports_preserve_source_and_previous_adapters(self):
+        """Two static profiles own separate constant grids, including failures."""
+        q_pooler = QuantGemma4VisionPooler(_make_pooler()).eval()
+        q_pooler.enable_calibration()
+        inputs = self._sample_inputs()
+        with torch.no_grad():
+            q_pooler(**inputs)
+        q_pooler.freeze_qparams()
+        initial = _state_contract(q_pooler)
+        first = q_pooler.as_export_module(
+            output_length=4, pixel_position_ids=inputs["pixel_position_ids"]
+        )
+        with torch.no_grad():
+            first_output = first(inputs["hidden_states"])
+        first_grid = first.wrapped.obs_pool_weight.require_frozen()
+        second = q_pooler.as_export_module(
+            output_length=16, pixel_position_ids=inputs["pixel_position_ids"]
+        )
+        second_grid = second.wrapped.obs_pool_weight.require_frozen()
+        assert first_grid.scale is not None and second_grid.scale is not None
+        self.assertFalse(torch.equal(first_grid.scale, second_grid.scale))
+        self.assertEqual(second.num_valid_outputs, 16)
+        with torch.no_grad():
+            self.assertTrue(torch.equal(first_output, first(inputs["hidden_states"])))
+        self.assertEqual(initial, _state_contract(q_pooler))
+        with self.assertRaisesRegex(ValueError, "Cannot pool"):
+            q_pooler.as_export_module(
+                output_length=3, pixel_position_ids=inputs["pixel_position_ids"]
+            )
+        self.assertEqual(initial, _state_contract(q_pooler))
+
+    def test_profile_circle_constants_and_reference_parity(self):
+        """Inspect real default-O1 bytes for two independently frozen profiles."""
+        q_pooler = QuantGemma4VisionPooler(_make_pooler()).eval()
+        hidden = torch.linspace(-1, 1, 16 * self.hidden_size).reshape(
+            1, 16, self.hidden_size
+        )
+        positions = _pixel_position_ids(1, 16)
+        q_pooler.enable_calibration()
+        with torch.no_grad():
+            q_pooler(hidden, positions, torch.zeros(1, 16, dtype=torch.bool), 4)
+        q_pooler.freeze_qparams()
+        initial = _state_contract(q_pooler)
+        for length in (4, 16):
+            with self.subTest(output_length=length):
+                adapter = q_pooler.as_export_module(
+                    output_length=length, pixel_position_ids=positions
+                ).eval()
+                with torch.no_grad():
+                    converted = tico.convert(adapter, (hidden,))
+                document = CircleDocument.from_bytes(converted.circle_binary)
+                self.assertFalse(document.verify().issues)
+                runtime = CircleReferenceRuntime(document)
+                program = runtime.program
+                self.assertEqual(
+                    [operator.name for operator in program.operators],
+                    ["BATCH_MATMUL", "MUL"],
+                )
+                for index, observer, shape in (
+                    (program.inputs[0], q_pooler.obs_act_in, (1, 16, self.hidden_size)),
+                    (
+                        program.outputs[0],
+                        q_pooler.obs_pool_out,
+                        (1, length, self.hidden_size),
+                    ),
+                ):
+                    tensor = program.tensor(index)
+                    snapshot = observer.require_frozen()
+                    assert (
+                        snapshot.scale is not None and snapshot.zero_point is not None
+                    )
+                    assert tensor.quantization is not None
+                    self.assertEqual(tensor.dtype, np.dtype(np.uint8))
+                    self.assertEqual(tensor.shape, shape)
+                    self.assertEqual(
+                        tensor.quantization.scale, (float(snapshot.scale),)
+                    )
+                    self.assertEqual(
+                        tensor.quantization.zero_point, (int(snapshot.zero_point),)
+                    )
+                matrix = next(
+                    tensor
+                    for tensor in program.tensors
+                    if tensor.is_constant and tensor.shape == (1, length, 16)
+                )
+                snapshot = adapter.wrapped.obs_pool_weight.require_frozen()
+                assert snapshot.scale is not None and snapshot.zero_point is not None
+                assert matrix.quantization is not None
+                self.assertEqual(matrix.dtype, np.dtype(np.uint8))
+                self.assertEqual(matrix.quantization.scale, (float(snapshot.scale),))
+                self.assertEqual(
+                    matrix.quantization.zero_point, (int(snapshot.zero_point),)
+                )
+                encoded = fake_quantize_array(
+                    hidden.numpy(), program.tensor(program.inputs[0])
+                )
+                actual = runtime.run(
+                    [encoded], mode=ExecutionMode.FAKE_QUANTIZE
+                ).outputs[0]
+                with torch.no_grad():
+                    expected = adapter(torch.from_numpy(encoded.copy())).numpy()
+                np.testing.assert_array_equal(actual, expected)
+                self.assertEqual(initial, _state_contract(q_pooler))
 
     def test_export_adapter_decomposed_forward_matches_fp(self):
         """The decomposed export adapter should match the original pooler output."""

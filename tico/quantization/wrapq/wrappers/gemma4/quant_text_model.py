@@ -240,9 +240,8 @@ class QuantGemma4TextModel(QuantModuleBase):
             elif attention.store_full_length_kv:
                 sources[layer_type] = attention
 
-    def enable_calibration(self) -> None:
-        """Reset observers and collect the constant PLE multiplication scales."""
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
+        """Capture constant PLE scales after the common observer reset."""
         if self.hidden_size_per_layer_input:
             assert self.obs_per_layer_model_projection_scale is not None
             assert self.obs_per_layer_input_scale is not None
@@ -831,6 +830,8 @@ class QuantGemma4TextModel(QuantModuleBase):
             raise RuntimeError("Per-layer embeddings are disabled for this config.")
         if self.embed_tokens_per_layer is None:
             raise RuntimeError("Gemma4 PLE embedding is not initialized.")
+        if self._mode is Mode.QUANT:
+            self.require_capability("token_ple")
         if input_ids is None:
             if inputs_embeds is None:
                 raise ValueError("inputs_embeds is required when input_ids is None.")
@@ -965,8 +966,12 @@ class QuantGemma4TextModel(QuantModuleBase):
             past_key_values = DynamicCache(config=self.config)
 
         if inputs_embeds is None:
+            if self._mode is Mode.QUANT:
+                self.require_capability("token_embeddings")
             inputs_embeds = cast(torch.Tensor, self.embed_tokens(input_ids))
         else:
+            if self._mode is Mode.QUANT:
+                self.require_capability("external_embeddings")
             inputs_embeds = self._fq(inputs_embeds, self.obs_inputs_embeds)
 
         if self.hidden_size_per_layer_input:
@@ -1103,3 +1108,21 @@ class QuantGemma4TextModel(QuantModuleBase):
                 if observer is not None
             )
         return tuple(observers)
+
+    def local_observer_groups(self):
+        return {
+            "required": tuple(
+                obs
+                for obs in self._all_observers()
+                if obs is not self.obs_inputs_embeds
+            ),
+            "external_embeddings": (self.obs_inputs_embeds,),
+        }
+
+    def _conditional_quant_subtrees(self):
+        groups: dict[str, tuple[nn.Module, ...]] = {
+            "token_embeddings": (self.embed_tokens,)
+        }
+        if self.embed_tokens_per_layer is not None:
+            groups["token_ple"] = (self.embed_tokens_per_layer,)
+        return groups

@@ -114,20 +114,24 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
             fp_name=join_name(fp_name, "merger"),
         )
 
-        # Wrap deepstack merger list
-        self.deepstack_merger_list = nn.ModuleList()
+        # Configs with reduced depth can retain HF's deeper DeepStack indices.
+        # Only reachable mergers own quantization sites; preserve their original
+        # index keys for configuration and GPTQ-to-PTQ parameter mappings.
+        self.deepstack_merger_list = nn.ModuleDict()
         deepstack_merger_cfg = qcfg.child("deepstack_merger_list") if qcfg else None
         for i, merger in enumerate(fp_model.deepstack_merger_list):
-            self.deepstack_merger_list.append(
-                PTQWrapper(
-                    merger,
-                    qcfg=(
-                        deepstack_merger_cfg.child(str(i))
-                        if deepstack_merger_cfg
-                        else None
-                    ),
-                    fp_name=join_name(fp_name, f"deepstack_merger_list.{i}"),
-                )
+            layer_index = self.deepstack_visual_indexes[i]
+            if (
+                not 0 <= layer_index < len(self.blocks)
+                or self.deepstack_visual_indexes.index(layer_index) != i
+            ):
+                continue
+            self.deepstack_merger_list[str(i)] = PTQWrapper(
+                merger,
+                qcfg=(
+                    deepstack_merger_cfg.child(str(i)) if deepstack_merger_cfg else None
+                ),
+                fp_name=join_name(fp_name, f"deepstack_merger_list.{i}"),
             )
 
         # --- Observers for intermediate tensors --------------------------------
@@ -374,7 +378,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = self.deepstack_merger_list[
-                    self.deepstack_visual_indexes.index(layer_num)
+                    str(self.deepstack_visual_indexes.index(layer_num))
                 ](hidden_states)
                 deepstack_feature_lists.append(deepstack_feature)
 
@@ -506,11 +510,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
                 "Qwen3-VL vision export requires NO_QUANT or QUANT mode, "
                 f"got {self._mode}."
             )
-        if self._mode is Mode.QUANT:
-            for observer in self._all_observers():
-                assert (
-                    observer.has_qparams
-                ), f"Observer {observer.name} has not been calibrated"
+        self.require_capability("required")
 
         from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
             Qwen3VLVisionPrefillExportAdapter,

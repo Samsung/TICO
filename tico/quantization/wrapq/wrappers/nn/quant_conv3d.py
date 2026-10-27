@@ -90,16 +90,8 @@ class QuantConv3d(QuantModuleBase):
         # Store the original module
         self.module = fp
 
-    def enable_calibration(self) -> None:
-        """
-        Enable calibration mode.
-
-        Immediately capture the fixed weight range since weights don't change
-        during calibration.
-        """
-        super().enable_calibration()
-
-        # Collect weight statistics immediately (weights are static)
+    def _prepare_calibration(self) -> None:
+        """Collect the fixed weight after common observer reset."""
         self.obs_weight.collect(self.module.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

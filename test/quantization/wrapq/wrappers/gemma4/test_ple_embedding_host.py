@@ -175,6 +175,17 @@ class TestGemma4PLEEmbeddingHostArtifact(unittest.TestCase):
         )
         self._assert_parity(adapter, host)
 
+    def test_quantized_artifact_rejects_non_affine_boundary(self):
+        from tico.quantization.config.specs import no_quant
+        from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+            build_gemma4_ple_embedding_artifact,
+        )
+
+        qcfg = PTQConfig(overrides={"embed_tokens_per_layer.embedding": no_quant()})
+        _qtext, adapter = _make_adapter(self.cfg, quantized=True, qcfg=qcfg)
+        with self.assertRaisesRegex(TypeError, "requires an affine observer"):
+            build_gemma4_ple_embedding_artifact(adapter)
+
     def test_quant_artifact_stores_integer_table_and_observers(self):
         """Quantized artifact keeps int weights plus every replayed observer."""
         qtext, adapter = _make_adapter(self.cfg, quantized=True)
@@ -222,7 +233,7 @@ class TestGemma4PLEEmbeddingHostArtifact(unittest.TestCase):
         qtext, _adapter = _make_adapter(self.cfg, quantized=False)
         # Pretend the model is quantized without ever computing qparams.
         adapter = Gemma4PLEEmbeddingExportAdapter(qtext, mode=Mode.QUANT)
-        with self.assertRaisesRegex(RuntimeError, "no frozen qparams"):
+        with self.assertRaisesRegex(RuntimeError, "not frozen"):
             build_gemma4_ple_embedding_artifact(adapter)
 
     def test_loader_rejects_foreign_or_versioned_payloads(self):

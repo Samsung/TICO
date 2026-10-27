@@ -41,17 +41,47 @@ change saved statistics; resetting the observer does not modify the observed ten
 
 3. **Convert**
 
-Replace wrapped modules with their quantized counterparts using fixed quantization parameters.
+The common lifecycle coordinator enumerates active sites once through arbitrary
+module containers and aliases. Observers derive validated candidates without
+mutation; model hooks check semantic constraints against the complete plan. Only
+then does one transaction install the snapshots and switch wrappers to QUANT.
+Failure preserves calibration state and the public retry handle.
 
-This approach minimizes model perturbation and avoids retraining.
+Required affine sites need finite collected statistics or compatible imported
+qparams. Finite zero ranges remain valid. Imported locks take precedence for every
+affine subtype, including Percentile. Identity and MX declare stateless policies.
+Optional cache/multimodal capabilities remain unavailable as a whole when their
+sites were not calibrated; requesting one fails before use. Required activations
+are never skipped merely because they were not observed.
+
+Observer state schema version 1 saves exact grids, policy, provenance, lock,
+bypass state and observed channel extent. Wrapper schema version 1 saves mode and
+capability readiness. Frozen state dicts and whole-module checkpoints preserve
+exact grids; incompatible/corrupt state rejects even with `strict=False`.
+Range-only legacy state dicts load as not frozen and require recalibration.
+Old whole-module objects lacking the schema require reprepare/recalibrate; Gemma's
+old cache-only schema cannot establish whole-model readiness. Percentile frozen
+execution needs no reservoir, but mid-calibration reservoir resumption is not
+promised.
+
+New wrappers implement `_all_observers`/`local_observer_groups`, optional subtree
+capabilities, `_prepare_calibration` for local parameters, and pure
+`_validate_freeze` semantic checks. They must not override recursive lifecycle
+entrypoints or implement generic grid serialization. Legacy mutating overrides
+reject with migration guidance. Exporters read `require_frozen()` snapshots;
+profile-generated constants use separate local observers. They never recalibrate
+source-model sites.
+
+The [frozen-state report](../../../docs/archive/wrapq-frozen-state-design-investigation-20261027.md)
+records the ownership rationale, migration decisions and validation evidence.
 
 Affine observers accept external grids through `load_qparams(scale, zp, lock=True)`.
 Locked grids survive calibration and conversion without requiring local samples,
 including for `PercentileObserver`. The affine base owns this dispatch; range-based
-observers customize `_qparam_bounds()` to select their calibration interval only
-when unlocked. Percentile clipping preserves the exact observed min/max separately
-from its clipping bounds. Loading with `lock=False` still requires calibration and
-recomputes qparams from those statistics.
+observers customize the pure `_statistics_bounds()` hook to select their calibration
+interval only when unlocked. Candidate installation records clipping diagnostics
+without changing the observed min/max. Loading with `lock=False` still requires
+calibration and recomputes qparams from those statistics.
 
 ---
 

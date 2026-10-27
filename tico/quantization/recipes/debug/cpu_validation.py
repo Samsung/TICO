@@ -120,8 +120,9 @@ def _ptq_with_cache_evidence(ctx, path: Path) -> None:
         if name not in statistics:
             continue
         fields = {}
-        for key in ("_cached_scale", "_cached_zp"):
-            tensor = getattr(observer, key, None)
+        snapshot = observer.frozen_state
+        for key in ("scale", "zero_point"):
+            tensor = None if snapshot is None else getattr(snapshot, key)
             if isinstance(tensor, torch.Tensor):
                 fields[key] = {
                     "values": tensor.detach().cpu().tolist(),
@@ -270,6 +271,9 @@ def _replay_connected(options: argparse.Namespace) -> int:
     if _file_sha256(checkpoint) != source["checkpoint_sha256"]:
         raise ValueError("Connected replay checkpoint differs from the original run.")
     model = torch.load(checkpoint, map_location="cpu", weights_only=False).eval()
+    from tico.quantization.wrapq.lifecycle import validate_frozen_model
+
+    validate_frozen_model(model)
     initial = _state_contract(model)
     top, _, vision, text = _unwrap_qwen3_vl_components(model)
     stages: dict[str, torch.nn.Module] = {

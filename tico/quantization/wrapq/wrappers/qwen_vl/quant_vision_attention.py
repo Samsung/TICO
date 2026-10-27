@@ -86,8 +86,6 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
 
         mk = self._make_obs
         self.obs_hidden = mk("hidden")
-        self.obs_scaling = mk("scaling")
-        self.obs_mul_logits_scale = mk("mul_logits_scale")
         self.obs_cos = mk("cos")
         self.obs_sin = mk("sin")
 
@@ -228,8 +226,6 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
     def _all_observers(self) -> Iterable:
         yield from (
             self.obs_hidden,
-            self.obs_scaling,
-            self.obs_mul_logits_scale,
             self.obs_cos,
             self.obs_sin,
             self.obs_q_x1,

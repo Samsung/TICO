@@ -89,10 +89,13 @@ def convert(model, inplace: Optional[bool] = True):
             "GPTQ quantization only supports `in-place=True`. Please set 'inplace=True' to proceed."
         )
 
-    delattr(model, QUANTIZER_ATTRIBUTE_NAME)
-    model = model if inplace else copy.deepcopy(model)
+    # The result copy must not duplicate quantizer-owned calibration caches.
+    # Sharing this metadata during the copy also preserves the original handle.
+    model = model if inplace else copy.deepcopy(model, memo={id(quantizer): quantizer})
 
     assert isinstance(quantizer, BaseQuantizer)
     model = quantizer.convert(model)
+    if hasattr(model, QUANTIZER_ATTRIBUTE_NAME):
+        delattr(model, QUANTIZER_ATTRIBUTE_NAME)
 
     return model

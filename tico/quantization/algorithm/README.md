@@ -67,7 +67,7 @@ for d in dataset:
     prepared_model(d)
 
 # 3. Convert
-quantized_model = convert(prepared_model, quant_config)
+quantized_model = convert(prepared_model)
 ```
 
 Some algorithms need extra dependencies; install them from the algorithm's requirements
