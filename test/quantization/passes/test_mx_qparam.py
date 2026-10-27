@@ -256,10 +256,12 @@ class MXPropagationPassTest(unittest.TestCase):
         PropagateQParamBackward().call(ep)
         self.assertEqual(source.meta[QPARAM_KEY], _mx(0))
 
-    def test_backward_does_not_quantize_shared_float_producer(self):
+    def test_backward_does_not_infer_unproven_domain_for_shared_producer(self):
         ep, source, target = self._export()
         output = next(node for node in ep.graph.nodes if node.op == "output")
         output.args = ((target, source),)
+        # One layout consumer does not prove the MX grouping of every branch.
+        # Folding an explicit marker on the producer is a separate operation.
         target.meta[QPARAM_KEY] = _mx(1)
         PropagateQParamBackward().call(ep)
         self.assertNotIn(QPARAM_KEY, source.meta)

@@ -117,6 +117,7 @@ On top of these, two layers make the toolkit usable end-to-end from the command 
 
 | Document | Description |
 |---|---|
+| [Quantized Circle design](../../docs/design.md#102-conversion-time-quantized-graph-legalization) | Fake-quant markers, qparam folding, requantization, and the NPU tensor contract |
 | [analysis/README.md](./analysis/README.md) | Numerical PTQ ablation, clipping, and sensitivity APIs |
 | [algorithm/README.md](./algorithm/README.md) | Algorithm module design and usage guidelines |
 | [algorithm/gptq/README.md](./algorithm/gptq/README.md) | GPTQ |

@@ -407,8 +407,8 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
         for signed_storage in (False, True):
             self._exercise_attention(signed_storage=signed_storage, equal=True)
 
-    def test_raw_current_branch_avoids_storage_double_rounding(self):
-        """1/8 rounds directly to 7/32, but via S=3/32 it rounds to zero."""
+    def test_current_input_owns_storage_domain_and_requantizes_for_compute(self):
+        """The first marker annotates the input ABI; S-to-C stays explicit."""
         for signed_storage in (False, True):
             with self.subTest(signed_storage=signed_storage):
                 attention = self._attention(signed_storage=signed_storage)
@@ -422,6 +422,9 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                 current = torch.full((1, 1, 1, 4), 0.125)
                 direct = torch.full_like(current, 0.21875)
                 stored = torch.full_like(current, 0.09375)
+                # Eager wrapper semantics retain independent raw-to-C and raw-to-S
+                # branches. This boundary-only export has no upstream current
+                # domain, so its first marker instead defines the serialized S ABI.
                 double_rounded = attention.obs_present_key.fake_quant(stored)
                 self.assertFalse(torch.equal(direct, double_rounded))
                 for step in range(2):
@@ -444,12 +447,34 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                         key_length=past_key.shape[-2] + 1,
                         compute_observer=attention.obs_present_key,
                     )
-                    self._assert_independent_current_branch(runtime, concats)
+                    program = runtime.program
+                    for input_index, delta_index, concat, observer in zip(
+                        program.inputs[:2],
+                        program.outputs[-2:],
+                        concats,
+                        attention.cache_storage_observers(),
+                    ):
+                        self.assertEqual(delta_index, input_index)
+                        self._assert_storage(program.tensor(input_index), observer)
+                        users = [
+                            op for op in program.operators if input_index in op.inputs
+                        ]
+                        self.assertEqual(len(users), 1)
+                        self.assertEqual(users[0].name, "QUANTIZE")
+                        self.assertEqual(users[0].outputs, (concat.inputs[1],))
+                    # This minimal graph contains only cache data tensors. There
+                    # are no index, shape, or control tensors requiring exclusion.
+                    for tensor in program.tensors:
+                        self.assertIsNotNone(tensor.quantization)
+                        self.assertNotEqual(tensor.dtype, np.dtype(np.float32))
+                    self._assert_no_identity_quantizes(runtime)
+                    # Compare eager and Circle with the encoded S input values,
+                    # as required by the serialized ABI, rather than raw current.
                     self._assert_parity(
                         module,
                         args,
                         runtime,
-                        label=f"raw current INT16={signed_storage} decode{step + 1}",
+                        label=f"folded current S INT16={signed_storage} decode{step + 1}",
                     )
                     for actual, original in zip(args, originals):
                         torch.testing.assert_close(actual, original, rtol=0, atol=0)

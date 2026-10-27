@@ -468,23 +468,58 @@ class TestQwenKVCacheCircle(unittest.TestCase):
         self.assertTrue(torch.equal(present_k, expected))
         self.assertTrue(torch.equal(present_v, expected))
 
-        # Serialize the same real branch helper: raw inputs are shared by
-        # incompatible S/C quantizers, so neither may redefine the raw ABI.
+    def test_current_input_owns_storage_domain_and_requantizes_for_compute(
+        self,
+    ) -> None:
+        self._make_attention(DType.uint(8))
+        current = torch.full((1, 1, 1, 4), 0.125)
+        stored = self.attention.obs_new_k.fake_quant(current)
+        # This boundary-only fixture has no upstream producer domain. Its first
+        # marker defines an S input ABI; the C branch then requires requantization.
+        # Use independent tensors so export preserves all four input identities.
         module = _CacheBranches(self.attention).eval()
-        args = (current, current, stored, stored)
+        args = (current, current.clone(), stored, stored.clone())
         for optimize in (False, True):
-            runtime = self._convert(module, args, optimize=optimize)
-            for index in runtime.program.inputs[:2]:
-                tensor = runtime.program.tensor(index)
-                self.assertEqual(tensor.dtype, np.dtype(np.float32))
-                self.assertIsNone(self._tensor_qparam(tensor))
-            result = runtime.run(
-                [value.numpy() for value in args], mode=ExecutionMode.FAKE_QUANTIZE
-            )
-            for actual, wanted in zip(
-                result.outputs, (expected, expected, stored, stored)
-            ):
-                np.testing.assert_array_equal(actual, wanted.numpy())
+            with self.subTest(circle_optimize=optimize):
+                runtime = self._convert(module, args, optimize=optimize)
+                program = runtime.program
+                self.assertEqual(program.outputs[-2:], program.inputs[:2])
+                for index in program.inputs:
+                    tensor = program.tensor(index)
+                    self.assertEqual(tensor.dtype, self.numpy_dtype)
+                    self.assertEqual(self._tensor_qparam(tensor), self.storage_qparam)
+                    users = [op for op in program.operators if index in op.inputs]
+                    self.assertEqual(len(users), 1)
+                    self.assertEqual(users[0].name, "QUANTIZE")
+                    self.assertEqual(
+                        self._tensor_qparam(program.tensor(users[0].outputs[0])),
+                        self.compute_qparam,
+                    )
+                self._assert_value_preserving_qparams(program)
+                # This graph contains only cache data tensors, with no semantic
+                # index, shape, or control tensors requiring exclusion.
+                for tensor in program.tensors:
+                    self.assertIsNotNone(tensor.quantization)
+                    self.assertNotEqual(tensor.dtype, np.dtype(np.float32))
+
+                # Eager raw-branch behavior is tested separately above. Compare
+                # serialized execution using the S-encoded ABI inputs on both sides.
+                encoded = [
+                    fake_quantize_array(value.numpy(), program.tensor(index))
+                    for value, index in zip(args, program.inputs)
+                ]
+                with torch.no_grad():
+                    eager = module(
+                        *(torch.from_numpy(value.copy()) for value in encoded)
+                    )
+                result = runtime.run(encoded, mode=ExecutionMode.FAKE_QUANTIZE)
+                self.assertEqual(len(result.outputs), len(eager))
+                for actual, wanted in zip(result.outputs, eager):
+                    np.testing.assert_array_equal(actual, wanted.numpy())
+                self.assertFalse(np.any(result.outputs[0]))
+                self.assertFalse(np.any(result.outputs[1]))
+                for output in result.outputs[-2:]:
+                    np.testing.assert_array_equal(output, stored.numpy())
 
     def test_prefill_and_decode_cache_abi_and_branch_quantizes(self) -> None:
         """UINT8: separate raw→C/raw→S/S→C with noninteger C/S scale ratio."""

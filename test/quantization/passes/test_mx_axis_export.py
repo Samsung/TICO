@@ -87,8 +87,9 @@ class _MixedMXAffine(torch.nn.Module):
         return torch.fake_quantize_per_tensor_affine(value, 0.5, 0, -32768, 32767)
 
 
-class _MXSharedFloatInput(torch.nn.Module):
+class _MXSharedDomains(torch.nn.Module):
     def forward(self, value):
+        value = quantize_mx(value, "int8", -1)
         return value, quantize_mx(value.transpose(-2, -1), "int8", -1)
 
 
@@ -254,15 +255,18 @@ class MXAxisExportTest(unittest.TestCase):
                 self._assert_tensor(from_mx[0], (1, 2, 64, 3), 2)
                 self.assertEqual(from_mx[1].type, circle.TensorType.TensorType.INT16)
 
-    def test_shared_float_input_keeps_explicit_quantize_after_transpose(self):
+    def test_shared_quantized_input_requantizes_after_transpose(self):
         for optimize in (False, True):
             with self.subTest(optimize=optimize):
-                model = _export(_MXSharedFloatInput(), torch.ones(1, 3, 64), optimize)
+                model = _export(_MXSharedDomains(), torch.ones(1, 3, 64), optimize)
                 graph = model.subgraphs[0]
-                raw = graph.tensors[graph.outputs[0]]
-                self.assertEqual(raw.type, circle.TensorType.TensorType.FLOAT32)
-                self.assertIsNone(raw.quantization)
                 self.assertEqual(graph.inputs[0], graph.outputs[0])
+                self._assert_tensor(
+                    graph.tensors[graph.outputs[0]],
+                    (1, 3, 64),
+                    2,
+                    circle.TensorType.TensorType.MXINT8,
+                )
                 transposes = [
                     op
                     for op in graph.operators
@@ -270,11 +274,21 @@ class MXAxisExportTest(unittest.TestCase):
                     == circle.BuiltinOperator.BuiltinOperator.TRANSPOSE
                 ]
                 self.assertEqual(len(transposes), 1)
-                for index in (transposes[0].inputs[0], transposes[0].outputs[0]):
-                    tensor = graph.tensors[index]
-                    self.assertEqual(tensor.type, circle.TensorType.TensorType.FLOAT32)
-                    self.assertIsNone(tensor.quantization)
-                self.assertEqual(len(_quantize_operators(model)), 1)
+                self._assert_tensor(
+                    graph.tensors[transposes[0].inputs[0]],
+                    (1, 3, 64),
+                    2,
+                    circle.TensorType.TensorType.MXINT8,
+                )
+                self._assert_tensor(
+                    graph.tensors[transposes[0].outputs[0]],
+                    (1, 64, 3),
+                    1,
+                    circle.TensorType.TensorType.MXINT8,
+                )
+                quantizes = _quantize_operators(model)
+                self.assertEqual(len(quantizes), 1)
+                self.assertEqual(quantizes[0].inputs[0], transposes[0].outputs[0])
                 self._assert_tensor(
                     graph.tensors[graph.outputs[1]],
                     (1, 64, 3),

@@ -74,6 +74,18 @@ class MXRequantize(torch.nn.Module):
         return torch.ops.circle_custom.mx_fake_quantize(inp, self.output_format, 1)
 
 
+class MXEmbedding(torch.nn.Module):
+    weight: torch.Tensor
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("weight", torch.ones(4, 32))
+
+    def forward(self, indices):
+        value = torch.nn.functional.embedding(indices, self.weight)
+        return torch.ops.circle_custom.mx_fake_quantize(value, "int8", -1)
+
+
 class FoldQuantOpsTest(unittest.TestCase):
     def test_pass(self):
         m = torch.nn.SiLU().eval()
@@ -233,3 +245,77 @@ class FoldQuantOpsTest(unittest.TestCase):
         self.assertEqual(quantizes[0].args[0].meta[QPARAM_KEY].dtype, "mxint8")
         self.assertEqual(quantizes[0].meta[QPARAM_KEY].dtype, "mxfp4")
         self.assertEqual(quantizes[0].meta[QPARAM_KEY].quantized_dimension, 1)
+
+    def test_mx_embedding_output_owns_first_activation_domain(self):
+        ep = torch.export.export(MXEmbedding().eval(), (torch.tensor([0, 2]),))
+        DecomposeFakeQuantize().call(ep)
+        FoldQuantOps().call(ep)
+
+        embedding = next(
+            node
+            for node in ep.graph.nodes
+            if node.target == torch.ops.aten.embedding.default
+        )
+        self.assertEqual(embedding.meta[QPARAM_KEY].dtype, "mxint8")
+        self.assertEqual(embedding.meta[QPARAM_KEY].quantized_dimension, 1)
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.quantize_mx.default]), 0
+        )
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.dequantize_mx.default]), 0
+        )
+
+    def test_mx_shared_producer_owns_first_domain_and_requantizes_other_branch(self):
+        for output_format, output_axis in (("int8", 0), ("fp4", 1)):
+            with self.subTest(output_format=output_format, output_axis=output_axis):
+                ep = torch.export.export(torch.nn.ReLU(), (torch.ones(2, 32),))
+                producer = next(
+                    node
+                    for node in ep.graph.nodes
+                    if node.target == torch.ops.aten.relu.default
+                )
+                output = next(node for node in ep.graph.nodes if node.op == "output")
+                # Construct the two marker domains directly to isolate folding
+                # from the MX fake operator's exported alias metadata.
+                dequantizes = []
+                with ep.graph.inserting_before(output):
+                    for elem_format, axis in (
+                        ("int8", -1),
+                        (output_format, output_axis),
+                    ):
+                        q = ep.graph.call_function(
+                            torch.ops.circle_custom.quantize_mx.default,
+                            (producer, elem_format, axis),
+                        )
+                        dq = ep.graph.call_function(
+                            torch.ops.circle_custom.dequantize_mx.default,
+                            (q, elem_format, axis),
+                        )
+                        dequantizes.append(dq)
+                output.args = ((producer, *dequantizes),)
+                FoldQuantOps().call(ep)
+
+                self.assertEqual(producer.meta[QPARAM_KEY].dtype, "mxint8")
+                self.assertEqual(producer.meta[QPARAM_KEY].quantized_dimension, 1)
+                quantizes = [
+                    node
+                    for node in ep.graph.nodes
+                    if node.target == torch.ops.circle_custom.quantize_mx.default
+                ]
+                self.assertEqual(len(quantizes), 1)
+                quantize = quantizes[0]
+                self.assertIs(quantize.args[0], producer)
+                self.assertEqual(
+                    quantize.meta[QPARAM_KEY].dtype,
+                    "mxint8" if output_format == "int8" else "mxfp4",
+                )
+                self.assertEqual(
+                    quantize.meta[QPARAM_KEY].quantized_dimension, output_axis
+                )
+                self.assertEqual(
+                    num_of_ops(ep, [torch.ops.circle_custom.dequantize_mx.default]), 0
+                )
+                output = next(node for node in ep.graph.nodes if node.op == "output")
+                self.assertEqual(output.args[0], (producer, producer, quantize))
+                FoldQuantOps().call(ep)
+                self.assertEqual(output.args[0], (producer, producer, quantize))

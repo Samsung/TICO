@@ -26,7 +26,6 @@ from torch.export import ExportedProgram
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
-from tico.utils.errors import NotYetSupportedError
 from tico.utils.mx.dtypes import (
     assert_supported_mx_export_options,
     is_mx_dtype,
@@ -36,7 +35,7 @@ from tico.utils.mx.dtypes import (
 )
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import get_quant_dtype, quant_min_max
+from tico.utils.utils import get_quant_dtype
 from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     QuantizePerTensorArgs,
@@ -50,59 +49,6 @@ _QPARAM_PRESERVING_VIEW_TARGETS = frozenset(
         torch.ops.aten.expand.default,
     }
 )
-
-# Weight-DQ removal must also preserve the inputs of a producer whose original
-# floating-point result is still observed outside its explicit Quantize branch.
-_PRESERVE_FLOAT_INPUTS_KEY = "_tico_preserve_float_quantization_inputs"
-
-
-def _restore_float_inputs(graph: torch.fx.Graph) -> None:
-    """Bridge folded affine inputs back to protected producers' float domains."""
-    for node in list(graph.nodes):
-        if not node.meta.get(_PRESERVE_FLOAT_INPUTS_KEY):
-            continue
-        for source in list(node.all_input_nodes):
-            qparam = source.meta.get(QPARAM_KEY)
-            if qparam is None:
-                continue
-            if (
-                qparam.quantized_dimension is not None
-                or qparam.scale is None
-                or len(qparam.scale) != 1
-                or qparam.zero_point is None
-                or len(qparam.zero_point) != 1
-                or is_mx_dtype(qparam.dtype)
-            ):
-                raise NotYetSupportedError(
-                    "A shared floating-point producer requires per-tensor affine "
-                    f"Dequantize inputs; {source.name} has unsupported qparams."
-                )
-            quant_min, quant_max = quant_min_max(qparam.dtype)
-            storage_dtype = (
-                torch.uint8
-                if qparam.dtype == "uint4"
-                else (
-                    torch.int8
-                    if qparam.dtype == "int4"
-                    else getattr(torch, qparam.dtype)
-                )
-            )
-            with graph.inserting_before(node):
-                dequantize = graph.call_function(
-                    torch.ops.quantized_decomposed.dequantize_per_tensor.default,
-                    args=(
-                        source,
-                        qparam.scale[0],
-                        qparam.zero_point[0],
-                        quant_min,
-                        quant_max,
-                        storage_dtype,
-                    ),
-                )
-            dequantize.meta = copy.copy(source.meta)
-            dequantize.meta.pop(QPARAM_KEY)
-            dequantize.meta["val"] = source.meta["val"].to(dtype=torch.float32)
-            node.replace_input_with(source, dequantize)
 
 
 def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
@@ -253,20 +199,14 @@ def _fold_mx_qdq(dq: torch.fx.Node) -> None:
     qparam = _mx_qparam_from_quant_node(q)
     existing = op.meta.get(QPARAM_KEY)
     if existing is None:
-        # An explicit quantizer on a shared float value must not change its
-        # other users. Layout ops also cannot quantize their own inputs.
+        # Without a proven source domain, an MX layout output cannot adopt
+        # qparams safely: its input may use different shared-exponent groups.
         layout_output = op.target in _QPARAM_PRESERVING_VIEW_TARGETS or op.target in {
             torch.ops.aten.cat.default,
             torch.ops.aten.constant_pad_nd.default,
             operator.getitem,
         }
-        if (
-            layout_output
-            or op.target == torch.ops.aten.embedding.default
-            or any(user is not q for user in op.users)
-        ):
-            if not layout_output:
-                op.meta[_PRESERVE_FLOAT_INPUTS_KEY] = True
+        if layout_output:
             q.meta[QPARAM_KEY] = qparam
             dq.replace_all_uses_with(q, propagate_meta=False)
         else:
@@ -293,7 +233,7 @@ class FoldQuantOps(PassBase):
     ────────────────────────────────────────────────────────────────
     BEFORE                             AFTER
     ────────────────────────────────────────────────────────────────
-      op(float) ─ Q ─ DQ ─ …            op(float, meta[QPARAM])
+      op ─ Q ─ DQ ─ …                   op(meta[QPARAM])
 
       op ─ Q1 ─ DQ1 ─ Q2 ─ DQ2          op(meta[QPARAM]) ─ Q2
                  ▲                                          ▲
@@ -320,19 +260,14 @@ class FoldQuantOps(PassBase):
        Any Quantize that became orphaned because *all* its DQs were folded
        is deleted automatically.
 
-    Embedding lowers to value-preserving Circle GATHER, which cannot apply an
-    independently calibrated output quantization grid. For an unquantized
-    embedding output, keep Q explicitly and remove only DQ. Its table remains
-    dequantized so the lookup preserves FLOAT32 values before that Quantize.
-
-    Also keep Q when the unquantized producer has other users: folding it into
-    that producer would round those users' values too. Preserve that producer's
-    float inputs with explicit Dequantize bridges after the remaining folds.
+    The first Q-DQ annotates a tensor domain, including embedding outputs and
+    shared producers. FX value dtypes are intermediate metadata, not the final
+    quantized Circle ABI; no float input bridges are needed for these folds.
 
     Discover an existing source domain through slices, views, and same-domain
     concatenations before deciding whether a trailing Q is a requantization.
-    A float producer behind a layout view can still adopt its first affine Q
-    domain. MX keeps an explicit Q after an unquantized layout operation.
+    MX keeps an explicit Q after a layout without a proven source domain,
+    since shared-exponent grouping must be validated before propagation.
     """
 
     def __init__(self):
@@ -380,17 +315,6 @@ class FoldQuantOps(PassBase):
                 qparam.scale = [q_args.scale]
                 qparam.zero_point = [q_args.zero_p]
                 qparam.dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
-                if op.target == torch.ops.aten.embedding.default or any(
-                    user is not q for user in op.users
-                ):
-                    if op.target not in _QPARAM_PRESERVING_VIEW_TARGETS:
-                        op.meta[_PRESERVE_FLOAT_INPUTS_KEY] = True
-                    q.meta[QPARAM_KEY] = qparam
-                    dq.replace_all_uses_with(q, propagate_meta=False)
-                    logger.debug(
-                        f"{dq.name} is folded; {q.name} preserves its branch output grid."
-                    )
-                    continue
                 op.meta[QPARAM_KEY] = qparam
 
                 dq.replace_all_uses_with(op, propagate_meta=False)
@@ -398,8 +322,8 @@ class FoldQuantOps(PassBase):
                 logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
             # ───────────────────────────────────────────
             # Case 2: op already quantized
-            #        2.1 same dtype  → nothing to do
-            #        2.2 diff dtype  → leave Q in place
+            #        2.1 same domain → remove redundant Q-DQ
+            #        2.2 different domain → keep Q as requantization
             # ───────────────────────────────────────────
             else:
                 op_qparam: QuantParam = op.meta[QPARAM_KEY]
@@ -428,7 +352,6 @@ class FoldQuantOps(PassBase):
                     dq.replace_all_uses_with(op, propagate_meta=False)
                     logger.debug(f"Removed redundant {dq.name}")
 
-        _restore_float_inputs(graph)
         graph.eliminate_dead_code()
         graph.lint()
         graph_module.recompile()

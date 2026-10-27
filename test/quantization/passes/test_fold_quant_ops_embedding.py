@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep the activation quantizer separate from value-preserving embedding lookup."""
+"""Embedding table and activation domains belong to serialized quantized tensors."""
 
 import unittest
 
@@ -22,10 +22,15 @@ import tico
 import torch
 from circle_schema import circle
 from tico.circle import CircleDocument
-from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
+from tico.circle.runtime import CircleReferenceRuntime
 from tico.passes.decompose_fake_quantize import DecomposeFakeQuantize
+from tico.quantization import convert as quantize, prepare
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.specs import affine
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.serialize.quant_param import QPARAM_KEY
 
 
@@ -74,49 +79,37 @@ def _nodes(program, target):
 
 
 class FoldQuantOpsEmbeddingTest(unittest.TestCase):
-    def test_keeps_explicit_activation_quantizer_and_float_lookup(self):
+    def test_folds_activation_domain_into_embedding_output(self):
         tokens = torch.tensor([[0, 1]], dtype=torch.int64)
         program = torch.export.export(_QuantizedEmbedding().eval(), (tokens,))
         DecomposeFakeQuantize().call(program)
         FoldQuantOps().call(program)
         embedding = _nodes(program, torch.ops.aten.embedding.default)[0]
-        quantizers = _nodes(
-            program, torch.ops.quantized_decomposed.quantize_per_tensor.default
-        )
-        self.assertEqual(len(quantizers), 1)
-        self.assertIs(quantizers[0].args[0], embedding)
-        self.assertNotIn(QPARAM_KEY, embedding.meta)
-        qparam = quantizers[0].meta[QPARAM_KEY]
+        qparam = embedding.meta[QPARAM_KEY]
         self.assertEqual(qparam.dtype, "uint8")
         self.assertEqual(qparam.scale, [0.3])
         self.assertEqual(qparam.zero_point, [128])
-        self.assertFalse(
-            _nodes(
-                program, torch.ops.quantized_decomposed.dequantize_per_tensor.default
-            )
-        )
 
         RemoveWeightDequantOp().call(program)
-        dequantizers = _nodes(
-            program, torch.ops.quantized_decomposed.dequantize_per_channel.default
-        )
-        self.assertEqual(len(dequantizers), 1)
-        self.assertIs(embedding.args[0], dequantizers[0])
-        self.assertEqual(dequantizers[0].args[0].meta[QPARAM_KEY].scale, [0.125, 0.25])
-        # Both passes must preserve this boundary on a second invocation.
+        weight = embedding.args[0]
+        weight_qparam = weight.meta[QPARAM_KEY]
+        self.assertEqual(weight_qparam.dtype, "int8")
+        self.assertEqual(weight_qparam.scale, [0.125, 0.25])
+        self.assertEqual(weight_qparam.zero_point, [0, 0])
+        self.assertEqual(weight_qparam.quantized_dimension, 0)
+        # Tensor annotations are stable when the passes run again.
         FoldQuantOps().call(program)
         RemoveWeightDequantOp().call(program)
-        self.assertEqual(
-            len(
-                _nodes(
-                    program, torch.ops.quantized_decomposed.quantize_per_tensor.default
-                )
-            ),
-            1,
-        )
-        self.assertIs(embedding.args[0], dequantizers[0])
+        self.assertIs(embedding.args[0], weight)
+        self.assertEqual(embedding.meta[QPARAM_KEY], qparam)
+        for target in (
+            torch.ops.quantized_decomposed.quantize_per_tensor.default,
+            torch.ops.quantized_decomposed.dequantize_per_tensor.default,
+            torch.ops.quantized_decomposed.dequantize_per_channel.default,
+        ):
+            self.assertFalse(_nodes(program, target))
 
-    def test_shared_weight_keeps_dequantize_only_for_float_embedding(self):
+    def test_shared_weight_owns_domain_for_embedding_and_linear(self):
         module = _SharedEmbeddingWeight().eval()
         inputs = (torch.tensor([[0, 1]]), torch.tensor([[0.1, 0.2, 0.3, 0.4]]))
         program = torch.export.export(module, inputs)
@@ -125,14 +118,15 @@ class FoldQuantOpsEmbeddingTest(unittest.TestCase):
         RemoveWeightDequantOp().call(program)
         embedding = _nodes(program, torch.ops.aten.embedding.default)[0]
         linear = _nodes(program, torch.ops.aten.linear.default)[0]
-        dequantizer = _nodes(
-            program, torch.ops.quantized_decomposed.dequantize_per_channel.default
-        )[0]
-        self.assertIs(embedding.args[0], dequantizer)
-        self.assertIs(linear.args[1], dequantizer.args[0])
-        self.assertNotIn(QPARAM_KEY, embedding.meta)
+        self.assertIs(embedding.args[0], linear.args[1])
+        self.assertEqual(embedding.args[0].meta[QPARAM_KEY].scale, [0.125, 0.25])
+        self.assertEqual(embedding.meta[QPARAM_KEY].scale, [0.3])
         self.assertEqual(linear.meta[QPARAM_KEY].scale, [0.2])
-        self.assertEqual(set(dequantizer.users), {embedding})
+        self.assertFalse(
+            _nodes(
+                program, torch.ops.quantized_decomposed.dequantize_per_channel.default
+            )
+        )
 
     def test_mismatched_qdq_is_not_folded(self):
         program = torch.export.export(
@@ -151,35 +145,91 @@ class FoldQuantOpsEmbeddingTest(unittest.TestCase):
         self.assertNotIn(QPARAM_KEY, embedding.meta)
         self.assertNotIn(QPARAM_KEY, quantizer.meta)
 
-    def test_public_conversion_preserves_per_row_and_per_tensor_weight_domains(self):
+    def _assert_quantized_embedding_circle(self, converted):
+        document = CircleDocument.from_bytes(converted.circle_binary)
+        self.assertTrue(document.verify().ok)
+        program = CircleReferenceRuntime(document).program
+        self.assertEqual([operator.name for operator in program.operators], ["GATHER"])
+        gather = program.operators[0]
+        weight = program.tensor(gather.inputs[0])
+        indices = program.tensor(gather.inputs[1])
+        output = program.tensor(gather.outputs[0])
+        self.assertEqual(indices.tensor_type, circle.TensorType.TensorType.INT64)
+        self.assertFalse(indices.is_quantized)
+        self.assertFalse(indices.is_constant)
+        self.assertTrue(weight.is_constant)
+        self.assertFalse(output.is_constant)
+
+        # This minimal NPU graph has only table/activation data and semantic
+        # GATHER indices. Exclude that operand by role, not by integer dtype:
+        # the quantized data tensors are integer tensors too.
+        for tensor in program.tensors:
+            if tensor.index == indices.index:
+                continue
+            with self.subTest(tensor=tensor.name):
+                self.assertTrue(tensor.is_quantized_integer, tensor.describe())
+                self.assertIsNotNone(tensor.quantization)
+                quantization = tensor.quantization
+                assert quantization is not None
+                self.assertTrue(quantization.scale)
+                self.assertTrue(all(np.isfinite(quantization.scale)))
+                self.assertTrue(all(scale > 0 for scale in quantization.scale))
+                self.assertEqual(len(quantization.zero_point), len(quantization.scale))
+        return weight, output
+
+    def test_npu_circle_data_invariant_with_independent_embedding_domains(self):
         tokens = torch.tensor([[0, 1]], dtype=torch.int64)
         for per_channel in (True, False):
             with self.subTest(per_channel=per_channel):
                 module = _QuantizedEmbedding(per_channel=per_channel).eval()
-                converted = tico.convert(module, (tokens,))
-                document = CircleDocument.from_bytes(converted.circle_binary)
-                document.verify()
-                runtime = CircleReferenceRuntime(document)
-                names = [operator.name for operator in runtime.program.operators]
-                self.assertEqual(names, ["DEQUANTIZE", "GATHER", "QUANTIZE"])
-                gather = runtime.program.operators[1]
-                for index in (gather.inputs[0], gather.outputs[0]):
-                    self.assertEqual(
-                        runtime.program.tensor(index).tensor_type,
-                        circle.TensorType.TensorType.FLOAT32,
-                    )
-                # All table values avoid half-grid ties, making both reference
-                # rounding conventions agree with PyTorch fake quantization.
-                expected = module(tokens).numpy()
-                actual = runtime.run(
-                    [tokens.numpy()], mode=ExecutionMode.FAKE_QUANTIZE
-                ).outputs[0]
-                np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-7)
-                raw = runtime.run([tokens.numpy()]).outputs[0]
-                expected_codes = np.rint(expected / np.float32(0.3) + 128).astype(
-                    np.uint8
+                weight, output = self._assert_quantized_embedding_circle(
+                    tico.convert(module, (tokens,))
                 )
-                np.testing.assert_array_equal(raw, expected_codes)
+                self.assertEqual(weight.tensor_type, circle.TensorType.TensorType.INT8)
+                self.assertEqual(output.tensor_type, circle.TensorType.TensorType.UINT8)
+                np.testing.assert_array_equal(
+                    weight.quantization.scale,
+                    [0.125, 0.25] if per_channel else [0.125],
+                )
+                np.testing.assert_array_equal(
+                    weight.quantization.zero_point, [0, 0] if per_channel else [0]
+                )
+                self.assertEqual(weight.quantization.quantized_dimension, 0)
+                np.testing.assert_array_equal(
+                    output.quantization.scale, [np.float32(0.3)]
+                )
+                self.assertEqual(output.quantization.zero_point, (128,))
+
+    def test_wrapq_embedding_export_owns_calibrated_tensor_domains(self):
+        tokens = torch.tensor([[0, 1]], dtype=torch.int64)
+        module = torch.nn.Embedding.from_pretrained(
+            torch.tensor([[0.125, 0.375, 0.875, -0.125], [0.25, 0.5, 1.25, -1.0]])
+        ).eval()
+        config = PTQConfig(
+            activation=affine(DType.uint(8), qscheme=QScheme.PER_TENSOR_ASYMM),
+            weight=affine(DType.uint(8), qscheme=QScheme.PER_CHANNEL_ASYMM),
+        )
+        prepared = prepare(module, config)
+        with torch.no_grad():
+            prepared(tokens)
+        quantized = quantize(prepared).eval()
+        weight_scale, weight_zero = quantized.wrapped.weight_obs.compute_qparams()
+        act_scale, act_zero = quantized.wrapped.act_out_obs.compute_qparams()
+        weight, output = self._assert_quantized_embedding_circle(
+            tico.convert(quantized, (tokens,))
+        )
+        self.assertEqual(weight.tensor_type, circle.TensorType.TensorType.UINT8)
+        self.assertEqual(output.tensor_type, circle.TensorType.TensorType.UINT8)
+        np.testing.assert_array_equal(weight.quantization.scale, weight_scale.tolist())
+        np.testing.assert_array_equal(
+            weight.quantization.zero_point, weight_zero.tolist()
+        )
+        np.testing.assert_array_equal(
+            output.quantization.scale, act_scale.reshape(-1).tolist()
+        )
+        np.testing.assert_array_equal(
+            output.quantization.zero_point, act_zero.reshape(-1).tolist()
+        )
 
 
 if __name__ == "__main__":
