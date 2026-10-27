@@ -464,6 +464,11 @@ The current serializer:
 A newly added visitor is not useful unless its module is imported by the serializer
 operator package so its registration side effect occurs.
 
+Multi-axis `repeat` that cannot become a singleton broadcast is serialized as a
+chain of `CONCATENATION` operators. `RepeatVisitor` owns the cumulative shape of
+that chain: each intermediate tensor retains all preceding axis expansions and
+preserves symbolic dimensions in its shape signature.
+
 ### 8.3 Tensor data and shared storage
 
 Parameters, buffers, and lifted constants are copied to CPU, made contiguous, and

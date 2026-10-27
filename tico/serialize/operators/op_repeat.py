@@ -73,14 +73,14 @@ class RepeatVisitor(NodeVisitor):
         )
         concat_input: torch.fx.Node | circle.Tensor.TensorT = input
         concat_output: torch.fx.node.Node | circle.Tensor.TensorT = node
+        repeated_shape: List[int | torch.SymInt] = list(tensor_shape)
         for idx, r in enumerate(repeats):
             # concat along idx dimension
             if r > 1:
+                # Each concat consumes the expansions from all preceding axes.
+                repeated_shape[idx] = repeated_shape[idx] * r
                 # Except last created concat, a tensor should be created.
                 if repeat_dim_cnt > 1:
-                    repeated_shape: List[int | torch.SymInt] = list(tensor_shape)
-                    repeated_shape[idx] = repeated_shape[idx] * r
-
                     repeated_cshape, repeated_cshape_signature = to_circle_shape(
                         repeated_shape
                     )
