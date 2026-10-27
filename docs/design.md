@@ -281,6 +281,10 @@ length before constructing the retained prefix and suffix. Negative and clipped
 bounds follow ATen slicing semantics; reversed bounds describe an empty replacement.
 Steps greater than one remain unsupported.
 
+`DecomposeGroupNorm` supports the normalized output (tuple index `0` or `-3`) of
+native LayerNorm and GroupNorm. It rejects live mean/rstd outputs and direct tuple
+uses before rewriting any normalization; unused statistics do not block conversion.
+
 ### 5.5 Relaxed-invariant cleanup
 
 After the main bundle, TICO runs:

@@ -14,7 +14,7 @@
 
 import math
 import operator
-from typing import TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -22,6 +22,7 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.serialize.circle_mapping import extract_shape
+from tico.utils.errors import NotYetSupportedError
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
@@ -35,6 +36,10 @@ class DecomposeGroupNorm(PassBase):
     This pass decomposes Group normalization operators.
 
     LayerNorm is group=1 Group normalization.
+
+    Only the normalized tensor (tuple index 0, also spelled -3) is supported.
+    Validate all live tuple uses before rewriting any normalization. Unused
+    statistics may be discarded; live mean/rstd or direct tuple uses are rejected.
 
     [LayerNorm, GroupNorm]
 
@@ -129,8 +134,17 @@ class DecomposeGroupNorm(PassBase):
         graph: torch.fx.Graph = gm.graph
         modified = False
 
+        # Match FX dead-code liveness without removing nodes before validation.
+        # This includes dependencies of side-effectful nodes as well as outputs.
+        graph.lint()
+        live_nodes: set[torch.fx.Node] = set()
+        for node in reversed(graph.nodes):
+            if node.is_impure() or any(user in live_nodes for user in node.users):
+                live_nodes.add(node)
+
+        normalized_outputs: dict[torch.fx.Node, list[torch.fx.Node]] = {}
         for node in graph.nodes:
-            if not is_target_node(
+            if node not in live_nodes or not is_target_node(
                 node,
                 [
                     torch.ops.aten.native_layer_norm.default,
@@ -139,8 +153,31 @@ class DecomposeGroupNorm(PassBase):
             ):
                 continue
 
+            normalized_outputs[node] = []
+            for user in node.users:
+                if user not in live_nodes:
+                    continue
+                if not (
+                    user.op == "call_function"
+                    and user.target == operator.getitem
+                    and len(user.args) == 2
+                    and user.args[0] is node
+                    and isinstance(user.args[1], int)
+                    and user.args[1] in (0, -3)
+                    and not user.kwargs
+                ):
+                    raise NotYetSupportedError(
+                        f"{node.target}: only normalized output (index 0 or -3) "
+                        "is supported; mean/rstd outputs and direct tuple uses "
+                        "are not supported."
+                    )
+                normalized_outputs[node].append(user)
+
+        for node, get_items in normalized_outputs.items():
             if node.target == torch.ops.aten.native_layer_norm.default:
-                ln_args = NativeLayerNormArgs(*node.args, **node.kwargs)
+                ln_args = NativeLayerNormArgs(
+                    *cast(Any, node.args), **cast(Any, node.kwargs)
+                )
                 x = ln_args.input
                 normalized_shape = ln_args.normalized_shape
                 weight = ln_args.weight
@@ -165,7 +202,9 @@ class DecomposeGroupNorm(PassBase):
                 norm_size = math.prod(normalized_shape)
                 layer_size = math.prod(x_shape[:idx_normalize_start])
             elif node.target == torch.ops.aten.native_group_norm.default:
-                gn_args = NativeGroupNormArgs(*node.args, **node.kwargs)
+                gn_args = NativeGroupNormArgs(
+                    *cast(Any, node.args), **cast(Any, node.kwargs)
+                )
                 x = gn_args.input
                 weight = gn_args.weight
                 bias = gn_args.bias
@@ -251,21 +290,16 @@ class DecomposeGroupNorm(PassBase):
                 # Reset last node's meta for propagating replacing node's meta.
                 layer_norm.meta = {}
 
-                # NOTE Why select user `getitem` here?
-                #   `native_layer_norm` and `native_group_norm` requires `getitem`
-                #   to select the first output and discard the rest unused outputs.
-                #   To replace those operators, it's necessary to replace the corresponding
-                #   `getitem` node as well.
-                get_item = next(iter(node.users))
-                assert (
-                    get_item.target == operator.getitem
-                ), "First user of native_group/layer_norm should be getitem"
-
-                get_item.replace_all_uses_with(layer_norm, propagate_meta=True)
+                # Every selected user denotes the same normalized tensor. Copy
+                # its metadata once, then rewire all users regardless of order.
+                for index, get_item in enumerate(get_items):
+                    get_item.replace_all_uses_with(
+                        layer_norm, propagate_meta=index == 0
+                    )
 
             modified = True
 
-        gm.graph.eliminate_dead_code()
+        modified |= gm.graph.eliminate_dead_code()
         gm.graph.lint()
         gm.recompile()
 
