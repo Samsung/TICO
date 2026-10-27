@@ -469,11 +469,14 @@ parent directory.
 
 Floating-point bundles run in `native` mode. Quantized bundles run in explicit
 `fake_quantize` reference mode. These CPU reference runs validate artifact
-composition and quantized semantics; they do not establish NPU speed or
-bit-exact integer-backend behavior. Tiny random-model tests establish numerical
-parity and deterministic generation, not pretrained model quality. Use a
-pretrained bundle and a separate quality evaluation for meaningful text, and
-measure performance on the intended backend.
+composition under reference semantics; they do not establish NPU speed or
+bit-exact integer-backend behavior. Tiny random-model tests cover floating-point
+numerical parity, quantized tensor domains, and deterministic generation.
+Quantized PyTorch parity is limited by the reference runtime's value-preserving
+GATHER behavior; see the
+[embedding domain contract](../../../docs/design.md#102-conversion-time-quantized-graph-legalization).
+Use a pretrained bundle and a separate quality evaluation for meaningful text,
+and validate correctness and performance on the intended backend.
 
 ### LLaVA-Bench judge evaluation
 

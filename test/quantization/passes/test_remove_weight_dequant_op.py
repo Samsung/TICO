@@ -47,6 +47,13 @@ class _ConstantFakeQuantModule(torch.nn.Module):
         return input_ + constant
 
 
+class _DequantizedUserInput(torch.nn.Module):
+    def forward(self, codes):
+        return torch.ops.quantized_decomposed.dequantize_per_tensor.default(
+            codes, 0.125, 128, 0, 255, torch.uint8
+        )
+
+
 class RemoveWeightDequantOpTest(unittest.TestCase):
     """Validate dequantize removal and logical dtype recovery."""
 
@@ -99,6 +106,27 @@ class RemoveWeightDequantOpTest(unittest.TestCase):
                 ep, [torch.ops.quantized_decomposed.dequantize_per_channel.default]
             ),
             0,
+        )
+
+    def test_runtime_input_is_not_treated_as_constant_weight(self):
+        program = torch.export.export(
+            _DequantizedUserInput().eval(),
+            (torch.tensor([128, 130], dtype=torch.uint8),),
+        )
+        RemoveWeightDequantOp().call(program)
+        source = next(node for node in program.graph.nodes if node.op == "placeholder")
+        self.assertNotIn(QPARAM_KEY, source.meta)
+        self.assertEqual(
+            num_of_ops(
+                program, [torch.ops.quantized_decomposed.dequantize_per_tensor.default]
+            ),
+            1,
+        )
+        torch.testing.assert_close(
+            program.module()(torch.tensor([128, 130], dtype=torch.uint8)),
+            torch.tensor([0.0, 0.25]),
+            rtol=0,
+            atol=0,
         )
 
     def test_declared_uint8_range_is_not_inferred_as_uint4(self):

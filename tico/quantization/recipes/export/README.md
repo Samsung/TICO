@@ -147,9 +147,14 @@ runtime itself does not import Transformers, load a PyTorch model, or fetch
 files. The optional [generation CLI](../../examples/README.md#generate-from-a-llama-circle-bundle)
 uses only local tokenizer files for prompt encoding/continuation decoding.
 
-Tiny deterministic random-model tests exercise saved-artifact parity and cache
-composition. Meaningful language output requires pretrained weights; model
-quality and target-device performance need their own evaluation.
+Tiny deterministic random-model tests exercise floating-point saved-artifact
+parity, quantized tensor domains, and cache composition. Quantized reference
+execution does not promise PyTorch fake-quantization parity: a directly quantized
+embedding carries independent table/output qparams, while reference GATHER
+forwards table values without applying the output grid. See the
+[quantized Circle contract and reference limitation](../../../../docs/design.md#102-conversion-time-quantized-graph-legalization).
+Meaningful language output requires pretrained weights; model quality and
+target-device correctness and performance need their own evaluation.
 
 A file-by-file description of a complete Gemma4 E2B quantized export is kept in
 [`gemma4_artifacts.md`](gemma4_artifacts.md).

@@ -30,9 +30,12 @@ from pathlib import Path
 import numpy as np
 
 import torch
+from tico.circle import CircleDocument
+from tico.circle.runtime import CircleReferenceRuntime
 from tico.quantization.recipes.export.llama import export_llama_bundle
 from tico.quantization.recipes.runtime.llama import LlamaCircleRuntime
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
 
 
 def _make_model(num_hidden_layers: int = 2) -> torch.nn.Module:
@@ -266,7 +269,8 @@ class TestLlamaCircleRuntime(unittest.TestCase):
 
     def test_bundle_runs_in_clean_process_without_transformers(self):
         """Only saved Circle/NumPy artifacts cross the process boundary."""
-        script = textwrap.dedent("""\
+        script = textwrap.dedent(
+            """\
             import importlib.abc
             import json
             import sys
@@ -284,7 +288,8 @@ class TestLlamaCircleRuntime(unittest.TestCase):
             tokens = np.array(json.loads(sys.argv[2]), dtype=np.int64)
             result = runtime.generate(tokens, max_new_tokens=3)
             print('RESULT=' + json.dumps(result.tolist()))
-            """)
+            """
+        )
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp) / "bundle"
             shutil.copytree(self.bundle_dir, bundle)
@@ -410,7 +415,7 @@ class TestLlamaCircleRuntime(unittest.TestCase):
 
 @unittest.skipUnless(has_transformers_for("llama"), "requires LLaMA transformers")
 class TestFakeQuantizedLlamaCircleRuntime(unittest.TestCase):
-    """Preserve frozen quantization semantics through saved stage boundaries."""
+    """Validate quantized artifact domains and saved-stage execution contracts."""
 
     directory: tempfile.TemporaryDirectory[str]
     bundle_dir: Path
@@ -454,28 +459,90 @@ class TestFakeQuantizedLlamaCircleRuntime(unittest.TestCase):
                 output_dir=cls.bundle_dir,
             )
 
+    def test_saved_embedding_owns_calibrated_weight_and_activation_domains(self):
+        manifest = json.loads(self.manifest_path.read_text())
+        embedding_path = self.bundle_dir / manifest["stages"]["token_embedding"]["file"]
+        document = CircleDocument.load(embedding_path)
+        self.assertTrue(document.verify().ok)
+        program = CircleReferenceRuntime(document).program
+        self.assertEqual([operator.name for operator in program.operators], ["GATHER"])
+        gather = program.operators[0]
+        weight = program.tensor(gather.inputs[0])
+        indices = program.tensor(gather.inputs[1])
+        output = program.tensor(gather.outputs[0])
+        self.assertTrue(weight.is_constant)
+        self.assertTrue(weight.is_quantized_integer)
+        self.assertTrue(output.is_quantized_integer)
+        self.assertEqual(weight.dtype, np.dtype(np.uint8))
+        self.assertEqual(output.dtype, np.dtype(np.uint8))
+        self.assertEqual(indices.dtype, np.dtype(np.int64))
+        self.assertFalse(indices.is_quantized)
+
+        embedding = self.model.get_submodule(
+            "wrapped.model.wrapped.embed_tokens.wrapped"
+        )
+        assert isinstance(embedding, QuantEmbedding)
+        for tensor, observer in (
+            (weight, embedding.weight_obs),
+            (output, embedding.act_out_obs),
+        ):
+            with self.subTest(tensor=tensor.name):
+                qparams = observer.compute_qparams()
+                assert qparams is not None
+                scales, zero_points = qparams
+                quantization = tensor.quantization
+                assert quantization is not None
+                np.testing.assert_array_equal(
+                    quantization.scale, scales.reshape(-1).tolist()
+                )
+                np.testing.assert_array_equal(
+                    quantization.zero_point, zero_points.reshape(-1).tolist()
+                )
+        weight_quantization = weight.quantization
+        assert weight_quantization is not None
+        self.assertEqual(weight_quantization.quantized_dimension, 0)
+
     def test_fake_quantized_teacher_forced_logits_and_generation(self):
-        """The numerical reference uses the converted model, not the FP model."""
+        """Cached decoding and greedy generation agree with full-prefix Circle."""
         manifest = json.loads(self.manifest_path.read_text())
         self.assertEqual(manifest["execution_mode"], "fake_quantize")
         runtime = LlamaCircleRuntime(self.bundle_dir)
+        reference = LlamaCircleRuntime(self.bundle_dir)
+        self.assertEqual(runtime.execution_mode, "fake_quantize")
         tokens = self.prompt.copy()
         actual = runtime.prefill(tokens)
+        # The reference GATHER passes dequantized table values through. Its
+        # serialized activation domain is validated above; literal PyTorch
+        # fake-quant parity is not the NPU artifact contract.
         for token in (7, 9):
+            self.assertEqual(actual.dtype, np.float32)
+            self.assertEqual(actual.shape, (1, 32))
+            self.assertTrue(np.isfinite(actual).all())
             np.testing.assert_allclose(
-                actual, _reference_logits(self.model, tokens), rtol=1e-4, atol=1e-6
+                actual, reference.prefill(tokens), rtol=1e-4, atol=1e-6
             )
+            self.assertEqual(runtime.past_len, tokens.shape[1])
             next_input = np.array([[token]], dtype=np.int64)
             tokens = np.concatenate((tokens, next_input), axis=1)
             actual = runtime.decode_one(next_input)
         np.testing.assert_allclose(
-            actual, _reference_logits(self.model, tokens), rtol=1e-4, atol=1e-6
+            actual, reference.prefill(tokens), rtol=1e-4, atol=1e-6
         )
         self.assertEqual(actual.dtype, np.float32)
-        np.testing.assert_array_equal(
-            runtime.generate(self.prompt, max_new_tokens=3),
-            _reference_generate(self.model, self.prompt, 3),
-        )
+        self.assertEqual(actual.shape, (1, 32))
+        self.assertTrue(np.isfinite(actual).all())
+        self.assertEqual(runtime.past_len, tokens.shape[1])
+
+        # Independently recompute each full prefix without using decode caches.
+        expected = self.prompt.copy()
+        for _ in range(3):
+            logits = reference.prefill(expected)
+            next_token = logits.argmax(axis=-1).astype(np.int64).reshape(1, 1)
+            expected = np.concatenate((expected, next_token), axis=1)
+        generated = runtime.generate(self.prompt, max_new_tokens=3)
+        self.assertEqual(generated.dtype, np.int64)
+        self.assertEqual(generated.shape, (1, 6))
+        np.testing.assert_array_equal(generated, expected)
 
     def test_quantized_artifacts_require_explicit_fake_quantize_mode(self):
         """Integer Circle tensors must not be presented as native float graphs."""
