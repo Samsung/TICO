@@ -136,8 +136,15 @@ def quantize_array(value: np.ndarray, tensor: RuntimeTensor) -> np.ndarray:
     with np.errstate(all="ignore"):
         scaled = round_half_away_from_zero(value.astype(np.float32) / scale)
         scaled = scaled + zero_point
-    clipped = np.clip(scaled, minimum, maximum)
-    return clipped.astype(tensor.dtype)
+    clipped = np.asarray(np.clip(scaled, minimum, maximum))
+    # FLOAT32 rounds wide integer maxima past the storage range. Keep the full
+    # clip/cast layout for NaNs, but cast saturated elements as zero before
+    # assigning the exact integer endpoint.
+    at_maximum = scaled >= maximum
+    clipped[at_maximum] = 0
+    result = clipped.astype(tensor.dtype)
+    result[at_maximum] = maximum
+    return result
 
 
 def fake_quantize_array(value: np.ndarray, tensor: RuntimeTensor) -> np.ndarray:

@@ -751,7 +751,9 @@ resize follows `ComputeInterpolationValues`/`GetNearestNeighbor`, and `TRANSPOSE
 derives its implicit padding from the declared output shape.
 
 For quantization, exact halfway values round away from zero; immediately adjacent
-values round to the nearer integer, and integral values stay unchanged.
+values round to the nearer integer, and integral values stay unchanged. FLOAT32
+qparam arithmetic saturates to the exact integer storage endpoints, including
+INT32/UINT32 and INT64/UINT64 limits that FLOAT32 cannot represent exactly.
 
 `CUMSUM` accumulates in the input dtype. With `exclusive=True`, each result is the
 sum before the current element in the selected direction, starting with zero even
