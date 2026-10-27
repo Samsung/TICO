@@ -63,15 +63,22 @@ def _clone_projection_with_scale(module: nn.Module, scale: torch.Tensor) -> nn.M
     with torch.no_grad():
         weight = getattr(scaled, "weight", None)
         if weight is not None:
-            weight_scale = scale.to(device=weight.device, dtype=weight.dtype)
-            weight.mul_(weight_scale)
+            if weight.is_meta:
+                # Meta-device twins (e.g. preflight spec resolution) cannot
+                # scale or read weights; keep the fold multiplier consistent
+                # using the original scalar instead.
+                multiplier_value = float(scale.detach().cpu().item())
+            else:
+                weight_scale = scale.to(device=weight.device, dtype=weight.dtype)
+                weight.mul_(weight_scale)
+                multiplier_value = float(weight_scale.item())
 
             # Compose earlier folds without losing an unsupported-fold marker.
             multiplier = getattr(
                 scaled, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR, 1.0
             )
             if multiplier is not None:
-                multiplier = multiplier * float(weight_scale.item())
+                multiplier = multiplier * multiplier_value
             setattr(scaled, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR, multiplier)
 
         bias = getattr(scaled, "bias", None)

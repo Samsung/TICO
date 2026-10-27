@@ -231,3 +231,69 @@ def gemma_model(*, seed: int = 1073):
     )
     config._attn_implementation = "eager"
     return Gemma4ForCausalLM(config).eval()
+
+
+def gemma4_multimodal_model(*, seed: int = 1073):
+    """Build a tiny multimodal Gemma4 (vision tower + text) for CPU checks.
+
+    Unlike :func:`gemma_model`, this fixture includes the vision tower with
+    the ``patch_embedder.input_proj`` Linear, so GPTQ/PTQ policies that
+    special-case the vision patch embedder can be exercised end to end.
+    """
+    from transformers import Gemma4Config, Gemma4ForConditionalGeneration
+
+    torch.manual_seed(seed)
+    config = Gemma4Config(
+        text_config={
+            "vocab_size": 128,
+            "vocab_size_per_layer_input": 128,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "num_global_key_value_heads": 1,
+            "head_dim": 32,
+            "global_head_dim": 32,
+            "max_position_embeddings": 128,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "sliding_window": 8,
+            "rope_parameters": {
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0},
+                "full_attention": {"rope_type": "default", "rope_theta": 10000.0},
+            },
+            "hidden_size_per_layer_input": 0,
+            "attention_k_eq_v": False,
+            "num_kv_shared_layers": 0,
+            "enable_moe_block": False,
+            "final_logit_softcapping": 30.0,
+            "attention_dropout": 0.0,
+            "use_cache": True,
+            "pad_token_id": 0,
+            "eos_token_id": 127,
+        },
+        vision_config={
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "patch_size": 2,
+            "position_embedding_size": 64,
+            "pooling_kernel_size": 2,
+        },
+        # The Gemma4 GPTQ quantizer does not process the audio tower; keep a
+        # small one so checks can verify it is excluded from GPTQ planning.
+        audio_config={
+            "hidden_size": 32,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "subsampling_conv_channels": (8, 4),
+            "conv_kernel_size": 3,
+            "output_proj_dims": 16,
+        },
+        image_token_id=126,
+    )
+    config._attn_implementation = "eager"
+    return Gemma4ForConditionalGeneration(config).eval()

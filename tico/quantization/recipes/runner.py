@@ -24,6 +24,7 @@ from tico.quantization.recipes.evaluation.selection import (
     validate_adapter_evaluation_config,
 )
 from tico.quantization.recipes.extensions import load_recipe_extensions
+from tico.quantization.recipes.preflight import run_gptq_ptq_preflight
 from tico.quantization.recipes.stages import get_stage
 from tico.quantization.recipes.utils import set_seed
 
@@ -397,6 +398,10 @@ class QuantizationRunner:
 
         print("=== Loading model ===")
         ctx = adapter.load_model(ctx)
+
+        # Static GPTQ<->PTQ weight-qparam compatibility check; aborts before
+        # any calibration compute on a mismatch. No-op without a GPTQ stage.
+        run_gptq_ptq_preflight(ctx)
 
         if needs_calibration:
             print("=== Building calibration inputs ===")

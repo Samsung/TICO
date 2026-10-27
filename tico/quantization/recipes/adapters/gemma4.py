@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 import torch
-import tqdm
+import tqdm  # type: ignore[import-untyped]
 from transformers import AutoProcessor
 
 from tico.quantization import convert, prepare
+from tico.quantization.config.base import BaseConfig
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
@@ -119,6 +120,37 @@ class Gemma4Adapter(ModelAdapter):
     def get_gptq_config_class(self) -> type[Gemma4GPTQConfig]:
         """Select the stagewise vision + text GPTQ config for Gemma4."""
         return Gemma4GPTQConfig
+
+    def gptq_target_roots(
+        self, model: torch.nn.Module, gptq_config: BaseConfig
+    ) -> list[str] | None:
+        """Restrict the GPTQ plan to the components the Gemma4 GPTQ quantizer
+        processes: vision tower, multimodal embedder, language model, and
+        lm_head. The audio tower is not a GPTQ target.
+        """
+        from tico.quantization.algorithm.gemma4_gptq.utils import (
+            build_module_name_map,
+            resolve_gemma4_components,
+        )
+
+        if not isinstance(gptq_config, Gemma4GPTQConfig):
+            # The universal GPTQ variant is model-agnostic and also processes
+            # components the family quantizer skips (e.g. the audio tower);
+            # do not restrict the plan in that case.
+            return None
+        components = resolve_gemma4_components(model, gptq_config)
+        name_map = build_module_name_map(model)
+        roots = []
+        for component in (
+            components.vision_tower,
+            components.multimodal_embedder,
+            components.language_model,
+            components.lm_head,
+        ):
+            name = name_map.get(component)
+            if name is not None:
+                roots.append(name)
+        return roots or None
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         """Load the Gemma4 E2B model and processor."""

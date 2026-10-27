@@ -69,7 +69,12 @@ def fold_input_affine_into_linear(
         in_features=linear.in_features,
         reference=linear.weight,
     )
-    use_bias = linear.bias is not None or bool(torch.any(shift_vector != 0).item())
+    # A meta-device shift (e.g. preflight spec-resolution twins) cannot be
+    # read; weight specs do not depend on the bias decision, so keep the
+    # source layer's bias configuration in that case.
+    use_bias = linear.bias is not None or (
+        not shift_vector.is_meta and bool(torch.any(shift_vector != 0).item())
+    )
 
     folded = nn.Linear(
         linear.in_features,
@@ -159,14 +164,16 @@ def _as_feature_vector(
             f"{name} must be a scalar or have shape ({in_features},), "
             f"got {tuple(tensor.shape)}."
         )
-    if not bool(torch.isfinite(tensor).all().item()):
+    if not tensor.is_meta and not bool(torch.isfinite(tensor).all().item()):
         raise ValueError(f"{name} must contain only finite values.")
     return tensor.detach()
 
 
 def _uniform_positive_scale_multiplier(scale: torch.Tensor) -> float | None:
     """Return one reusable qparam multiplier for positive uniform scaling."""
-    if scale.numel() == 0:
+    if scale.numel() == 0 or scale.is_meta:
+        # Meta-device twins cannot be inspected; the multiplier is never
+        # consumed during meta-only spec resolution.
         return None
     first = scale.reshape(-1)[0]
     if not bool(torch.all(scale == first).item()) or not bool((first > 0).item()):

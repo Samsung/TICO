@@ -112,6 +112,19 @@ class ModelAdapter(ABC):
         """
         return None
 
+    def gptq_target_roots(
+        self, model: torch.nn.Module, gptq_config: BaseConfig
+    ) -> Sequence[str] | None:
+        """Return module-name prefixes the family GPTQ quantizer processes.
+
+        ``None`` (the default) means the quantizer targets the whole model.
+        The GPTQ->PTQ preflight uses this to avoid planning bit widths for
+        modules the quantizer skips (for example, an audio tower the family
+        quantizer does not handle). Read the model structure only; do not
+        modify it.
+        """
+        return None
+
     @abstractmethod
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         raise NotImplementedError
@@ -143,6 +156,24 @@ class ModelAdapter(ABC):
     @abstractmethod
     def build_ptq_config(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):
         raise NotImplementedError
+
+    def build_meta_model(self, ctx: RecipeContext) -> torch.nn.Module:
+        """Build a parameter-free (meta-device) twin of the loaded model.
+
+        Used by the GPTQ->PTQ preflight to resolve per-module PTQ weight
+        specs through the real ``prepare()`` path without copying weights.
+        The default reconstructs the model class from ``model.config`` under
+        a meta-device context; override this hook when the model class needs
+        additional constructor arguments.
+        """
+        model = ctx.require_model()
+        config = getattr(model, "config", None)
+        if config is None:
+            raise RuntimeError(
+                "Cannot build a meta twin: the loaded model exposes no config."
+            )
+        with torch.device("meta"):
+            return type(model)(config)
 
     @abstractmethod
     def evaluate(self, ctx: RecipeContext) -> None:

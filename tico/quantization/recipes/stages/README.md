@@ -23,6 +23,23 @@ identify the same stage. Names are not trimmed. Each consumer retains its own
 enabled-stage and first-match rules. Dotted CLI overrides address list-item names
 exactly as written in the config, so `pipeline.PTQ.enabled` addresses `name: PTQ`.
 
+## GPTQ->PTQ preflight
+
+When a pipeline enables a GPTQ stage and a PTQ stage with
+`reuse_gptq_qparams` (the default), the runner statically checks GPTQ vs PTQ
+weight-qparam compatibility right after model loading — before any
+calibration compute. It resolves per-module GPTQ bit widths
+(`weight_bits` + `weight_bits_overrides`, using the quantizers' own
+name-matching policy) and the PTQ weight dtypes produced by the adapter's
+PTQ config, and aborts with `PreflightError` listing every mismatched
+module. Override keys that match no quantizable module abort the run with
+`PreflightError` by default (`pipeline.gptq.strict_overrides: true`); set it
+to `false` to demote them to warnings.
+
+Disable the check with `pipeline.ptq.preflight: false`. The implementation
+lives in `recipes/preflight.py`; injection-time validation of the actual
+GPTQ statistics remains in `recipes/qparams.py`.
+
 ## Stage contract
 
 ```python
