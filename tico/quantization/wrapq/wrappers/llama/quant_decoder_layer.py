@@ -37,6 +37,7 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
 from tico.quantization.wrapq.wrappers.llama.position import (
     build_causal_mask,
     combine_binary_attention_mask,
+    is_binary_attention_mask,
     make_rotary_embedding,
     position_embeddings as make_position_embeddings,
 )
@@ -283,7 +284,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
 
         Supported cases:
         - None: build a causal mask for the current query and key lengths.
-        - bool mask: convert to additive mask using 0 / configured fill value.
+        - bool/integer mask: combine nonzero keep values with the causal mask.
         - additive mask: use as-is.
         """
         q_len = hidden_states.size(1)
@@ -296,7 +297,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             )
             return self._fq(mask, self.obs_attn_mask)
 
-        if attention_mask.dtype in (torch.bool, torch.int64):
+        if is_binary_attention_mask(attention_mask):
             causal_mask = self._build_causal_mask(
                 q_len=q_len, k_len=k_len, past_len=past_len, device=device
             )
