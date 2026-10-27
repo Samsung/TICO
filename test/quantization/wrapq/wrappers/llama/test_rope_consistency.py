@@ -327,13 +327,16 @@ class TestLlamaRoPEConsistency(unittest.TestCase):
         """The new source must not insert rotary calculations into the layer IR."""
         model = self._wrapper(self._model(), "npu_export")
         layer = model.layers[0].wrapped
+        self.assertIsInstance(layer, QuantLlamaDecoderLayer)
         prepared = prepare_llama_static_inputs(layer, 8)
         hidden = torch.randn(1, 8, 32)
         kwargs = {
             "attention_mask": prepared.mask(8, 8, 0, device="cpu"),
             "position_embeddings": (prepared.cos, prepared.sin),
         }
-        adapter = layer.as_export_module("prefill", return_kv=True)
+        adapter = QuantLlamaDecoderLayer.as_export_module(
+            layer, "prefill", return_kv=True
+        )
         program = torch.export.export(adapter, (hidden,), kwargs=kwargs, strict=False)
         targets = [
             str(node.target)
