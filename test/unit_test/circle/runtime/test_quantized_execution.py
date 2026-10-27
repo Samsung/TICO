@@ -179,6 +179,228 @@ class QuantizationRoundingTest(unittest.TestCase):
         )
 
 
+class QuantizationSaturationTest(unittest.TestCase):
+    _types = (
+        ("INT4", np.int8, -8, 7),
+        ("UINT4", np.uint8, 0, 15),
+        *(
+            (name, dtype, int(np.iinfo(dtype).min), int(np.iinfo(dtype).max))
+            for name, dtype in (
+                ("INT8", np.int8),
+                ("UINT8", np.uint8),
+                ("INT16", np.int16),
+                ("UINT16", np.uint16),
+                ("INT32", np.int32),
+                ("UINT32", np.uint32),
+                ("INT64", np.int64),
+                ("UINT64", np.uint64),
+            )
+        ),
+    )
+
+    def _runtime(self, builder):
+        document = CircleDocument.from_bytes(builder.build().to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        return CircleReferenceRuntime(document)
+
+    def _assert_output(self, runtime, value, expected, mode):
+        original = value.copy()
+        value.setflags(write=False)
+        qparams = tuple(tensor.quantization for tensor in runtime.program.tensors)
+        for _ in range(2):
+            output = runtime.run((value,), mode=mode).outputs[0]
+            np.testing.assert_array_equal(output, expected)
+            self.assertEqual(output.shape, expected.shape)
+            self.assertEqual(output.dtype, expected.dtype)
+            self.assertFalse(np.shares_memory(output, value))
+            np.testing.assert_array_equal(value, original)
+            self.assertFalse(value.flags.writeable)
+            self.assertEqual(
+                tuple(tensor.quantization for tensor in runtime.program.tensors),
+                qparams,
+            )
+
+    def _assert_quantize(
+        self, name, dtype, value, expected, *, scales=(1.0,), zero_points=(0,), axis=0
+    ):
+        builder = CircleModelBuilder()
+        x = builder.input("x", value.shape)
+        output = builder.activation("q", value.shape, dtype=dtype)
+        tensor = builder.subgraph.tensors[output]
+        tensor.type = getattr(circle.TensorType.TensorType, name)
+        tensor.quantization = builder.quantization(
+            scales, zero_points, quantized_dimension=axis
+        )
+        builder.operator("QUANTIZE", [x], [output], options=_options("QuantizeOptions"))
+        builder.set_outputs(output)
+        runtime = self._runtime(builder)
+        expected = np.asarray(expected, dtype=dtype)
+        shape = [1] * value.ndim
+        if len(scales) > 1:
+            shape[axis] = len(scales)
+        scale = np.asarray(scales, dtype=np.float32).reshape(shape)
+        zero_point = np.asarray(zero_points, dtype=np.float32).reshape(shape)
+        expected_fake = (expected.astype(np.float32) - zero_point) * scale
+        for mode, target in (
+            (ExecutionMode.NATIVE, expected),
+            (ExecutionMode.FAKE_QUANTIZE, expected_fake),
+        ):
+            with self.subTest(mode=mode):
+                self._assert_output(runtime, value, target, mode)
+
+    def test_saturation_for_every_integer_storage_type(self):
+        for name, dtype, minimum, maximum in self._types:
+            with self.subTest(dtype=name):
+                value = np.array(
+                    [-np.inf, -(2.0**80), -1, 0, 1, 2.0**80, np.inf],
+                    dtype=np.float32,
+                )
+                self._assert_quantize(
+                    name,
+                    dtype,
+                    value,
+                    [minimum, minimum, max(minimum, -1), 0, 1, maximum, maximum],
+                )
+
+    def test_wide_integer_upper_boundary_and_adjacent_float32_values(self):
+        for name, dtype, _, maximum in self._types[6:]:
+            with self.subTest(dtype=name):
+                boundary = np.float32(maximum)
+                below = np.nextafter(boundary, np.float32(0))
+                above = np.nextafter(boundary, np.float32(np.inf))
+                value = np.array([below, boundary, above], dtype=np.float32)
+                self._assert_quantize(
+                    name, dtype, value, [int(below), maximum, maximum]
+                )
+
+    def test_nonunit_per_channel_scales_and_zero_points(self):
+        for name, dtype, minimum, maximum in self._types:
+            with self.subTest(dtype=name):
+                zero_points = [3, 4] if name.startswith("U") else [3, -4]
+                value = np.array([[2.0**80, -(2.0**80)], [0.25, 1]], dtype=np.float32)
+                self._assert_quantize(
+                    name,
+                    dtype,
+                    value,
+                    [[maximum, minimum], [4, zero_points[1] + 1]],
+                    scales=[0.5, 2],
+                    zero_points=zero_points,
+                    axis=1,
+                )
+
+    def test_float32_qparam_arithmetic_is_preserved(self):
+        # FLOAT32(0.7) / FLOAT32(0.2) rounds to exactly 3.5. Computing this
+        # ratio in FLOAT64 instead would put it below the halfway boundary.
+        value = np.array([0.7, -0.7], dtype=np.float32)
+        self._assert_quantize(
+            "INT32",
+            np.int32,
+            value,
+            [7, -8],
+            scales=[0.2, 0.2],
+            zero_points=[3, -4],
+        )
+
+    def test_scalar_empty_and_noncontiguous_inputs(self):
+        for name, dtype, minimum, maximum in self._types[6:]:
+            for value, expected in (
+                (np.array(np.inf, dtype=np.float32), np.array(maximum, dtype=dtype)),
+                (np.empty((0, 2), dtype=np.float32), np.empty((0, 2), dtype=dtype)),
+                (
+                    np.array([[np.inf, 1], [-np.inf, 0]], dtype=np.float32).T,
+                    np.array([[maximum, minimum], [1, 0]], dtype=dtype),
+                ),
+            ):
+                with self.subTest(dtype=name, shape=value.shape):
+                    self._assert_quantize(name, dtype, value, expected)
+
+    def test_nan_retains_numpy_float32_to_integer_cast_behavior(self):
+        for name, dtype, minimum, maximum in self._types:
+            matrix = np.tile([np.nan, 1, np.inf, -np.inf], 8).astype(np.float32)
+            matrix = matrix.reshape(4, 8)
+            for value in (
+                np.array(np.nan, dtype=np.float32),
+                np.array([np.nan], dtype=np.float32),
+                matrix,
+                matrix.T,
+                matrix[:, ::2],
+            ):
+                with self.subTest(dtype=name, shape=value.shape, strides=value.strides):
+                    # NumPy's NaN cast can depend on the full array's layout.
+                    # Compare with the original full-array clip/cast operation.
+                    with np.errstate(invalid="ignore"):
+                        expected = np.asarray(
+                            np.clip(value, minimum, maximum).astype(dtype)
+                        )
+                    expected[value >= maximum] = maximum
+                    self._assert_quantize(name, dtype, value, expected)
+
+    def test_requantization_uses_the_output_integer_endpoints(self):
+        for name, dtype, minimum, maximum in self._types[6:]:
+            with self.subTest(dtype=name):
+                value = np.array([maximum, minimum, 1], dtype=dtype)
+                builder = CircleModelBuilder()
+                x = builder.input("x", value.shape, dtype=dtype)
+                builder.subgraph.tensors[x].quantization = builder.quantization(
+                    [2], [0]
+                )
+                output = builder.activation(
+                    "q",
+                    value.shape,
+                    dtype=dtype,
+                    quantization=builder.quantization([0.5], [3]),
+                )
+                builder.operator(
+                    "QUANTIZE", [x], [output], options=_options("QuantizeOptions")
+                )
+                builder.set_outputs(output)
+                runtime = self._runtime(builder)
+                expected = np.array(
+                    [maximum, 3 if minimum == 0 else minimum, 7], dtype=dtype
+                )
+                self._assert_output(runtime, value, expected, ExecutionMode.NATIVE)
+                real_input = value.astype(np.float32) * np.float32(2)
+                expected_fake = (
+                    expected.astype(np.float32) - np.float32(3)
+                ) * np.float32(0.5)
+                self._assert_output(
+                    runtime, real_input, expected_fake, ExecutionMode.FAKE_QUANTIZE
+                )
+
+    def test_quantized_pad_uses_wide_zero_codes_and_keeps_input_codes(self):
+        for name, dtype, minimum, maximum in self._types[6:]:
+            with self.subTest(dtype=name):
+                zero_point = min(maximum, 2**63 - 1)
+                # UINT64 zero points are serialized as INT64. Its FLOAT32 qparam
+                # rounds this zero point to 2**63, which is still representable.
+                zero_code = 2**63 if name == "UINT64" else maximum
+                value = np.array([maximum, minimum], dtype=dtype)
+                builder = CircleModelBuilder()
+                x = builder.input("x", value.shape, dtype=dtype)
+                qparams = builder.quantization([1], [zero_point])
+                builder.subgraph.tensors[x].quantization = qparams
+                paddings = builder.const_i32("paddings", [[1, 1]])
+                output = builder.activation(
+                    "padded", [4], dtype=dtype, quantization=qparams
+                )
+                builder.operator(
+                    "PAD", [x, paddings], [output], options=_options("PadOptions")
+                )
+                builder.set_outputs(output)
+                runtime = self._runtime(builder)
+                expected = np.array(
+                    [zero_code, maximum, minimum, zero_code], dtype=dtype
+                )
+                self._assert_output(runtime, value, expected, ExecutionMode.NATIVE)
+                real_input = value.astype(np.float32) - np.float32(zero_point)
+                expected_fake = np.array(
+                    [0, real_input[0], real_input[1], 0], dtype=np.float32
+                )
+                self._assert_output(
+                    runtime, real_input, expected_fake, ExecutionMode.FAKE_QUANTIZE
+                )
+
+
 class QuantizeDequantizeKernelTest(unittest.TestCase):
     def _quantize_model(
         self, tensor_type: int, scale: float, zero_point: int, count: int
