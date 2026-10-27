@@ -115,6 +115,14 @@ class RepeatTwiceHThreeTimesW(TestModuleBase):
         return (torch.randn(1, 2, 3, 3),), {}
 
 
+class RepeatThreeAxes(TestModuleBase):
+    def forward(self, x):
+        return x.repeat(2, 3, 4)
+
+    def get_example_inputs(self):
+        return (torch.arange(8, dtype=torch.float32).reshape(2, 2, 2),), {}
+
+
 @tag.skip(reason="Not Support Operator")
 class RepeatLongerRepeats(TestModuleBase):
     def __init__(self):
