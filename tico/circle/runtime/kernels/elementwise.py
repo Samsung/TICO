@@ -57,8 +57,29 @@ def _divide(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
 
     if lhs.dtype.kind == "f":
         return np.divide(lhs, rhs)
-    quotient = np.trunc(np.divide(lhs.astype(np.float64), rhs.astype(np.float64)))
-    return quotient.astype(lhs.dtype)
+    left, right = np.broadcast_arrays(lhs, rhs)
+    valid = right != 0
+    if lhs.dtype.kind == "i":
+        valid &= ~((left == np.iinfo(lhs.dtype).min) & (right == -1))
+
+    if np.all(valid):
+        quotient = np.empty_like(left)
+    else:
+        # Preserve the existing exceptional casts in their original array
+        # shape/layout; casting a compressed subset can change NaN results.
+        quotient = np.asarray(
+            np.trunc(np.divide(lhs.astype(np.float64), rhs.astype(np.float64))).astype(
+                lhs.dtype
+            )
+        )
+    remainder = np.zeros_like(left)
+    np.divmod(left, right, out=(quotient, remainder), where=valid)
+    if lhs.dtype.kind == "i":
+        # Integer divmod rounds down. Only negative, non-integral quotients
+        # need one step toward zero; this also avoids abs(INT_MIN) overflow.
+        correct = valid & ((left < 0) != (right < 0)) & (remainder != 0)
+        quotient[correct] += 1
+    return quotient
 
 
 def _pow(ctx: KernelContext) -> tuple[np.ndarray, ...]:

@@ -728,6 +728,10 @@ FLOAT32 activations are supported for every operator below; integer dtypes are
 supported where TFLite defines integer semantics and the operator is not a quantized
 arithmetic operator (see the next section).
 
+Integer `DIV` preserves the full input precision, including INT64 and UINT64, and
+truncates valid quotients toward zero. Division by zero and signed minimum divided
+by `-1` retain their existing NumPy float-to-integer cast behavior.
+
 Legacy `SELECT` requires equal data shapes and accepts a scalar condition, an
 element-wise condition with the same shape, or a rank-1 condition selecting slices
 along the first dimension. Mixed scalar representations with one element in every

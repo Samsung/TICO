@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 from circle_schema import circle
+from tico.circle.document import CircleDocument
 from tico.circle.runtime import (
     CircleReferenceRuntime,
     CircleRuntimeValidationError,
@@ -147,6 +148,175 @@ class ArithmeticKernelTest(unittest.TestCase):
         rhs = np.array([3.0], dtype=np.float32)
         np.testing.assert_array_equal(run_binary("MAXIMUM", lhs, rhs), [3.0, 5.0, 3.0])
         np.testing.assert_array_equal(run_binary("MINIMUM", lhs, rhs), [1.0, 3.0, -2.0])
+
+
+class IntegerDivisionKernelTest(unittest.TestCase):
+    def _runtime(self, lhs, rhs, *, activation=0):
+        builder = CircleModelBuilder()
+        x = builder.input("lhs", lhs.shape, dtype=lhs.dtype)
+        y = builder.input("rhs", rhs.shape, dtype=rhs.dtype)
+        shape = np.broadcast_shapes(lhs.shape, rhs.shape)
+        out = builder.activation("out", shape, dtype=lhs.dtype)
+        builder.operator(
+            "DIV",
+            [x, y],
+            [out],
+            options=_options("DivOptions", fusedActivationFunction=activation),
+        )
+        builder.set_outputs(out)
+        document = CircleDocument.from_bytes(builder.build().to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        return CircleReferenceRuntime(document)
+
+    def _assert_division(self, lhs, rhs, expected=None, *, activation=0):
+        if expected is None:
+            left, right = np.broadcast_arrays(lhs, rhs)
+            # Python integers retain all bits; abs division supplies truncation
+            # toward zero without any floating-point conversion.
+            expected = np.array(
+                [
+                    (abs(int(a)) // abs(int(b)))
+                    * (-1 if (int(a) < 0) != (int(b) < 0) else 1)
+                    for a, b in zip(left.flat, right.flat)
+                ],
+                dtype=lhs.dtype,
+            ).reshape(left.shape)
+        original_lhs, original_rhs = lhs.copy(), rhs.copy()
+        runtime = self._runtime(lhs, rhs, activation=activation)
+        for _ in range(2):
+            result = runtime.run((lhs, rhs)).outputs[0]
+            self.assertEqual(result.dtype, lhs.dtype)
+            self.assertEqual(result.shape, np.broadcast_shapes(lhs.shape, rhs.shape))
+            np.testing.assert_array_equal(result, expected)
+            np.testing.assert_array_equal(lhs, original_lhs)
+            np.testing.assert_array_equal(rhs, original_rhs)
+
+    def test_int64_identity_preserves_every_bit(self):
+        lhs = np.array([2**53 + 1, -(2**53 + 1), 2**63 - 1, -(2**63)], np.int64)
+        self._assert_division(lhs, np.ones_like(lhs))
+
+    def test_int64_nonunit_division_truncates_all_signs(self):
+        maximum, minimum = 2**63 - 1, -(2**63)
+        lhs = np.array(
+            [maximum, -maximum, maximum, -maximum, minimum, minimum], np.int64
+        )
+        rhs = np.array([3, 3, -3, -3, 3, -3], np.int64)
+        self._assert_division(lhs, rhs)
+
+    def test_uint64_identity_and_nonunit_divisors(self):
+        maximum = 2**64 - 1
+        lhs = np.array([2**53 + 1, maximum, maximum, maximum, maximum], np.uint64)
+        rhs = np.array([1, 1, 3, 5, maximum], np.uint64)
+        self._assert_division(lhs, rhs)
+
+    def test_all_integer_dtypes_keep_exact_normal_quotients(self):
+        for dtype in (
+            np.int8,
+            np.int16,
+            np.int32,
+            np.int64,
+            np.uint8,
+            np.uint16,
+            np.uint32,
+            np.uint64,
+        ):
+            with self.subTest(dtype=dtype):
+                info = np.iinfo(dtype)
+                lhs = np.array([info.min, info.min + 1, info.max, 7], dtype=dtype)
+                rhs = np.array([2, 2, 3, 2], dtype=dtype)
+                self._assert_division(lhs, rhs)
+
+    def test_broadcasting_and_noncontiguous_inputs(self):
+        for dtype in (np.int64, np.uint64):
+            with self.subTest(dtype=dtype):
+                last = -(2**53 + 3) if dtype == np.int64 else 2**53 + 3
+                lhs = np.array([[2**53 + 1, 0], [last, 0]], dtype=dtype)[:, :1]
+                rhs = np.array([1, -2, 3] if dtype == np.int64 else [1, 2, 3], dtype)
+                self._assert_division(lhs, rhs)
+
+    def test_scalar_operands_and_empty_shapes(self):
+        for dtype in (np.int64, np.uint64):
+            cases = (
+                (np.array(2**53 + 1, dtype), np.array(1, dtype)),
+                (np.array(2**53 + 1, dtype), np.array([1, 2, 3], dtype)),
+                (np.array([2**53 + 1, 2**53 + 3], dtype), np.array(3, dtype)),
+                (np.empty((0, 3), dtype), np.ones((1, 3), dtype)),
+            )
+            for lhs, rhs in cases:
+                with self.subTest(dtype=dtype, lhs=lhs.shape, rhs=rhs.shape):
+                    self._assert_division(lhs, rhs)
+
+    def test_fused_activations_use_integer_quotients(self):
+        lhs = np.array([2**63 - 1, -(2**63), 17, -17], np.int64)
+        rhs = np.array([1, 1, 3, 3], np.int64)
+        for activation, expected in (
+            (1, [2**63 - 1, 0, 5, 0]),
+            (2, [1, -1, 1, -1]),
+            (3, [6, 0, 5, 0]),
+        ):
+            with self.subTest(activation=activation):
+                self._assert_division(lhs, rhs, expected, activation=activation)
+
+    def test_zero_divisors_preserve_legacy_cast_results(self):
+        for dtype in (
+            np.int8,
+            np.int16,
+            np.int32,
+            np.int64,
+            np.uint8,
+            np.uint16,
+            np.uint32,
+            np.uint64,
+        ):
+            maximum = np.iinfo(dtype).max
+            values = np.array([0, 1, 2, maximum], dtype=dtype)
+            cases = (
+                (np.array(0, dtype), np.array(0, dtype)),
+                (values[:2], np.zeros(2, dtype)),
+                (values, np.zeros(4, dtype)),
+                (values[:, None], np.zeros((1, 4), dtype)),
+                (np.asfortranarray(np.tile(values, (3, 1))), np.zeros((3, 4), dtype)),
+            )
+            for lhs, rhs in cases:
+                with self.subTest(dtype=dtype, lhs=lhs.shape, rhs=rhs.shape):
+                    # Invalid float-to-integer casts depend on dtype and array
+                    # layout. Preserve the existing whole-array cast contract.
+                    with np.errstate(all="ignore"):
+                        expected = np.trunc(
+                            np.divide(lhs.astype(np.float64), rhs.astype(np.float64))
+                        ).astype(dtype)
+                    self._assert_division(lhs, rhs, expected)
+
+    def test_signed_overflow_preserves_legacy_result(self):
+        for dtype in (np.int8, np.int16, np.int32, np.int64):
+            with self.subTest(dtype=dtype):
+                minimum = int(np.iinfo(dtype).min)
+                lhs = np.array([minimum, minimum, 7, -7], dtype=dtype)
+                rhs = np.array([-1, 1, 2, 2], dtype=dtype)
+                self._assert_division(lhs, rhs, [minimum, minimum, 3, -3])
+
+    def test_mixed_zero_and_valid_divisors_keep_exact_valid_lanes(self):
+        for dtype in (np.int32, np.int64, np.uint32, np.uint64):
+            with self.subTest(dtype=dtype):
+                maximum = int(np.iinfo(dtype).max)
+                lhs = np.array([0, 1, 2, maximum, maximum], dtype=dtype)
+                rhs = np.array([0, 0, 1, 3, 1], dtype=dtype)
+                with np.errstate(all="ignore"):
+                    expected = np.trunc(
+                        np.divide(lhs.astype(np.float64), rhs.astype(np.float64))
+                    ).astype(dtype)
+                expected[2:] = [2, maximum // 3, maximum]
+                self._assert_division(lhs, rhs, expected)
+
+    def test_float_division_keeps_fractional_and_special_values(self):
+        for dtype in (np.float16, np.float32):
+            lhs = np.array([7, -7, 0, 1, -1, np.inf, np.nan, -0.0], dtype)
+            rhs = np.array([2, 2, 0, 0, 0, 2, 1, 1], dtype)
+            with self.subTest(dtype=dtype), np.errstate(all="ignore"):
+                expected = np.divide(lhs, rhs)
+                self._assert_division(lhs, rhs, expected)
+                result = self._runtime(lhs, rhs).run((lhs, rhs)).outputs[0]
+                np.testing.assert_array_equal(np.signbit(result), np.signbit(expected))
 
 
 class ComparisonAndLogicalKernelTest(unittest.TestCase):
