@@ -112,6 +112,14 @@ class AffineObserverBase(ObserverBase):
     def has_qparams(self) -> bool:
         return self._cached_scale.numel() != 0
 
+    def _qparam_bounds(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Select calibration bounds only when no external grid is locked.
+
+        Range-based observers customize this hook rather than qparam dispatch,
+        so their calibration policy cannot require statistics for a locked grid.
+        """
+        return self.min_val, self.max_val
+
     def compute_qparams(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return locked qparams or compute them from collected statistics."""
         if self._qparams_locked:
@@ -121,10 +129,9 @@ class AffineObserverBase(ObserverBase):
                 )
             return self._cached_scale, self._cached_zp
 
-        assert isinstance(self.min_val, torch.Tensor)
-        assert isinstance(self.max_val, torch.Tensor)
+        min_val, max_val = self._qparam_bounds()
         qmin, qmax = self.dtype.qmin, self.dtype.qmax
-        rng = self.max_val - self.min_val
+        rng = max_val - min_val
         # The floor bounds the final scale, not the observed range, so a
         # degenerate (all-zero) channel quantizes with the floor scale instead
         # of floor / qmax. The value matches the ONE quantizer: a dead weight
@@ -134,14 +141,14 @@ class AffineObserverBase(ObserverBase):
         eps = 1e-8
 
         if self.qscheme.is_symmetric():
-            max_abs = torch.maximum(self.max_val.abs(), self.min_val.abs())
+            max_abs = torch.maximum(max_val.abs(), min_val.abs())
             scale = torch.clamp(max_abs / qmax, min=eps)
             zp = torch.zeros_like(scale, dtype=torch.int)
             self._cached_scale, self._cached_zp = scale, zp
             return scale, zp
 
         if (self.channel_axis is None) and torch.all(rng.abs() < 1e-8):
-            C = self.min_val
+            C = min_val
             if torch.allclose(C, torch.zeros_like(C)):
                 scale = torch.ones_like(C)
                 zp = torch.zeros_like(C, dtype=torch.int)
@@ -153,13 +160,11 @@ class AffineObserverBase(ObserverBase):
                 zp = torch.full_like(C, qmax, dtype=torch.int)
         else:
             # Force the range to include 0
-            rng = torch.where(0 < self.min_val, self.max_val, rng)
-            rng = torch.where(0 > self.max_val, -self.min_val, rng)
+            rng = torch.where(0 < min_val, max_val, rng)
+            rng = torch.where(0 > max_val, -min_val, rng)
 
             scale = torch.clamp(rng / (qmax - qmin), min=eps)
-            zp = (
-                torch.round(qmin - self.min_val / scale).clamp(qmin, qmax).to(torch.int)
-            )
+            zp = torch.round(qmin - min_val / scale).clamp(qmin, qmax).to(torch.int)
 
         self._cached_scale, self._cached_zp = scale, zp
         return scale, zp

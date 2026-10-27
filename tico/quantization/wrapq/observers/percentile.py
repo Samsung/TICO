@@ -269,23 +269,15 @@ class PercentileObserver(AffineObserverBase):
         maximum = torch.maximum(maximum, maximum.new_tensor(0.0))
         return minimum, maximum
 
-    def compute_qparams(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute affine qparams from percentile-clipped scalar bounds."""
+    def _qparam_bounds(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Select clipped bounds without replacing the observed extrema."""
         minimum, maximum = self._clipping_bounds()
         minimum = minimum.to(self.min_val.device, self.min_val.dtype)
         maximum = maximum.to(self.max_val.device, self.max_val.dtype)
         self.clip_min_val.copy_(minimum)
         self.clip_max_val.copy_(maximum)
 
-        observed_minimum = self.min_val.detach().clone()
-        observed_maximum = self.max_val.detach().clone()
-        self.min_val.copy_(minimum)
-        self.max_val.copy_(maximum)
-        try:
-            return super().compute_qparams()
-        finally:
-            self.min_val.copy_(observed_minimum)
-            self.max_val.copy_(observed_maximum)
+        return minimum, maximum
 
     def extra_repr(self) -> str:
         """Return percentile-specific settings for module summaries."""

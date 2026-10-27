@@ -16,11 +16,14 @@ import unittest
 
 import torch
 import torch.nn.functional as F
+from tico.quantization import convert, prepare
+from tico.quantization.config import affine, no_quant
 from tico.quantization.config.ptq import PTQConfig
 
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
@@ -83,3 +86,58 @@ class TestQuantLinear(unittest.TestCase):
         qcustom = QuantLinear(self.fp32, qcfg=cfg)
         self.assertEqual(qcustom.obs_act_in.dtype, DType.uint(4))
         self.assertEqual(qcustom.obs_act_out.dtype, DType.uint(4))
+
+    def test_locked_percentile_input_grid_survives_conversion(self):
+        """Conversion needs no local samples for a locked external grid."""
+        for calibrated_before_lock in (False, True):
+            with self.subTest(calibrated_before_lock=calibrated_before_lock):
+                linear = torch.nn.Linear(2, 2, bias=False).eval()
+                with torch.no_grad():
+                    linear.weight.copy_(torch.eye(2))
+                model = prepare(
+                    linear,
+                    PTQConfig(
+                        overrides={
+                            "act_in": affine(
+                                DType.uint(8), observer=PercentileObserver
+                            ),
+                            "act_out": no_quant(),
+                        }
+                    ),
+                )
+                observer = model.get_observer("act_in")
+                self.assertIsInstance(observer, PercentileObserver)
+                assert isinstance(observer, PercentileObserver)
+                if calibrated_before_lock:
+                    model(torch.tensor([[-2.0, 4.0]]))
+                    observer.compute_qparams()
+                sample_count = observer.sampled_value_count
+                clip_bounds = (
+                    observer.clip_min_val.clone(),
+                    observer.clip_max_val.clone(),
+                )
+                scale = torch.tensor(0.25)
+                zero_point = torch.tensor(3, dtype=torch.int)
+                observer.load_qparams(scale, zero_point, lock=True)
+                model(torch.tensor([[0.0, 100.0]]))
+
+                quantized = convert(model)
+
+                torch.testing.assert_close(
+                    observer.compute_qparams(), (scale, zero_point), rtol=0, atol=0
+                )
+                self.assertFalse(observer.enabled)
+                self.assertEqual(observer.sampled_value_count, sample_count)
+                torch.testing.assert_close(
+                    (observer.clip_min_val, observer.clip_max_val),
+                    clip_bounds,
+                    rtol=0,
+                    atol=0,
+                )
+                actual = quantized(torch.tensor([[-0.9, 0.3], [1.1, 64.0]]))
+                torch.testing.assert_close(
+                    actual,
+                    torch.tensor([[-0.75, 0.25], [1.0, 63.0]]),
+                    rtol=0,
+                    atol=0,
+                )
