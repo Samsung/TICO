@@ -329,6 +329,11 @@ def _cat_handler(node, logger):
         return
 
     if QPARAM_KEY not in node.meta:
+        if not is_width_direction_concat(node, cat_args):
+            raise NotYetSupportedError(
+                "Quantized concat inputs require a proven output quantization "
+                f"domain at {node.name}; cannot serialize an implicit float concat."
+            )
         return
 
     assert len(tensors) > 0

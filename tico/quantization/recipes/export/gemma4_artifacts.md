@@ -97,7 +97,7 @@ mismatched Concat qparams. Disabling fake quantization on an affine cache
 boundary is also rejected; use an explicit supported identity policy for a
 float path.
 
-With per-tensor UINT8/INT16 affine storage, `present_value` also supports MXINT8
+With per-tensor INT16 value storage, `present_value` also supports MXINT8
 on the sequence axis (`axis: -2`), using max shared exponents and nearest
 rounding. During cached decode, existing storage V values and raw current V
 are assembled before applying MX once to the full sequence in eager execution.
@@ -113,7 +113,9 @@ per-operand conversions, and persistent storage always retains S.
 
 Together with MXINT8 probabilities on the key axis (`axis: -1`), this supports
 MXINT8 × MXINT8 attention with an INT16 result and INT16 persistent cache.
-MX key computation and MX persistent cache remain unsupported. See the
+UINT8 value storage with MX computation, MX key computation, and MX persistent
+cache remain unsupported. Affine computation retains UINT8/INT16 cache support.
+See the
 [policy example](../../examples/configs/PTQ_OVERRIDE_POLICIES.md#gemma4-int16-cache-with-mx-attention)
 for observer settings. Eager fake-quantization and ExportedProgram parity can
 be checked on CPU, but the built-in Circle reference runtime currently lacks

@@ -150,8 +150,9 @@ see the [quantized Circle contract](../../../../docs/design.md#102-conversion-ti
 
 This MX compute path supports INT8 elements on the sequence axis with the
 default max shared-exponent and nearest-rounding policy, and per-tensor
-UINT8/INT16 affine storage. MX persistent storage and MX key computation remain
-unsupported. There are no independent `past_*` observer roles. Prefill-only
+INT16 value storage. UINT8 value storage with MX computation, MX persistent
+storage, and MX key computation remain unsupported. There are no independent
+`past_*` observer roles. Prefill-only
 calibration establishes storage and compute policies; positive cached decode
 counts optionally broaden activation-statistics coverage. The Circle reference
 runtime does not currently provide an MX value codec, so MX export and eager

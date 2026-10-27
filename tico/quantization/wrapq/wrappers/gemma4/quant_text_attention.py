@@ -651,9 +651,12 @@ class QuantGemma4TextAttention(QuantModuleBase):
             self._validate_frozen_observer(storage_observer)
             self._validate_compute_observer(compute_observer)
             if isinstance(compute_observer, MXObserver):
-                if isinstance(storage_observer, IdentityObserver):
+                if (
+                    isinstance(storage_observer, IdentityObserver)
+                    or storage_observer.dtype != INT16
+                ):
                     raise ValueError(
-                        "Gemma4 MX attention V requires per-tensor affine storage."
+                        "Gemma4 MX attention V requires per-tensor affine INT16 storage."
                     )
                 continue
             group = (storage_observer, compute_observer)

@@ -741,6 +741,42 @@ class ConcatAffineDomainTest(unittest.TestCase):
         self.assertEqual(left.meta[QPARAM_KEY].scale, [0.125])
         self.assertEqual(right.meta[QPARAM_KEY].scale, [0.5])
 
+    def test_quantized_inputs_without_a_proven_output_domain_are_rejected(self):
+        for right_dtype in ("uint8", "int16"):
+            with self.subTest(right_dtype=right_dtype):
+                program, concat, left, right = self._export("uint8")
+                right.meta[QPARAM_KEY] = _make_qparam(right_dtype, scale=0.5, zp=29)
+                del concat.meta[QPARAM_KEY]
+                original = concat.args[0]
+
+                with self.assertRaisesRegex(
+                    NotYetSupportedError, "proven output quantization domain"
+                ):
+                    InsertQuantizeOnDtypeMismatch().call(program)
+
+                self.assertEqual(concat.args[0], original)
+                self.assertEqual(left.meta[QPARAM_KEY].scale, [0.125])
+                self.assertNotIn(QPARAM_KEY, concat.meta)
+
+    def test_unquantized_concat_remains_unquantized(self):
+        program, concat, left, right = self._export()
+        for node in (concat, left, right):
+            del node.meta[QPARAM_KEY]
+
+        InsertQuantizeOnDtypeMismatch().call(program)
+
+        self.assertEqual(tuple(concat.args[0]), (left, right))
+        self.assertNotIn(QPARAM_KEY, concat.meta)
+
+    def test_width_exception_does_not_require_an_inferred_output_domain(self):
+        program, concat, left, right = self._export("uint8", width=True)
+        del concat.meta[QPARAM_KEY]
+
+        InsertQuantizeOnDtypeMismatch().call(program)
+
+        self.assertEqual(tuple(concat.args[0]), (left, right))
+        self.assertNotIn(QPARAM_KEY, concat.meta)
+
     def test_non_affine_or_missing_domains_do_not_gain_affine_bridges(self):
         for kind in ("per_channel", "mixed_mx", "missing"):
             with self.subTest(kind=kind):

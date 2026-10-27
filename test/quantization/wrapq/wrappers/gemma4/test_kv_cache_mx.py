@@ -333,6 +333,7 @@ class TestGemma4KVCacheMX(unittest.TestCase):
         for overrides in (
             {"new_v": mx("int8", axis=-2)},
             {"new_v": mx("int8", axis=-1)},
+            {"new_v": affine(DType.uint(8))},
             {"present_key": mx("int8", axis=-1)},
             {"present_value": mx("int8", axis=-1)},
             {"present_value": mx("fp4_e2m1", axis=-2)},
