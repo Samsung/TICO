@@ -24,10 +24,16 @@ from typing import Any
 import torch
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.graph import create_node
+from tico.utils.mx.dtypes import (
+    elem_format_from_mx_dtype,
+    is_mx_dtype,
+    normalize_mx_axis,
+)
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import quant_min_max, set_new_meta_val
@@ -46,6 +52,13 @@ from tico.utils.validate_args_kwargs import (
 def qparam_dtype(node: torch.fx.Node) -> str:
     assert QPARAM_KEY in node.meta
     return node.meta[QPARAM_KEY].dtype
+
+
+def _unsupported(node: torch.fx.Node, inp: torch.fx.Node) -> NotYetSupportedError:
+    return NotYetSupportedError(
+        f"Unsupported dtype: From {qparam_dtype(inp)} to {qparam_dtype(node)} "
+        f"at {node.name} ({node.target})"
+    )
 
 
 # Convert i16 qparam to u8 qparam
@@ -144,6 +157,75 @@ def _insert_quantize_op_after(node):
     quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
 
     return quantize
+
+
+def _insert_quantize_mx_op_after(node):
+    """Insert a logical MX quantize after ``node`` that carries ``node``'s MX qparam.
+
+    Circle tensor metadata only stores the MX dtype and the quantized dimension,
+    so the inserted ``circle_custom::quantize_mx`` uses the default
+    ``shared_exp_method="max"`` and ``round="nearest"``; these are the only
+    options the MX export path accepts when it folds Q-DQ pairs.
+    """
+    graph = node.graph
+    qparam: QuantParam = node.meta[QPARAM_KEY]
+    assert is_mx_dtype(qparam.dtype)
+    assert qparam.quantized_dimension is not None
+    elem_format = elem_format_from_mx_dtype(qparam.dtype)
+    axis = normalize_mx_axis(qparam.quantized_dimension, node.meta["val"].ndim)
+    qparam = copy.deepcopy(qparam)
+    qparam.quantized_dimension = axis
+    with graph.inserting_after(node):
+        quantize = create_node(
+            graph,
+            torch.ops.circle_custom.quantize_mx.default,
+            args=(node, elem_format, qparam.quantized_dimension),
+        )
+
+    node.replace_all_uses_with(quantize, propagate_meta=True)
+    quantize.replace_input_with(quantize, node)
+
+    quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
+
+    return quantize
+
+
+def _view_like_handler(node, inp, logger):
+    """Keep affine/MX conversions explicit and preserve existing MX blocks."""
+    in_qparam = inp.meta[QPARAM_KEY]
+    out_qparam = node.meta[QPARAM_KEY]
+    in_dtype = in_qparam.dtype
+    out_dtype = out_qparam.dtype
+
+    if is_mx_dtype(in_dtype) and is_mx_dtype(out_dtype):
+        # A view may move the block axis, but cannot regroup existing blocks.
+        mapped = remap_mx_qparam(in_qparam, node)
+        assert mapped is not None
+        assert out_qparam.quantized_dimension is not None
+        out_axis = normalize_mx_axis(
+            out_qparam.quantized_dimension, node.meta["val"].ndim
+        )
+        if mapped.dtype != out_dtype or mapped.quantized_dimension != out_axis:
+            _insert_quantize_mx_op_after(node)
+        node.meta[QPARAM_KEY] = mapped
+    elif in_dtype == out_dtype:
+        return
+    elif is_mx_dtype(in_dtype) and out_dtype in {"int16", "uint8"}:
+        # Convert before the view so it can use the affine layout contract.
+        _insert_quantize_op_before(node, inp)
+    elif in_dtype in {"int16", "uint8"} and is_mx_dtype(out_dtype):
+        # Assemble the affine view before establishing its new MX block domain.
+        _insert_quantize_mx_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(in_qparam)
+    elif in_dtype == "int16" and out_dtype == "uint8":
+        # Reduce the tensor size before the affine view, as before.
+        _insert_quantize_op_before(node, inp)
+    elif in_dtype == "uint8" and out_dtype == "int16":
+        _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = _i16_to_u8(out_qparam)
+    else:
+        raise _unsupported(node, inp)
+    logger.debug(f"Resolved quantization boundary at {node.name}.")
 
 
 def _linear_handler(node, logger):
@@ -278,6 +360,32 @@ def _bmm_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
+    if is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y)):
+        left, right, output = qparam_dtype(x), qparam_dtype(y), qparam_dtype(node)
+        # Do this before the output-equality return: matching the left dtype
+        # does not make a mixed MX/affine dot product valid.
+        supported = (
+            left == right == "mxint8" and output in {"mxint8", "int16"}
+        ) or left == right == output == "mxfp4"
+        if not supported:
+            raise NotYetSupportedError(
+                f"Unsupported dtype: bmm operands {left} x {right} -> {output} "
+                f"at {node.name}; unsupported MX matmul combination."
+            )
+        for operand, reduction_axis in ((x, -1), (y, -2)):
+            qparam = operand.meta[QPARAM_KEY]
+            rank = operand.meta["val"].ndim
+            if (
+                qparam.quantized_dimension is None
+                or normalize_mx_axis(qparam.quantized_dimension, rank)
+                != reduction_axis % rank
+            ):
+                raise NotYetSupportedError(
+                    "MX bmm operand blocks must follow the reduction dimension "
+                    f"at {operand.name}."
+                )
+        return
+
     if qparam_dtype(x) == qparam_dtype(node):
         return
 
@@ -307,24 +415,7 @@ def _permute_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(inp) == qparam_dtype(node):
-        return
-
-    if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "uint8":
-        # A new Quantize Op (s16 to u8) is inserted before (not after)
-        # permute Op to reduce tensor size ealier
-        quantize = _insert_quantize_op_before(node, inp)
-
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
-    elif qparam_dtype(inp) == "uint8" and qparam_dtype(node) == "int16":
-        quantize = _insert_quantize_op_after(node)
-
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
-        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
-    else:
-        raise NotYetSupportedError("Unsupported dtype")
+    _view_like_handler(node, inp, logger)
 
 
 def _reshape_handler(node, logger):
@@ -337,24 +428,7 @@ def _reshape_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(inp) == qparam_dtype(node):
-        return
-
-    if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "uint8":
-        # A new Quantize Op (s16 to u8) is inserted before (not after)
-        # reshape Op to reduce tensor size ealier
-        quantize = _insert_quantize_op_before(node, inp)
-
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
-    elif qparam_dtype(inp) == "uint8" and qparam_dtype(node) == "int16":
-        quantize = _insert_quantize_op_after(node)
-
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
-        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
-    else:
-        raise NotYetSupportedError("Unsupported dtype")
+    _view_like_handler(node, inp, logger)
 
 
 def _relu_handler(node, logger):
@@ -432,6 +506,15 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
     Comparing 1) and 2), the difference is that Reshape operation is conducted in uint8 or int16.
     We go with 1), which does Reshape in uint8, for faster execution. Note that Reshape Op does not
     change the value, so its dytpe does not affect accuracy.
+
+    Affine/MX Reshape and Permute boundaries run the view in the affine domain.
+    Existing MX views use the shared axis mapper and must preserve block membership.
+    A change of MX format or axis keeps an explicit Quantize after that view.
+
+    ```
+    Predecessor (mxint8) -> Quantize (int16) -> Reshape (int16) -> ...
+    Predecessor (int16)  -> Reshape (int16)  -> QuantizeMX (mxint8) -> ...
+    ```
     """
 
     def __init__(self):

@@ -319,3 +319,79 @@ class FoldQuantOpsTest(unittest.TestCase):
                 self.assertEqual(output.args[0], (producer, producer, quantize))
                 FoldQuantOps().call(ep)
                 self.assertEqual(output.args[0], (producer, producer, quantize))
+
+
+class MXLinearThenInt16Requant(torch.nn.Module):
+    """int16 residual stream, MX linear I/O, int16 requantization before the residual add.
+
+    This mirrors a PTQ decoder layer whose linear activations are MX while the
+    norms and the residual stream stay int16.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(64, 64, bias=False)
+
+    def forward(self, x):
+        x = torch.fake_quantize_per_tensor_affine(x, 0.01, 0, -32768, 32767)
+        residual = x
+        h = torch.ops.circle_custom.mx_fake_quantize(x, "int8", -1)
+        h = self.linear(h)
+        h = torch.ops.circle_custom.mx_fake_quantize(h, "int8", -1)
+        h = torch.fake_quantize_per_tensor_affine(h, 0.02, 0, -32768, 32767)
+        out = residual + h
+        return torch.fake_quantize_per_tensor_affine(out, 0.03, 0, -32768, 32767)
+
+    def get_example_inputs(self):
+        torch.manual_seed(0)
+        return (torch.randn(1, 8, 64),), {}
+
+
+class FoldQuantOpsMXRequantTest(unittest.TestCase):
+    def _fold(self):
+        m = MXLinearThenInt16Requant().eval()
+        args, kwargs = m.get_example_inputs()
+        ep = torch.export.export(m, args, kwargs)
+        DecomposeFakeQuantize().call(ep)
+        FoldQuantOps().call(ep)
+        nodes = {n.name: n for n in ep.graph.nodes}
+        return ep, nodes
+
+    def test_int16_requant_after_mx_linear_is_kept(self):
+        """The int16 Q after the MX linear output must survive as a requantize."""
+        ep, nodes = self._fold()
+        linear = next(
+            n for n in ep.graph.nodes if n.target == torch.ops.aten.linear.default
+        )
+        self.assertEqual(linear.meta[QPARAM_KEY].dtype, "mxint8")
+        add = next(n for n in ep.graph.nodes if n.target == torch.ops.aten.add.Tensor)
+        residual, h = add.args
+        # h: linear (mxint8) -> quantize_per_tensor (int16) -> add
+        self.assertEqual(
+            h.target, torch.ops.quantized_decomposed.quantize_per_tensor.default
+        )
+        self.assertIs(h.args[0], linear)
+        self.assertEqual(h.meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(h.meta[QPARAM_KEY].scale, [0.02])
+        self.assertEqual(add.meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.dequantize_mx.default]), 0
+        )
+
+    def test_residual_branch_keeps_the_int16_tensor(self):
+        """The residual must consume the int16 input, not the MX fake-quant output."""
+        ep, nodes = self._fold()
+        add = next(n for n in ep.graph.nodes if n.target == torch.ops.aten.add.Tensor)
+        residual, _ = add.args
+        self.assertEqual(residual.op, "placeholder")
+        self.assertEqual(residual.meta[QPARAM_KEY].dtype, "int16")
+        # The MX quantize of the linear input is a separate requantize node fed by
+        # the same int16 placeholder.
+        q_mx = [
+            n
+            for n in ep.graph.nodes
+            if n.target == torch.ops.circle_custom.quantize_mx.default
+        ]
+        self.assertEqual(len(q_mx), 1)
+        self.assertIs(q_mx[0].args[0], residual)
+        self.assertEqual(q_mx[0].meta[QPARAM_KEY].dtype, "mxint8")
