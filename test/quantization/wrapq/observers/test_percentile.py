@@ -160,6 +160,34 @@ class PercentileObserverTest(unittest.TestCase):
         self.assertTrue(torch.isinf(observer.clip_max_val))
         self.assertFalse(observer.has_qparams)
 
+    def test_unlocked_loaded_qparams_are_recomputed_from_percentiles(self) -> None:
+        """Only locked external grids bypass percentile calibration."""
+        observer = self._uint8(percentile=80.0, max_samples=64)
+        observer.load_qparams(torch.tensor(0.25), torch.tensor(3), lock=False)
+        observer.collect(torch.tensor([0.0, 1.0, 2.0, 3.0, 100.0]))
+
+        scale, zero_point = observer.compute_qparams()
+
+        self.assertAlmostEqual(float(scale), 22.4 / 255.0)
+        self.assertEqual(int(zero_point), 0)
+        self.assertEqual(float(observer.min_val), 0.0)
+        self.assertEqual(float(observer.max_val), 100.0)
+        torch.testing.assert_close(
+            observer.fake_quant(torch.tensor([-1.0, 100.0])),
+            torch.tensor([0.0, 22.4]),
+            rtol=0,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(observer.compute_qparams(), (scale, zero_point))
+
+    def test_uncalibrated_unlocked_observer_is_rejected(self) -> None:
+        """An unlocked external grid does not replace missing statistics."""
+        observer = self._uint8()
+        observer.load_qparams(torch.tensor(0.25), torch.tensor(3), lock=False)
+
+        with self.assertRaisesRegex(RuntimeError, "No calibration values"):
+            observer.compute_qparams()
+
     def test_per_channel_configuration_is_rejected(self) -> None:
         """Avoid silently allocating one percentile reservoir per channel."""
         with self.assertRaisesRegex(ValueError, "per-tensor"):

@@ -45,6 +45,14 @@ Replace wrapped modules with their quantized counterparts using fixed quantizati
 
 This approach minimizes model perturbation and avoids retraining.
 
+Affine observers accept external grids through `load_qparams(scale, zp, lock=True)`.
+Locked grids survive calibration and conversion without requiring local samples,
+including for `PercentileObserver`. The affine base owns this dispatch; range-based
+observers customize `_qparam_bounds()` to select their calibration interval only
+when unlocked. Percentile clipping preserves the exact observed min/max separately
+from its clipping bounds. Loading with `lock=False` still requires calibration and
+recomputes qparams from those statistics.
+
 ---
 
 ## 3. Wrapper Design
