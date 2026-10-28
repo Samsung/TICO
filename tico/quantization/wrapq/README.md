@@ -96,9 +96,6 @@ though it contributes no numerical statistics. Locked grids are validated agains
 that shape before it is recorded. Empty uncalibrated tensors still cannot create
 qparams or establish calibration readiness.
 
-The [frozen-state report](../../../docs/archive/wrapq-frozen-state-design-investigation-20261027.md)
-records the ownership rationale, migration decisions and validation evidence.
-
 Affine observers accept external grids through `load_qparams(scale, zp, lock=True)`.
 Locked grids survive calibration and conversion without requiring local samples,
 including for `PercentileObserver`. The affine base owns this dispatch; range-based
