@@ -621,9 +621,12 @@ op [QPARAM=A] -> Q(B) -> DQ(B)    =>    op [QPARAM=A] -> Quantize [QPARAM=B]
 ```
 
 Scale, zero-point, dtype, and MX element format or axis can distinguish domains.
-Supported view chains, per-tensor split/getitem outputs, and same-domain
-concatenations retain proven source domains so folding can distinguish redundant
-annotation from requantization. Propagation preserves established producer and
+Supported view chains, per-tensor split/getitem outputs, zero padding in a
+per-tensor affine domain, and same-domain concatenations retain proven source
+domains so folding can distinguish redundant annotation from requantization.
+Zero PAD preserves its input domain; a different requested output grid requires
+an explicit requantization boundary, since native PAD copies interior integer
+codes. Propagation preserves established producer and
 consumer domains, and a private quantizer with a proven source domain cannot be
 retargeted to a later consumer's grid: sequential rounding and saturation remain
 observable even when storage dtypes match.

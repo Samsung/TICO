@@ -57,9 +57,9 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
     ``FoldQuantOps`` runs before ``PropagateQParamForward``.  A
     requantization after a slice/view chain must therefore discover
     the already-folded producer qparams by walking through the view
-    chain, including concatenations whose inputs share one domain. Otherwise
-    the target Q-DQ pair can be folded into RESHAPE and the required Quantize
-    operation disappears.
+    chain, including zero padding and concatenations whose inputs share one
+    domain. Otherwise the target Q-DQ pair can be folded into a layout output
+    and the required Quantize operation disappears.
 
     MX views must preserve the shared-exponent blocks. Affine per-channel
     propagation is not handled here.
@@ -120,10 +120,14 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
         source_qparam.dtype
     ):
         return False
-    if not is_mx_dtype(source_qparam.dtype) and any(
-        view.target == torch.ops.aten.constant_pad_nd.default for view in chain
-    ):
-        return False
+    if not is_mx_dtype(source_qparam.dtype):
+        for view in chain:
+            if view.target == torch.ops.aten.constant_pad_nd.default:
+                value = view.kwargs.get(
+                    "value", view.args[2] if len(view.args) > 2 else 0
+                )
+                if value != 0:
+                    return False
 
     for view in reversed(chain):
         if is_mx_dtype(source_qparam.dtype):
