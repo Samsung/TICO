@@ -236,6 +236,8 @@ class TestQuantFairseqMHA(unittest.TestCase):
         for _, obs in attn.named_observers():
             self.assertTrue(getattr(obs, "enabled", False))
 
+        q, _, _ = self._make_inputs()
+        attn(q, None, None)
         attn.freeze_qparams()
         self.assertEqual(attn._mode, Mode.QUANT)
         for _, obs in attn.named_observers():
@@ -244,6 +246,24 @@ class TestQuantFairseqMHA(unittest.TestCase):
         q, _, _ = self._make_inputs()
         out, _ = attn(q, None, None)
         self.assertEqual(out.shape, (self.T, self.B, self.E))
+
+    def test_uncalibrated_optional_masks_reject_before_attention(self):
+        attn = QuantFairseqMultiheadAttention(
+            DummySelfAttn(self.E, self.H),
+            qcfg=self.qcfg,
+            fp_name="mha",
+            use_static_causal=False,
+        )
+        q, _, _ = self._make_inputs()
+        attn.enable_calibration()
+        attn(q, None, None)
+        attn.freeze_qparams()
+        output, _ = attn(q, None, None)
+        self.assertTrue(torch.isfinite(output).all())
+        with self.assertRaisesRegex(RuntimeError, "capability 'attention_mask'"):
+            attn(q, None, None, attn_mask=torch.zeros(self.T, self.T))
+        with self.assertRaisesRegex(RuntimeError, "capability 'key_padding_mask'"):
+            attn(q, None, None, key_padding_mask=torch.zeros(self.B, self.T))
 
     # 8) Observer enumeration and direct lookup
     def test_observer_lookup_and_uniqueness(self):

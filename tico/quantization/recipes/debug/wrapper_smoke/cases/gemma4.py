@@ -1179,8 +1179,7 @@ class Gemma4SharedKVBaseCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Freeze the external producer boundary before converting its consumer."""
         for observer in self._shared_attention(prepared).cache_storage_observers():
-            observer.compute_qparams()
-            observer.enabled = False
+            observer.install_candidate(observer.derive_candidate())
         return super().convert_model(prepared, cfg)
 
 
@@ -1313,8 +1312,7 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         """Freeze the smoke-owned producer observer before quantized execution."""
         observer = getattr(self, "_per_layer_input_observer", None)
         if observer is not None:
-            observer.compute_qparams()
-            observer.enabled = False
+            observer.install_candidate(observer.derive_candidate())
         return super().convert_model(prepared, cfg)
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:

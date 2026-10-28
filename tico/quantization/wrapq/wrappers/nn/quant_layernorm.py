@@ -84,19 +84,18 @@ class QuantLayerNorm(QuantModuleBase):
         self.obs_affine_add = None
         if self.module.elementwise_affine:
             if self.module.weight is not None:
-                self.obs_weight = self._make_obs("weight")
+                self.obs_weight = self._make_per_tensor_obs("weight")
             if self.module.bias is not None:
-                self.obs_bias = self._make_obs("bias")
-            # Per-op observers for (n * w) and (+ b)
-            self.obs_affine_mul = self._make_obs("affine_mul")
-            self.obs_affine_add = self._make_obs("affine_add")
+                self.obs_bias = self._make_per_tensor_obs("bias")
+            if self.module.weight is not None:
+                self.obs_affine_mul = self._make_obs("affine_mul")
+            if self.module.bias is not None:
+                self.obs_affine_add = self._make_obs("affine_add")
 
-    def enable_calibration(self) -> None:
+    def _prepare_calibration(self) -> None:
         """
-        Switch to CALIB mode and collect *fixed* ranges for affine params
-        immediately, since they do not change across inputs.
+        Collect fixed affine parameters after the common calibration reset.
         """
-        super().enable_calibration()
         if self.module.elementwise_affine:
             if self.obs_weight is not None and self.module.weight is not None:
                 self.obs_weight.collect(self.module.weight)

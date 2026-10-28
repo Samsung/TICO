@@ -19,7 +19,10 @@ from typing import Any
 import torch
 
 import tico
-from tico.quantization.wrapq.utils.static_export import prepared_static_export
+from tico.quantization.wrapq.utils.static_export import (
+    prepared_static_export,
+    validate_export_execution,
+)
 from tico.utils.utils import SuppressWarning
 
 
@@ -33,6 +36,7 @@ def convert_and_save_circle(
     strict: bool = False,
 ) -> None:
     """Convert one prepared export stage to Circle and save it."""
+    validate_export_execution(module, example_inputs, kwargs=kwargs)
     print(f"Saving {save_path.name} to {save_path.resolve()}")
     with torch.no_grad(), SuppressWarning(UserWarning, ".*"):
         circle_model = tico.convert(
@@ -97,6 +101,7 @@ def export_full_circle(
         if max_seq_len is not None
         else nullcontext()
     )
+    validate_export_execution(export_model, args, kwargs=kwargs)
     with preparation, torch.no_grad(), SuppressWarning(UserWarning, ".*"):
         cm = tico.convert(export_model, args, kwargs=kwargs, strict=strict)
     cm.save(path)

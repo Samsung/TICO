@@ -56,9 +56,8 @@ class QuantConvTranspose2d(QuantModuleBase):
         self.obs_act_in = self._make_obs("act_in")
         self.obs_act_out = self._make_obs("act_out")
 
-    def enable_calibration(self) -> None:
-        """Enable activation calibration and collect the fixed weight range."""
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
+        """Collect the fixed weight after common observer reset."""
         self.obs_weight.collect(self.module.weight.detach())
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:

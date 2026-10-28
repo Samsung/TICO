@@ -33,6 +33,7 @@ def _observer(channels: int) -> MinMaxObserver:
         qscheme=QScheme.PER_CHANNEL_ASYMM,
         channel_axis=0,
     )
+    observer.observe_shape((channels, 1, 1, 1))
     observer.load_qparams(
         torch.full((channels,), 0.01),
         torch.zeros(channels, dtype=torch.int),
@@ -53,6 +54,19 @@ class _Owner(nn.Module):
 
 
 class JointAdaRoundTest(unittest.TestCase):
+    def test_mutable_optimizer_grid_is_not_a_frozen_deployment_snapshot(self) -> None:
+        original = _observer(2)
+        weight = torch.tensor([[[[0.13]]], [[[0.81]]]])
+        proxy = LearnableScaleAdaRoundWeightQuantizer(original, weight)
+        self.assertIsNone(proxy.frozen_state)
+        with self.assertRaisesRegex(RuntimeError, "Finalize learned AdaRound"):
+            proxy.derive_candidate()
+        with self.assertRaisesRegex(RuntimeError, "Finalize learned AdaRound"):
+            proxy.state_dict()
+        scale, _ = proxy.compute_qparams()
+        self.assertTrue(scale.requires_grad)
+        self.assertIsNotNone(original.require_frozen())
+
     def test_soft_initialization_reconstructs_unclipped_weight(self) -> None:
         weight = torch.tensor([[[[0.13]]], [[[0.81]]]], dtype=torch.float32)
         proxy = LearnableScaleAdaRoundWeightQuantizer(
@@ -153,7 +167,12 @@ class JointAdaRoundTest(unittest.TestCase):
         owner = _Owner(nn.Conv2d(2, 2, 1, bias=False))
         original_weight = owner.module.weight.detach().clone()
         original_observer = owner.obs_weight
+        original_observer.reset()
+        original_observer.enabled = True
+        original_observer.collect(owner.module.weight.detach())
         original_scale, original_zp = original_observer.compute_qparams()
+        original_snapshot = original_observer.require_frozen()
+        self.assertEqual(original_snapshot.provenance, "calibrated")
         site = SimpleNamespace(
             path="block.weight",
             module_path="block",
@@ -187,6 +206,9 @@ class JointAdaRoundTest(unittest.TestCase):
         torch.testing.assert_close(scale, original_scale)
         torch.testing.assert_close(zp, original_zp)
         self.assertIs(owner.obs_weight, original_observer)
+        restored_snapshot = original_observer.require_frozen()
+        self.assertEqual(restored_snapshot.provenance, original_snapshot.provenance)
+        self.assertEqual(restored_snapshot.locked, original_snapshot.locked)
 
     def test_progressive_absolute_limit_allows_improvement_above_target(self) -> None:
         objective = JointAdaRoundObjective(

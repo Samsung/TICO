@@ -203,6 +203,7 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
                 f"observer {name} should be enabled in CALIB",
             )
 
+        layer(self._make_inputs(), encoder_padding_mask=None)
         layer.freeze_qparams()
         self.assertEqual(layer._mode, Mode.QUANT)
         for name, obs in layer.named_observers():

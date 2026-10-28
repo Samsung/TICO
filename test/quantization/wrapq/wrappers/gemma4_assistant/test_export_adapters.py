@@ -142,9 +142,8 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
             prepared(**self.inputs)
         # The direct wrapper freeze path also supports creating export adapters;
         # it must receive the same pre-tracing policy validation as convert().
-        prepared.freeze_qparams()
         with self.assertRaisesRegex(ValueError, "per-tensor affine"):
-            Gemma4AssistantCoreExportAdapter(prepared)
+            prepared.freeze_qparams()
 
     def test_legacy_past_overrides_require_explicit_migration(self):
         """The assistant cannot silently retain an independent read grid."""

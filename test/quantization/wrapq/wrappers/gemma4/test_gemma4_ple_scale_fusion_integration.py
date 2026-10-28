@@ -22,12 +22,11 @@ from unittest import mock
 import tico
 
 import torch
-import torch.nn as nn
 from circle_schema import circle
 from tico.quantization import convert, prepare
+from tico.quantization.recipes.debug.export_regression import _state_contract
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
     fuse_gemma4_ple_embedding_scale,
     FusedGemma4PLEEmbedding,
@@ -42,6 +41,7 @@ from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_scaled_word_embedding import (
     QuantGemma4TextScaledWordEmbedding,
 )
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 from test.quantization.wrapq.wrappers.gemma4.test_gemma4_ple_scale_fusion import (
@@ -49,13 +49,24 @@ from test.quantization.wrapq.wrappers.gemma4.test_gemma4_ple_scale_fusion import
 )
 
 
-class _PLETextModel(nn.Module):
-    """Declare the synthetic text-model state consumed by the export adapter."""
+class _PLETextModel(QuantModuleBase):
+    """Own the synthetic boundary and admit the real frozen lookup subtree."""
 
-    hidden_size_per_layer_input: int
-    config: SimpleNamespace
-    obs_per_layer_token_inputs: ObserverBase
-    _mode: Mode
+    def __init__(self, wrapper: QuantGemma4TextScaledWordEmbedding):
+        super().__init__()
+        self.embed_tokens_per_layer = wrapper
+        self.hidden_size_per_layer_input = 4
+        self.config = SimpleNamespace(num_hidden_layers=3)
+        # Reshaping preserves this calibrated per-tensor output domain.
+        self.obs_per_layer_token_inputs = copy.deepcopy(wrapper.obs_act_out)
+        if wrapper._mode is Mode.QUANT:
+            self.freeze_qparams()
+
+    def _all_observers(self):
+        return (self.obs_per_layer_token_inputs,)
+
+    def _conditional_quant_subtrees(self):
+        return {"token_ple": ("embed_tokens_per_layer",)}
 
 
 def make_adapter(fused=True, quantized=True):
@@ -75,18 +86,18 @@ def make_adapter(fused=True, quantized=True):
         with torch.no_grad():
             wrapper(torch.arange(19).reshape(1, 19))
         wrapper.freeze_qparams()
-    text = _PLETextModel()
-    text.embed_tokens_per_layer = wrapper
-    text.hidden_size_per_layer_input = 4
-    text.config = SimpleNamespace(num_hidden_layers=3)
-    # A separate frozen observer with the same per-tensor contract is suitable
-    # for this shape-only boundary in the synthetic text model.
-    text.obs_per_layer_token_inputs = copy.deepcopy(wrapper.obs_act_out)
-    text._mode = Mode.QUANT if quantized else Mode.NO_QUANT
+    text = _PLETextModel(wrapper)
     return Gemma4PLEEmbeddingExportAdapter(text).eval()
 
 
 class TestGemma4PLEScaleFusionIntegration(unittest.TestCase):
+    def test_owner_admission_preserves_existing_frozen_lookup_state(self):
+        wrapper = make_adapter().embed_tokens_per_layer
+        before = _state_contract(wrapper)
+        owner = _PLETextModel(wrapper)
+        self.assertTrue(owner.has_capability("token_ple"))
+        self.assertEqual(before, _state_contract(wrapper))
+
     def test_public_prepare_convert_selects_scaled_wrapper(self):
         torch.manual_seed(17)
         model = make_model()

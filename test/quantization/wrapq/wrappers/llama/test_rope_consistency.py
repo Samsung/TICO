@@ -17,6 +17,7 @@
 import copy
 import io
 import unittest
+from typing import cast
 
 import torch
 from tico.quantization.recipes.debug.export_regression import _state_contract
@@ -326,7 +327,7 @@ class TestLlamaRoPEConsistency(unittest.TestCase):
     def test_layer_export_graph_has_no_dynamic_rope_generation(self):
         """The new source must not insert rotary calculations into the layer IR."""
         model = self._wrapper(self._model(), "npu_export")
-        layer = model.layers[0].wrapped
+        layer = cast(QuantLlamaDecoderLayer, model.layers[0].wrapped)
         prepared = prepare_llama_static_inputs(layer, 8)
         hidden = torch.randn(1, 8, 32)
         kwargs = {

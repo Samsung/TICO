@@ -27,14 +27,17 @@ PTQWrapper
     │   │                                    (shared-KV consumer, no K/V proj)
     │   └── norm                             QuantGemma4RMSNorm
     ├── post_projection                      QuantLinear
-    ├── lm_head                              QuantLinear (tied-weight source)
+    ├── lm_head                              QuantGemma4AssistantLMHeadWeight (ordered tied-weight source)
     └── masked_embedding                     QuantGemma4AssistantMaskedEmbedder
         └── centroids                        QuantLinear
 ```
 
 `lm_head.weight` is tied to `model.embed_tokens.weight`; the wrapper never
 quantizes the embedding copy and the ordered sparse head reads the single
-fake-quantized `lm_head` weight source.
+fake-quantized `lm_head` weight source. The ordered head owns only this weight
+site; the sparse host operation does not execute a dense projection or require
+dense-head activation calibration. The unordered mode retains its dense
+`QuantLinear` head.
 
 The existing adapter uses an FP target. The backbone explicitly declares its
 PyTorch shared KV input as external floating-point storage with IdentityObserver

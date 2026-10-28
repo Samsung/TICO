@@ -112,18 +112,24 @@ class FoldedLinearQParamHandoffTest(unittest.TestCase):
         )
         last = self._wrapper(folded, "last")
         first.obs_weight.compute_qparams()
-        previous_scale = first.obs_weight._cached_scale
-        previous_zero = first.obs_weight._cached_zp
+        original = first.obs_weight.require_frozen()
+        original_enabled = first.obs_weight.enabled
 
         with self.assertRaisesRegex(ValueError, "last"):
             inject_gptq_qparams(
                 nn.Sequential(first, last), {"first": quantizer, "last": quantizer}
             )
 
-        self.assertIs(first.obs_weight._cached_scale, previous_scale)
-        self.assertIs(first.obs_weight._cached_zp, previous_zero)
-        self.assertFalse(first.obs_weight._qparams_locked)
-        self.assertTrue(first.obs_weight.enabled)
+        after = first.obs_weight.require_frozen()
+        assert original.scale is not None and after.scale is not None
+        assert original.zero_point is not None and after.zero_point is not None
+        self.assertTrue(torch.equal(original.scale, after.scale))
+        self.assertTrue(torch.equal(original.zero_point, after.zero_point))
+        self.assertEqual(original.policy, after.policy)
+        self.assertEqual(original.provenance, after.provenance)
+        self.assertEqual(original.locked, after.locked)
+        self.assertEqual(original.fake_quant_enabled, after.fake_quant_enabled)
+        self.assertEqual(first.obs_weight.enabled, original_enabled)
         self.assertFalse(last.obs_weight.has_qparams)
 
 

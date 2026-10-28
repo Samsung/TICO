@@ -422,6 +422,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         """
         Return a decoder-layer export adapter for the requested mode.
         """
+        attention = self.self_attn.wrapped
+        if return_kv or mode in ("decode", "append_prefill"):
+            attention.require_capability("cache")
         if mode == "prefill":
             return LlamaDecoderLayerPrefillExportAdapter(self, return_kv=return_kv)
         if mode in ("decode", "append_prefill"):

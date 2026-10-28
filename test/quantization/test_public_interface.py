@@ -14,6 +14,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -119,8 +120,23 @@ class PublicInterfaceTest(unittest.TestCase):
                 self.assertTrue(torch.equal(model.weight, weights))
                 self.assertFalse(hasattr(model, QUANTIZER_ATTRIBUTE_NAME))
 
+    def test_out_of_place_conversion_does_not_copy_quantizer_state(self):
+        prepared = prepare(nn.Linear(2, 2, bias=False).eval(), PTQConfig())
+        prepared(torch.tensor([[-1.0, 2.0]]))
+        quantizer = getattr(prepared, QUANTIZER_ATTRIBUTE_NAME)
+        with mock.patch.object(
+            quantizer,
+            "__deepcopy__",
+            side_effect=AssertionError("quantizer caches must not be copied"),
+            create=True,
+        ) as copier:
+            result = convert(prepared, inplace=False)
+        copier.assert_not_called()
+        self.assertIs(getattr(prepared, QUANTIZER_ATTRIBUTE_NAME), quantizer)
+        self.assertFalse(hasattr(result, QUANTIZER_ATTRIBUTE_NAME))
+
     @torch.no_grad()
-    def test_ptq_out_of_place_convert_consumes_quantizer_before_copy(self):
+    def test_ptq_out_of_place_convert_preserves_original_retry_handle(self):
         prepared = prepare(nn.Linear(4, 4, bias=False).eval(), PTQConfig())
         self.assertIsInstance(prepared, QuantModuleBase)
         inputs = torch.eye(4)
@@ -131,7 +147,7 @@ class PublicInterfaceTest(unittest.TestCase):
         quantized_weight = next(quantized.parameters())
 
         self.assertIsNot(quantized, prepared)
-        self.assertFalse(hasattr(prepared, QUANTIZER_ATTRIBUTE_NAME))
+        self.assertTrue(hasattr(prepared, QUANTIZER_ATTRIBUTE_NAME))
         self.assertFalse(hasattr(quantized, QUANTIZER_ATTRIBUTE_NAME))
         self.assertEqual(prepared._mode, Mode.CALIB)
         self.assertEqual(quantized._mode, Mode.QUANT)

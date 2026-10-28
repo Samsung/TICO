@@ -32,6 +32,7 @@ import tico.quantization.recipes.export.qwen3_vl as qwen_export
 import torch
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
 
@@ -102,7 +103,7 @@ class FakeVision(torch.nn.Module):
         return FakeVisionExport(grid_thw)
 
 
-class FakeText(torch.nn.Module):
+class FakeText(QuantModuleBase):
     """Minimal Qwen3-VL text wrapper hierarchy."""
 
     def __init__(self):
@@ -121,8 +122,11 @@ class FakeText(torch.nn.Module):
         self.norm = torch.nn.Identity()
         self.rotate_embedding = None
 
+    def _all_observers(self):
+        return ()
 
-class FakeQwenModel(torch.nn.Module):
+
+class FakeQwenModel(QuantModuleBase):
     """Minimal multimodal wrapper hierarchy."""
 
     def __init__(self):
@@ -130,6 +134,9 @@ class FakeQwenModel(torch.nn.Module):
         self.visual = FakePTQWrapper(FakeVision())
         self.language_model = FakePTQWrapper(FakeText())
         self.visual_start_idx = 0
+
+    def _all_observers(self):
+        return ()
 
 
 class FakeTopLevelQwen(torch.nn.Module):
@@ -163,6 +170,35 @@ def _model_args():
 
 class TestQwen3VLPerLayerExport(unittest.TestCase):
     """Validate the staged exporter and profile-specific vision contract."""
+
+    def test_unavailable_deepstack_rejects_before_any_artifact_is_written(self):
+        export_model = FakeExportModel()
+        text = export_model.wrapped.model.wrapped.language_model.wrapped
+        require = text.require_capability
+
+        def require_available(name):
+            if name == "deepstack_0":
+                raise RuntimeError("capability 'deepstack_0' is unavailable")
+            require(name)
+
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                qwen_export,
+                "_prepare_qwen3_vl_export_model",
+                return_value=(export_model, "q"),
+            ),
+            patch.object(qwen_export, "_convert_and_save") as write,
+            patch.object(text, "require_capability", side_effect=require_available),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "deepstack_0.*unavailable"):
+                qwen_export.export_qwen3_vl_per_layer(
+                    q_model=export_model,
+                    max_seq_len=4,
+                    output_dir=tmpdir,
+                    model_args=_model_args(),
+                )
+            write.assert_not_called()
 
     def test_exports_all_static_runtime_stages(self):
         """The exporter should emit prefill, decode, and DeepStack graphs."""

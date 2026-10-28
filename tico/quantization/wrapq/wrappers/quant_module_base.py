@@ -33,6 +33,32 @@ def _symmetric_qscheme_like(qscheme: QScheme) -> QScheme:
     return QScheme.PER_TENSOR_SYMM
 
 
+def _validate_local_loaded_state(module, incompatible_keys):
+    """Check promised local capabilities even under an unprepared plain root.
+
+    Cross-source checks wait for the prepared root's complete-tree post-load hook.
+    """
+    if module._mode is not Mode.QUANT:
+        return
+    groups = module.local_observer_groups()
+    declared = set(groups) | set(module._conditional_quant_subtrees())
+    if module._conditional_unavailable and module._ready_capabilities:
+        raise RuntimeError("Corrupt unavailable subtree capabilities; recalibrate.")
+    if not module._ready_capabilities <= declared:
+        raise RuntimeError("Unknown frozen capability; reprepare and recalibrate.")
+    if not module._conditional_unavailable:
+        for observer in groups.get("required", ()):
+            observer.require_frozen()
+        if "required" in groups and "required" not in module._ready_capabilities:
+            raise RuntimeError("Corrupt required capability state; recalibrate.")
+    for name in module._ready_capabilities:
+        if name in groups:
+            for observer in groups[name]:
+                observer.require_frozen()
+    for observer in module._all_observers():
+        observer.validate_loaded_state()
+
+
 class QuantModuleBase(nn.Module, ABC):
     """
     Abstract parent for EVERY wrapper.
@@ -55,34 +81,23 @@ class QuantModuleBase(nn.Module, ABC):
         self.qcfg = qcfg or PTQConfig()
         self._mode: Mode = Mode.NO_QUANT  # default state
         self.fp_name = fp_name
+        self._ready_capabilities: set[str] = set()
+        self._frozen_schema = 1
+        self._conditional_unavailable = False
+        self.register_load_state_dict_post_hook(_validate_local_loaded_state)
 
-    def _child_quant_modules(self) -> Iterator["QuantModuleBase"]:
-        """
-        Yield immediate QuantModuleBase *descendants*, skipping over pure containers
-        (e.g., ModuleList/Sequential/ModuleDict). Once a QuantModuleBase is found,
-        do NOT descend into it here—let recursion happen level by level.
-        """
-        seen = set()
-        stack = list(self.children())  # start from direct children
-
-        while stack:
-            m = stack.pop()
-            if isinstance(m, QuantModuleBase):
-                if id(m) not in seen:
-                    seen.add(id(m))
-                    yield m
-                # IMPORTANT: do not recurse into `m` here; its own call will handle its subtree
-            elif isinstance(m, (nn.ModuleList, nn.ModuleDict, nn.Sequential)):
-                # `m` is a container or a non-quant leaf: keep descending until we hit quant modules
-                stack.extend(list(m.children()))
+    def _call_impl(self, *args, **kwargs):
+        # Class-owned dispatch also protects restored whole-module objects whose
+        # constructors were not rerun; a serialized hook cannot ensure that.
+        self.require_entry_available()
+        return super()._call_impl(*args, **kwargs)
 
     def _named_child_quant_modules(self) -> Iterator[Tuple[str, "QuantModuleBase"]]:
         """
         Yield immediate QuantModuleBase descendants with their module-tree names,
         skipping over pure containers.
 
-        This mirrors _child_quant_modules(), but preserves stable prefixes so
-        recursive observer names remain unique, e.g. `q_proj.weight` and
+        Stable prefixes keep recursive diagnostic names unique, e.g. `q_proj.weight` and
         `k_proj.weight` instead of multiple ambiguous `weight` entries.
         """
         seen = set()
@@ -96,30 +111,138 @@ class QuantModuleBase(nn.Module, ABC):
                     yield prefix, m
                 # Do not recurse into `m` here; its own named_observers() will
                 # handle its subtree and keep names relative to that child.
-            elif isinstance(m, (nn.ModuleList, nn.ModuleDict, nn.Sequential)):
+            else:
                 children = list(m.named_children())
                 for child_name, child in reversed(children):
                     stack.append((f"{prefix}.{child_name}", child))
 
     def enable_calibration(self) -> None:
-        self._mode = Mode.CALIB
-        for obs in self._all_observers():
-            obs.enabled = True
-            obs.reset()
+        from tico.quantization.wrapq.lifecycle import enable_calibration
 
-        # propagate to children
-        for child in self._child_quant_modules():
-            child.enable_calibration()
+        enable_calibration(self)
 
     def freeze_qparams(self) -> None:
-        self._mode = Mode.QUANT
-        for obs in self._all_observers():
-            obs.enabled = False
-            obs.compute_qparams()
+        from tico.quantization.wrapq.lifecycle import freeze_qparams
 
-        # propagate to children
-        for child in self._child_quant_modules():
-            child.freeze_qparams()
+        freeze_qparams(self)
+
+    def _prepare_calibration(self) -> None:
+        """Observe local deterministic parameters after the common reset."""
+
+    def local_observer_groups(self) -> dict[str, tuple[ObserverBase, ...]]:
+        """Declare required sites and optional execution capabilities."""
+        return {"required": tuple(self._all_observers())}
+
+    def _conditional_quant_subtrees(self) -> dict[str, tuple[str, ...]]:
+        """Name owner-relative registration paths gated by each capability.
+
+        A path identifies registration edges, including aliases and paths through
+        plain containers. Module objects cannot distinguish those routes.
+        """
+        return {}
+
+    def _freeze_dependencies(self) -> tuple[ObserverBase, ...]:
+        return ()
+
+    def _validate_freeze(self, plan, available: set[str]) -> None:
+        """Check model semantics without mutating the complete candidate plan."""
+
+    def _validate_loaded_state(self) -> None:
+        """Check semantic references after the complete subtree has loaded."""
+
+    def has_capability(self, name: str) -> bool:
+        return not self._conditional_unavailable and name in self._ready_capabilities
+
+    def require_entry_available(self) -> None:
+        """Protect direct child entry as well as owner-mediated execution."""
+        if self._mode is Mode.QUANT and self._conditional_unavailable:
+            raise RuntimeError(
+                f"{type(self).__name__}: conditional subtree is unavailable; "
+                "reprepare and recalibrate the owning capability."
+            )
+
+    def require_capability(self, name: str) -> None:
+        self.require_entry_available()
+        if self._mode is Mode.QUANT and name not in self._ready_capabilities:
+            raise RuntimeError(
+                f"{type(self).__name__}: capability {name!r} is unavailable; "
+                "reprepare and recalibrate its quantization sites."
+            )
+
+    def get_extra_state(self):
+        return {
+            "version": 1,
+            "mode": self._mode.name,
+            "capabilities": sorted(self._ready_capabilities),
+            "conditional_unavailable": self._conditional_unavailable,
+        }
+
+    def set_extra_state(self, state):
+        if not isinstance(state, dict) or state.get("version") != 1:
+            raise RuntimeError("Unsupported WrapQ state; reprepare and recalibrate.")
+        if not isinstance(state.get("capabilities"), list) or not all(
+            isinstance(name, str) for name in state["capabilities"]
+        ):
+            raise RuntimeError("Corrupt WrapQ capabilities; reprepare and recalibrate.")
+        if not isinstance(state.get("conditional_unavailable"), bool):
+            raise RuntimeError("Corrupt WrapQ conditional readiness; recalibrate.")
+        self._conditional_unavailable = state["conditional_unavailable"]
+        try:
+            self._mode = Mode[state["mode"]]
+            self._ready_capabilities = set(state["capabilities"])
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                "Corrupt WrapQ frozen state; reprepare and recalibrate."
+            ) from exc
+        self._frozen_schema = 1
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        from tico.quantization.wrapq.lifecycle import validate_frozen_model
+
+        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+        validate_frozen_model(self)
+        return result
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # Range-only legacy state can be recalibrated but cannot claim QUANT.
+        if prefix + "_extra_state" not in state_dict:
+            if any(
+                key.startswith(prefix)
+                and key.endswith("._extra_state")
+                and isinstance(value, dict)
+                and "frozen" in value
+                for key, value in state_dict.items()
+            ):
+                raise RuntimeError(
+                    "Incomplete WrapQ wrapper state; reprepare and recalibrate "
+                    "instead of loading versioned observers without their mode."
+                )
+            self._mode = Mode.NO_QUANT
+            self._ready_capabilities = set()
+            self._conditional_unavailable = False
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+        if (
+            prefix + "_extra_state" not in state_dict
+            and prefix + "_extra_state" in missing_keys
+        ):
+            missing_keys.remove(prefix + "_extra_state")
 
     def _fq(self, x: torch.Tensor, obs: ObserverBase) -> torch.Tensor:
         """Fake-quant or collect."""
@@ -134,8 +257,8 @@ class QuantModuleBase(nn.Module, ABC):
     def _all_observers(self) -> Iterable[ObserverBase]:
         """Return observers owned directly by this module.
 
-        Child QuantModuleBase instances are traversed by the base lifecycle
-        methods, so subclasses must not yield child observers here.
+        The common coordinator traverses child QuantModuleBase owners, so
+        subclasses must not yield child observers here.
         """
         ...
 
@@ -160,6 +283,30 @@ class QuantModuleBase(nn.Module, ABC):
             if obs_name == name:
                 return obs
         return None
+
+    def _make_per_tensor_obs(self, name: str, **defaults) -> ObserverBase:
+        """Declare a scalar grid while retaining configured symmetry and overrides.
+
+        Norm parameters use a scalar grid even when the weight-role default is
+        per-channel. An explicit observer override still controls its own policy.
+        """
+        role = self.qcfg.get_role_kwargs(name).copy()
+        user = self.qcfg.get_kwargs(name).copy()
+        if user.get("__quant_spec_replace_role__", False):
+            role = {}
+        axis = user.get(
+            "channel_axis", defaults.get("channel_axis", role.get("channel_axis"))
+        )
+        if axis is not None:
+            return self._make_obs(name, **defaults)
+        dtype = user.get("dtype", defaults.get("dtype", role.get("dtype")))
+        scheme = defaults.get("qscheme", role.get("qscheme"))
+        if dtype is not None:
+            symmetric = dtype.signed or (scheme is not None and scheme.is_symmetric())
+            defaults["qscheme"] = (
+                QScheme.PER_TENSOR_SYMM if symmetric else QScheme.PER_TENSOR_ASYMM
+            )
+        return self._make_obs(name, **defaults)
 
     def _make_obs(
         self,

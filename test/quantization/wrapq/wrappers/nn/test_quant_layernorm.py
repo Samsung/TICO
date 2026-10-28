@@ -159,3 +159,14 @@ class TestQuantLayerNorm(unittest.TestCase):
         diff = (fp_out - q_out).abs().mean().item()
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.4)
+
+    def test_bias_disabled_requires_only_reachable_affine_sites(self):
+        layer = QuantLayerNorm(nn.LayerNorm(4, bias=False))
+        x = torch.tensor([[1.0, -1.0, 2.0, -2.0]])
+        layer.enable_calibration()
+        layer(x)
+        layer.freeze_qparams()
+        self.assertIs(layer._mode, Mode.QUANT)
+        self.assertIsNone(layer.obs_bias)
+        self.assertIsNone(layer.obs_affine_add)
+        self.assertTrue(torch.isfinite(layer(x)).all())

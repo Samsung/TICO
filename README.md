@@ -126,7 +126,7 @@ prepared_model = prepare(model.eval(), GPTQConfig())
 for d in dataset:          # calibration
     prepared_model(d)
 
-quantized_model = convert(prepared_model, GPTQConfig())
+quantized_model = convert(prepared_model)
 ```
 
 - [Quantization overview](./tico/quantization/README.md) — API, architecture, and how to add a new algorithm

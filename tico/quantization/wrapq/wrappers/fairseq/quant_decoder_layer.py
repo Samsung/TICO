@@ -349,6 +349,8 @@ class QuantFairseqDecoderLayer(QuantModuleBase):
         Export-only single-step:
           Returns (x_out[1,B,C], attn_from_cross, new_self_k[B,H,1,Dh], new_self_v[B,H,1,Dh]).
         """
+        if prev_self_k is not None or prev_self_v is not None:
+            self.require_capability("external_past")
         if need_head_weights:
             need_attn = True
 
@@ -466,6 +468,12 @@ class QuantFairseqDecoderLayer(QuantModuleBase):
             new_k_bh,
             new_v_bh,
         )  # [1,B,C], attn, [B*H, Tnew, Dh], [B*H, Tnew, Dh]
+
+    def local_observer_groups(self):
+        return {
+            "required": (self.obs_activation_fn,),
+            "external_past": (self.obs_prev_self_k_in, self.obs_prev_self_v_in),
+        }
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this decoder layer."""

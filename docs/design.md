@@ -540,6 +540,17 @@ which external packages are installed.
 
 ## 10. Quantization integration
 
+WrapQ admission precedes graph export. Observer-owned schema-versioned snapshots
+hold exact grids, policy, provenance and locks. A common coordinator derives and
+validates all required candidates and wrapper semantic constraints before an atomic
+commit to QUANT; missing required calibration rejects without partial conversion.
+Wrappers declare active sites and optional execution capabilities and collect local
+parameters. Exporters consume snapshots; generated profile constants have separate
+local grids. State restoration validates frozen semantics rather than recomputing
+from ranges. See [WrapQ lifecycle](../tico/quantization/wrapq/README.md).
+
+This admission boundary does not change Q/DQ domain lowering or final Circle ABI.
+
 Quantization has two related but distinct layers.
 
 ### 10.1 Public model quantization API

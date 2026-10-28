@@ -189,6 +189,7 @@ class TestQuantQwen3VLAttention(unittest.TestCase):
         qattn = QuantQwen3VLVisionAttention(
             self.fp_attn, qcfg=make_affine_ptq_config(dtype=DType.uint(4))
         )
+        qattn.enable_calibration()
         qkv_lin = qattn.qkv.wrapped.module
         assert isinstance(qkv_lin, torch.nn.Linear)
         n_rows = qkv_lin.weight.shape[0]

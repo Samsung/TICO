@@ -20,13 +20,16 @@ import torch.nn.functional as F
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPooler
+
+    from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+        Gemma4VisionPoolerPrefillExportAdapter,
+    )
 
 ExportMode = str
 
@@ -40,14 +43,13 @@ class QuantGemma4VisionPooler(QuantModuleBase):
     input and the pooled output so that activation quantization ranges are
     calibrated on both sides of the pooler.
 
-    TODO: Replace the delegation to ``self.module`` with a decomposed static
-    implementation once the exact Gemma4 pooler fields are finalized.  The
-    current delegation uses dynamic operations (``F.one_hot``, ``torch.div``)
-    that are not ``torch.export``-friendly.
+    Static export owns small independent snapshots of the activation boundaries
+    and specializes only its pooling matrix grid. Source observers stay unchanged.
     """
 
     root_hidden_size: torch.Tensor
     pool_weights: torch.Tensor
+    num_valid_outputs: int
 
     def __init__(
         self,
@@ -283,6 +285,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         Returns:
             Pooled features with shape ``(1, V, D)`` in float32.
         """
+        self.require_entry_available()
         hidden_states = self._fq(hidden_states, self.obs_act_in)
 
         # Step 1: Fake-quantize input (collects stats in CALIB, applies Q-DQ in QUANT).
@@ -313,7 +316,8 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         *,
         output_length: int,
         pixel_position_ids: torch.Tensor,
-    ) -> nn.Module:
+    ) -> "Gemma4VisionPoolerPrefillExportAdapter":
+        self.require_entry_available()
         if mode != "prefill":
             raise ValueError(f"Unsupported Gemma4 VisionPooler export mode: {mode!r}")
 
@@ -328,10 +332,8 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             )
 
         if self._mode is Mode.QUANT:
-            # Make sure that all observers are calibrated.
             for obs in self._all_observers():
-                if isinstance(obs, AffineObserverBase):
-                    assert obs.has_qparams
+                obs.require_frozen()
 
         # Precompute a numeric pooling matrix with padding already baked in.
         weights, num_valid_outputs = self._build_export_pool_weights(
@@ -339,16 +341,33 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             output_length=output_length,
             pixel_position_ids=pixel_position_ids,
         )
-        self.register_buffer("pool_weights", weights)
-        self.num_valid_outputs = num_valid_outputs
+        # A registered profile is a distinct quantization owner. Fresh observers
+        # install exact small snapshots, never shared observers or sample stores.
+        specialized = QuantGemma4VisionPooler(
+            self.module, qcfg=self.qcfg, fp_name=self.fp_name
+        )
+        specialized.training = self.training
+        specialized.root_hidden_size = self.root_hidden_size.detach().clone()
+        specialized.register_buffer("pool_weights", weights)
+        specialized.num_valid_outputs = num_valid_outputs
+        for source, profile in zip(
+            self._all_observers(), specialized._all_observers(), strict=True
+        ):
+            profile.to(device=self.root_hidden_size.device)
+            if self._mode is Mode.QUANT:
+                state = source.require_frozen()
+                if source is self.obs_pool_weight:
+                    # A new matrix needs its own numerical grid, but inherits the
+                    # source's execution policy at profile construction time.
+                    profile.set_fake_quant_enabled(state.fake_quant_enabled)
+                    profile.collect(weights)
+                    profile.install_candidate(profile.derive_candidate())
+                else:
+                    profile.install_candidate(state)
+            else:
+                profile.set_fake_quant_enabled(source.fake_quant_enabled)
+        specialized.set_extra_state(self.get_extra_state())
 
-        if self._mode is Mode.QUANT:
-            # Collect statistics about generated pool weights and compute qparams.
-            obs_pool_weight_enabled: bool = self.obs_pool_weight.enabled
-            self.obs_pool_weight.enabled = True
-            self.obs_pool_weight.reset()
-            self.obs_pool_weight.collect(self.pool_weights)
-            self.obs_pool_weight.compute_qparams()
-            self.obs_pool_weight.enabled = obs_pool_weight_enabled
-
-        return Gemma4VisionPoolerPrefillExportAdapter(self)
+        return Gemma4VisionPoolerPrefillExportAdapter(
+            specialized, capability_owner=self
+        )

@@ -1058,6 +1058,8 @@ class QuantLlamaAttention(QuantModuleBase):
         """
         del kwargs
 
+        if use_cache or past_key_value is not None:
+            self.require_capability("cache")
         past_key_value_in = past_key_value
         past_key_value = self._normalize_past_key_value(past_key_value)
 
@@ -1148,6 +1150,17 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_present_value,
         )
 
+    def local_observer_groups(self):
+        # Unrolled no-cache attention never consumes storage. Compute grids are
+        # required independently, including when an existing cache is read.
+        storage = (self.obs_new_k, self.obs_new_v)
+        return {
+            "required": tuple(
+                obs for obs in self._all_observers() if obs not in storage
+            ),
+            "cache": storage,
+        }
+
     def as_export_module(
         self,
         mode: ExportMode = "prefill",
@@ -1179,7 +1192,10 @@ class QuantLlamaAttention(QuantModuleBase):
             )
 
         if mode == "prefill":
+            if return_kv:
+                self.require_capability("cache")
             return LlamaAttentionPrefillExportAdapter(self, return_kv=return_kv)
         if mode == "decode":
+            self.require_capability("cache")
             return LlamaAttentionDecodeExportAdapter(self, return_kv=return_kv)
         raise ValueError(f"Unsupported export mode: {mode!r}")

@@ -582,6 +582,7 @@ def _create_image_input(
         "pixel_values": pixel_values,
         "pixel_values_videos": None,
         "image_grid_thw": image_grid_thw,
+        "mm_token_type_ids": (input_ids == cfg.image_token_id).long(),
         "video_grid_thw": None,
         "cache_position": None,
     }
@@ -1123,7 +1124,10 @@ class QwenVisionAttentionCase(QwenBaseCase):
     def _sample(self) -> ForwardInput:
         """Create one synthetic vision attention input."""
         hidden = torch.randn(self.seq_len, self.hidden_size)
-        return ForwardInput((hidden, self.cu_seqlens, None, self.position_embeddings))
+        return ForwardInput(
+            (hidden, self.cu_seqlens),
+            {"position_embeddings": self.position_embeddings},
+        )
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]

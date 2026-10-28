@@ -17,7 +17,11 @@ from typing import cast, List, Optional, Tuple, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
+from tico.quantization.wrapq.utils.static_export import (
+    ExportCapabilityGuard,
+    iter_export_execution_sites,
+    require_static_decoder_inputs,
+)
 
 if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
@@ -183,15 +187,27 @@ class LlamaTokenEmbeddingExportAdapter(torch.nn.Module):
         super().__init__()
         qmodel = cast("QuantLlamaForCausalLM", qmodel)
         llama_model = cast("QuantLlamaModel", qmodel.model.wrapped)
+        self._capability_guard = ExportCapabilityGuard(llama_model, "token_embeddings")
         self.embed_tokens = llama_model.embed_tokens
         self.rotate_embedding = getattr(llama_model, "rotate_embedding", None)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Return decoder hidden states for the given token IDs."""
+        self._capability_guard.require()
         hidden_states = self.embed_tokens(input_ids)
         if self.rotate_embedding is not None:
             hidden_states = self.rotate_embedding(hidden_states)
         return hidden_states
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Preflight only lookup and rotation, excluding the retained owner."""
+        yield from iter_export_execution_sites(
+            self.embed_tokens, example_inputs, kwargs=kwargs, module_path="embed_tokens"
+        )
+        if self.rotate_embedding is not None:
+            yield from iter_export_execution_sites(
+                self.rotate_embedding, module_path="rotate_embedding"
+            )
 
 
 class LlamaLMHeadExportAdapter(torch.nn.Module):

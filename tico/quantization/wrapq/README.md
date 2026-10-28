@@ -41,17 +41,83 @@ change saved statistics; resetting the observer does not modify the observed ten
 
 3. **Convert**
 
-Replace wrapped modules with their quantized counterparts using fixed quantization parameters.
+The common lifecycle coordinator enumerates active sites once through arbitrary
+module containers and aliases. Observers derive validated candidates without
+mutation; model hooks check semantic constraints against the complete plan. Only
+then does one transaction install the snapshots and switch wrappers to QUANT.
+Failure preserves calibration state and the public retry handle.
 
-This approach minimizes model perturbation and avoids retraining.
+Required affine sites need finite collected statistics or compatible imported
+qparams. Finite zero ranges remain valid. Imported locks take precedence for every
+affine subtype, including Percentile. Identity and MX declare stateless policies.
+Optional cache/multimodal capabilities remain unavailable as a whole when their
+sites were not calibrated; requesting one fails before use. Required activations
+are never skipped merely because they were not observed.
+
+Observer state schema version 1 saves exact grids, policy, provenance, lock,
+bypass state and observed channel extent. Wrapper schema version 1 saves mode and
+capability readiness. Frozen state dicts and whole-module checkpoints preserve
+exact grids; incompatible/corrupt state rejects even with `strict=False`.
+Range-only legacy state dicts load as not frozen and require recalibration.
+Old whole-module objects lacking the schema require reprepare/recalibrate; Gemma's
+old cache-only schema cannot establish whole-model readiness. Percentile frozen
+execution needs no reservoir, but mid-calibration reservoir resumption is not
+promised.
+
+New wrappers implement `_all_observers`/`local_observer_groups`, optional subtree
+capabilities, `_prepare_calibration` for local parameters, and pure
+`_validate_freeze` semantic checks. They must not override recursive lifecycle
+entrypoints or implement generic grid serialization. Legacy mutating overrides
+reject with migration guidance. Exporters read `require_frozen()` snapshots;
+profile-generated constants use separate local observers. They never recalibrate
+source-model sites.
+
+Conditional subtree declarations identify owner-relative registration paths, for
+example `{"token_embeddings": ("embed_tokens",)}` or
+`{"vision": ("stages.0.vision",)}`. A gate applies only when that path's registration
+edge is crossed. An ungated alias keeps the child required; distinct optional
+aliases are alternative entry routes. Nested optional sites do not become
+requirements of an enclosing capability. Each conditional edge has one named
+owner; empty declarations, paths through registration cycles and old module-object
+declarations reject with migration guidance. Ordinary aliases and registration
+cycles remain supported by the once-only inventory.
+
+Quantized module-call dispatch rejects completely unavailable subtrees, including
+direct child calls and restored whole-module objects. Detached stages also retain
+an `ExportCapabilityGuard` for the named route, outside their registered tensor
+tree, and check it before executing a child or building a profile. This keeps the
+live readiness owner without copying or registering its unused weights. Stages
+with a captured export mode must be rebuilt if the owner changes mode; an explicit
+float mode cannot bypass a quantized owner's capability or producer observer.
+Plain floating stages require an explicit `Mode.NO_QUANT` contract.
+
+An empty imported per-channel tensor can establish rank and channel extent even
+though it contributes no numerical statistics. Locked grids are validated against
+that shape before it is recorded. Empty uncalibrated tensors still cannot create
+qparams or establish calibration readiness.
 
 Affine observers accept external grids through `load_qparams(scale, zp, lock=True)`.
 Locked grids survive calibration and conversion without requiring local samples,
 including for `PercentileObserver`. The affine base owns this dispatch; range-based
-observers customize `_qparam_bounds()` to select their calibration interval only
-when unlocked. Percentile clipping preserves the exact observed min/max separately
-from its clipping bounds. Loading with `lock=False` still requires calibration and
-recomputes qparams from those statistics.
+observers customize the pure `_statistics_bounds()` hook to select their calibration
+interval only when unlocked. Candidate installation records clipping diagnostics
+without changing the observed min/max. Loading with `lock=False` still requires
+calibration and recomputes qparams from those statistics.
+
+Frozen-grid validity is independent of the grid's storage device. Per-channel
+affine grids retain the existing FP32/BF16 scale policy: valid CPU-resident BF16
+scales can be imported, frozen and restored exactly for inspection or later
+execution. Import does not cast scales, fabricate statistics or resolve an unknown
+channel extent.
+
+Execution compatibility is checked separately by
+`AffineObserverBase.validate_execution(device)`. Enabled CPU per-channel fake
+quantization with BF16 **scales** rejects before the native operation; BF16
+**inputs** with FP32 scales remain supported. Disabled fake quantization bypasses
+this execution check and preserves the frozen grid. Per-tensor, Identity and MX
+policies do not inherit this per-channel restriction. `fake_quant(x)` always keeps
+the lower-level check using `x.device`, including after a model move or direct
+observer call. Passing a compatibility check is not proof of CUDA/NPU support.
 
 ---
 

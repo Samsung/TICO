@@ -125,17 +125,24 @@ available for broader activation-statistics coverage. The quantize preset keeps
 precedence. Missing storage or compute qparams require calibration; no scales
 are synthesized or copied between unrelated observers.
 
-Checkpoint schema version 2 persists storage/compute observer policies and
-frozen qparams together with the source-binding contract. Recreate the same
+The common WrapQ frozen-state schema persists every observer's exact grid,
+policy, provenance, lock and bypass state, together with wrapper mode and
+capability readiness. Gemma cache metadata version 3 adds source bindings and
+grid fingerprints; it does not duplicate observer grids. Recreate the same
 prepared model/configuration before loading a state dict so shared source
-bindings are rebuilt. After `restored.load_state_dict(...)`, call
-`restored.freeze_qparams()` to enter quantized mode before inference or export;
-whole-module `torch.load` and deep copies preserve the existing mode. Old
-three-domain state dicts and serialized module checkpoints are incompatible
-and rejected. Reprepare the original floating-point
+bindings are rebuilt. A successful `restored.load_state_dict(...)` restores
+quantized mode directly; no recalculation or second freeze is needed. Recipe
+whole-module loads validate the same frozen contract before inference/export.
+Legacy cache-only version 2 state cannot restore non-cache grids exactly and
+is rejected even with `strict=False`, as are old three-domain state dicts and
+serialized module checkpoints. Reprepare the original floating-point
 model, remove obsolete `past_*` overrides, rerun PTQ calibration and conversion,
 and save a new checkpoint before export. Existing past qparams are never silently
 discarded or remapped. No automatic checkpoint migration is provided.
+
+Static vision profiles own their generated pooling matrices and frozen constant
+grids. Exporting another profile, including a failed export, leaves the source
+pooler's snapshots and previously created profile adapters unchanged.
 
 ## `circle_layers/`: vision pipeline
 

@@ -45,6 +45,16 @@ class PTQWrapper(QuantModuleBase):
     def forward(self, *args, **kwargs):
         return self.wrapped(*args, **kwargs)
 
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Delegate the transparent stage to its actual computation owner."""
+        from tico.quantization.wrapq.utils.static_export import (
+            iter_export_execution_sites,
+        )
+
+        return iter_export_execution_sites(
+            self.wrapped, example_inputs, kwargs=kwargs, module_path="wrapped"
+        )
+
     def as_export_module(self, mode: str, **kwargs):
         if not hasattr(self.wrapped, "as_export_module"):
             raise NotImplementedError(
@@ -55,8 +65,8 @@ class PTQWrapper(QuantModuleBase):
     def _all_observers(self):
         """
         PTQWrapper itself owns NO observers (transparent node).
-        Returning an empty iterator prevents double-processing when parents
-        traverse the tree and then recurse into `self.wrapped`.
+        The coordinator visits `self.wrapped` as a separate owner; diagnostic
+        enumeration remains transparent through named_observers().
         """
         return ()  # no local observers
 

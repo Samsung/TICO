@@ -91,19 +91,21 @@ def _require_affine(observer: Any, name: str) -> AffineObserverBase:
             f"Gemma4 PLE embedding artifact requires an affine observer for "
             f"{name!r}, got {type(observer).__name__}."
         )
-    if not observer.has_qparams:
-        raise RuntimeError(
-            f"Gemma4 PLE embedding observer {name!r} has no frozen qparams. "
-            "Convert the model before saving the artifact."
-        )
+    observer.require_frozen()
     return observer
 
 
 def _observer_payload(observer: AffineObserverBase) -> dict[str, Any]:
     """Serialize the frozen fake-quant contract of one affine observer."""
+    state = observer.require_frozen()
+    if state.scale is None or state.zero_point is None:
+        raise RuntimeError(
+            "Quantized Gemma4 PLE artifact requires an affine frozen grid; "
+            "use the raw float artifact or enable quantization, reprepare and recalibrate."
+        )
     return {
-        "scale": observer._cached_scale.detach().cpu().clone(),
-        "zero_point": observer._cached_zp.detach().cpu().to(torch.int).clone(),
+        "scale": state.scale.detach().cpu(),
+        "zero_point": state.zero_point.detach().cpu().to(torch.int),
         "quant_min": int(observer.dtype.qmin),
         "quant_max": int(observer.dtype.qmax),
         "channel_axis": (
@@ -192,8 +194,14 @@ def _quantized_weight_payload(
     observer = _require_affine(embedding.obs_weight, "weight")
     weight = embedding.module.weight.detach()
     fake_quantized = observer.fake_quant(weight).cpu()
-    scale = observer._cached_scale.detach().cpu()
-    zero_point = observer._cached_zp.detach().cpu().to(torch.int)
+    state = observer.require_frozen()
+    if state.scale is None or state.zero_point is None:
+        raise RuntimeError(
+            "Quantized Gemma4 PLE artifact requires an affine frozen grid; "
+            "use the raw float artifact or enable quantization, reprepare and recalibrate."
+        )
+    scale = state.scale.detach().cpu()
+    zero_point = state.zero_point.detach().cpu().to(torch.int)
     channel_axis = observer.channel_axis
 
     if channel_axis is None:
@@ -227,6 +235,7 @@ def _quantized_weight_payload(
 def build_gemma4_ple_embedding_artifact(adapter: nn.Module) -> dict[str, Any]:
     """Return the host ``ple_embedding`` payload for a PLE embedding adapter."""
     adapter = cast("Gemma4PLEEmbeddingExportAdapter", adapter)
+    adapter.require_available()
     embedding = _unwrap_embedding(adapter)
     module = embedding.module
     quantized = bool(adapter.quantized)

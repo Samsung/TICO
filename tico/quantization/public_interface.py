@@ -63,18 +63,26 @@ def prepare(
 
 def convert(model, inplace: Optional[bool] = True):
     """
-    Convert the prepared model to a quantized model using the provided configuration.
+    Convert a model returned by prepare() using its attached quantizer.
 
-    Determines the appropriate quantizer based on the type of quant_config and
-    converts the model accordingly.
+    Retrieves the ``tico_quantizer`` installed by prepare(), reusing its existing
+    configuration and collected calibration state. PTQ wrappers retain their
+    resolved quantization policies. This function does not accept ``quant_config``
+    or select or instantiate a new quantizer.
+
+    The converted result loses its quantizer handle only after conversion succeeds.
+    On failure, the original prepared model retains its handle for retry; arbitrary
+    in-place mutations made by the algorithm are not rolled back by this API.
 
     Parameters:
-        model: The prepared PyTorch model.
-        inplace (bool, optional): If true, the model will be modified in place;
-                                   otherwise, a new prepared model is returned.
+        model: The model returned by prepare(), calibrated as required by its algorithm.
+        inplace (bool, optional): Defaults to True, converting the model in place.
+            For algorithms supporting False, converts a copy and retains the original
+            prepared model's quantizer handle. GPTQ supports only inplace=True.
 
     Returns:
-        The quantized model.
+        The converted model without a quantizer handle. With supported inplace=False
+        conversion, this is a copy; the original prepared model retains its handle.
     """
     # Get quantizer first before calling deepcopy that does not copy attributes properly.
     if hasattr(model, QUANTIZER_ATTRIBUTE_NAME):
@@ -89,10 +97,13 @@ def convert(model, inplace: Optional[bool] = True):
             "GPTQ quantization only supports `in-place=True`. Please set 'inplace=True' to proceed."
         )
 
-    delattr(model, QUANTIZER_ATTRIBUTE_NAME)
-    model = model if inplace else copy.deepcopy(model)
+    # The result copy must not duplicate quantizer-owned calibration caches.
+    # Sharing this metadata during the copy also preserves the original handle.
+    model = model if inplace else copy.deepcopy(model, memo={id(quantizer): quantizer})
 
     assert isinstance(quantizer, BaseQuantizer)
     model = quantizer.convert(model)
+    if hasattr(model, QUANTIZER_ATTRIBUTE_NAME):
+        delattr(model, QUANTIZER_ATTRIBUTE_NAME)
 
     return model

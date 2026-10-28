@@ -117,7 +117,10 @@ class AdaRoundWeightQuantizer(AffineObserverBase):
             qscheme=original.qscheme,
             channel_axis=original.channel_axis,
         )
-        scale, zero_point = original.compute_qparams()
+        initial_state = original.require_frozen()
+        scale, zero_point = initial_state.scale, initial_state.zero_point
+        assert scale is not None and zero_point is not None
+        self.observe_shape(weight.shape)
         self.load_qparams(scale, zero_point, lock=True)
         self.min_val = original.min_val.detach().clone()
         self.max_val = original.max_val.detach().clone()

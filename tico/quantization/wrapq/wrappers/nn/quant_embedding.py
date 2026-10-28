@@ -45,8 +45,7 @@ class QuantEmbedding(QuantModuleBase):
         self.act_out_obs = self._make_obs("act_out")
         self.module = fp
 
-    def enable_calibration(self) -> None:
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
         # immediately capture the fixed weight range
         self.weight_obs.collect(self.module.weight)
 
@@ -71,3 +70,11 @@ class QuantEmbedding(QuantModuleBase):
 
     def _all_observers(self):
         return (self.act_out_obs, self.weight_obs)
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Embedding fake quantization executes on the actual weight device."""
+        if self._mode is not Mode.QUANT:
+            return
+        device = self.module.weight.device
+        yield "weight_obs", self.weight_obs, device
+        yield "act_out_obs", self.act_out_obs, device

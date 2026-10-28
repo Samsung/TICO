@@ -319,6 +319,16 @@ def export_qwen3_vl_per_layer(
     if artifact_tag == "q":
         register_fake_quant_meta_kernels_for_dynamic_export()
     qmodel, qwen_model, qvision, qtext = _unwrap_qwen3_vl_components(export_model)
+    qwen_model.require_capability("vision")
+    qtext.require_capability("token_embeddings")
+    deepstack_count = len(qvision.deepstack_merger_list)
+    if deepstack_count > len(qtext.layers):
+        raise ValueError(
+            "The number of DeepStack outputs exceeds the number of text layers: "
+            f"deepstack={deepstack_count}, text_layers={len(qtext.layers)}."
+        )
+    for layer_idx in range(deepstack_count):
+        qtext.require_capability(f"deepstack_{layer_idx}")
     _validate_npu_export_attention(qtext)
 
     text_capacity = int(qtext.config.max_position_embeddings)
@@ -403,13 +413,6 @@ def export_qwen3_vl_per_layer(
         seq_len=max_seq_len,
         head_dim=head_dim,
     )
-
-    deepstack_count = len(qvision.deepstack_merger_list)
-    if deepstack_count > len(qtext.layers):
-        raise ValueError(
-            "The number of DeepStack outputs exceeds the number of text layers: "
-            f"deepstack={deepstack_count}, text_layers={len(qtext.layers)}."
-        )
 
     qtext = cast(QuantQwen3VLTextModel, qtext)
     for layer_idx, layer in enumerate(qtext.layers):

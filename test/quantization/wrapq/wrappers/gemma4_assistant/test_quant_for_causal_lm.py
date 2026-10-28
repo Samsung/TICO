@@ -209,9 +209,13 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
         missing = [
             name
             for name, obs in converted.wrapped.named_observers()
-            if hasattr(obs, "has_qparams") and not obs.has_qparams
+            if obs.frozen_state is None
         ]
         self.assertEqual(missing, [])
+        self.assertEqual(
+            [name for name, _ in converted.wrapped.lm_head.named_observers()],
+            ["weight"],
+        )
 
         with torch.no_grad():
             out = converted(**self.sample)
@@ -238,7 +242,9 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
         prepared = self._prepare()
         wrapper = prepared.wrapped
         self.assertEqual(
-            wrapper.lm_head.wrapped.module.weight.data_ptr(),
+            getattr(
+                wrapper.lm_head, "wrapped", wrapper.lm_head
+            ).module.weight.data_ptr(),
             wrapper.module.model.embed_tokens.weight.data_ptr(),
         )
         # No second wrapper quantizes the embedding copy.
@@ -269,7 +275,9 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
 
         wrapper = loaded.wrapped
         self.assertEqual(
-            wrapper.lm_head.wrapped.module.weight.data_ptr(),
+            getattr(
+                wrapper.lm_head, "wrapped", wrapper.lm_head
+            ).module.weight.data_ptr(),
             wrapper.module.model.embed_tokens.weight.data_ptr(),
         )
         with torch.no_grad():
@@ -282,7 +290,9 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
         for restored in (loaded, copy.deepcopy(converted)):
             for layer in restored.wrapped.model.layers:
                 attention = layer.wrapped.self_attn.wrapped
-                self.assertTrue(attention.get_extra_state()["external_float_cache"])
+                self.assertTrue(
+                    attention.get_extra_state()["gemma_cache"]["external_float_cache"]
+                )
                 self.assertIsNone(attention._cache_source)
                 self.assertTrue(
                     all(
@@ -308,9 +318,9 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
         for layer in restored.wrapped.model.layers:
             attention = layer.wrapped.self_attn.wrapped
             state = attention.get_extra_state()
-            self.assertTrue(state["external_float_cache"])
-            self.assertNotIn("past_key", state["policies"])
-            self.assertNotIn("past_value", state["qparams"])
+            self.assertTrue(state["gemma_cache"]["external_float_cache"])
+            self.assertNotIn("qparams", state)
+            self.assertNotIn("policies", state)
             self.assertIsNone(attention._cache_source)
             attention.validate_export_cache("decode")
         with torch.no_grad():

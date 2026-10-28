@@ -14,6 +14,7 @@
 
 from typing import Optional
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -44,8 +45,7 @@ class QuantLinear(QuantModuleBase):
         self.obs_act_out = self._make_obs("act_out")
         self.module = fp
 
-    def enable_calibration(self) -> None:
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
         # immediately capture the fixed weight range
         self.obs_weight.collect(self.module.weight)
 
@@ -63,3 +63,14 @@ class QuantLinear(QuantModuleBase):
 
     def _all_observers(self):
         return (self.obs_weight, self.obs_act_in, self.obs_act_out)
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Bind input execution to x and parameter/output execution to weight."""
+        if self._mode is not Mode.QUANT:
+            return
+        x = example_inputs[0] if example_inputs else kwargs.get("x")
+        if isinstance(x, torch.Tensor):
+            yield "obs_act_in", self.obs_act_in, x.device
+        device = self.module.weight.device
+        yield "obs_weight", self.obs_weight, device
+        yield "obs_act_out", self.obs_act_out, device

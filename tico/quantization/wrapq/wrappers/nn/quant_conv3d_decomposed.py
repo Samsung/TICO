@@ -71,16 +71,51 @@ class QuantConv3dDecomposed(QuantModuleBase):
 
         # Tracking for lazy observer creation
         self._dynamic_obs_calibrated = False
+        self._dynamic_profile: Optional[Tuple[int, int]] = None
 
-    def enable_calibration(self) -> None:
-        """Enable calibration mode."""
-        super().enable_calibration()
+    def _clear_dynamic_observers(self) -> None:
+        for observers in (self._input_slice_obs, self._conv2d_obs, self._acc_obs):
+            for observer in observers.values():
+                delattr(self, observer.name)
+            observers.clear()
+        self._dynamic_obs_calibrated = False
+        self._dynamic_profile = None
+
+    def _prepare_calibration(self) -> None:
+        """Collect fixed weights and discard the previous dynamic profile."""
 
         # Collect weight statistics immediately (weights are static)
         self.obs_weight.collect(self.module.weight)
 
-        # Reset dynamic observers for new calibration
-        self._dynamic_obs_calibrated = False
+        # Dynamic sites belong to the next observed temporal profile.
+        self._clear_dynamic_observers()
+
+    def get_extra_state(self):
+        state = super().get_extra_state()
+        state["conv3d_profile"] = self._dynamic_profile
+        return state
+
+    def set_extra_state(self, state):
+        super().set_extra_state(state)
+        if "conv3d_profile" not in state:
+            raise RuntimeError(
+                "Missing Conv3d observer profile; reprepare and recalibrate."
+            )
+        profile = state["conv3d_profile"]
+        if profile is not None and (
+            not isinstance(profile, tuple)
+            or len(profile) != 2
+            or not all(type(n) is int and n > 0 for n in profile)
+            or profile[0] != self.module.kernel_size[0]
+        ):
+            raise RuntimeError(
+                "Incompatible Conv3d observer profile; reprepare and recalibrate."
+            )
+        if profile != self._dynamic_profile:
+            self._clear_dynamic_observers()
+            if profile is not None:
+                # Recreate ownership before PyTorch descends into child state.
+                self._create_dynamic_observers(*profile)
 
     def _create_dynamic_observers(
         self,
@@ -100,17 +135,8 @@ class QuantConv3dDecomposed(QuantModuleBase):
             obs = self._make_obs(obs_name)
             obs_dictionary[dict_key] = obs
             self.add_module(obs_name, obs)
-            # self.add_module(obs_name, obs) is required for torch.export() to properly access
-            # the observer and its internal quantization parameters (cached_scale, cached_zp)
-            # during graph construction. When torch.export() traces the model, it creates
-            # 'get_attr' nodes to access module attributes. If observers are stored only in
-            # dictionaries or via setattr(), torch.export() cannot create valid get_attr nodes
-            # for the observer's cached_scale and cached_zp tensors, leading to warnings:
-            #   "Attempted to insert a get_attr Node with no underlying reference"
-            # By registering with add_module(), the observer becomes part of the module's
-            # named_modules() tree, making both the observer AND its quantization parameters
-            # accessible to the graph construction process. This ensures that the exported
-            # graph can properly reference quantization parameters during Circle conversion.
+            # Profile-local observers must be registered so exported qparam buffers
+            # have real module ownership. Plain dictionaries alone are insufficient.
 
         # Input slice observers (one for each temporal kernel position)
         for k in range(kT):
@@ -121,10 +147,12 @@ class QuantConv3dDecomposed(QuantModuleBase):
             create_observer(f"conv2d_out_k", self._conv2d_obs, k)
 
         # Accumulator observers (one for each output temporal position)
-        for t_out in range(T_out):
-            create_observer(f"accumulator_t", self._acc_obs, t_out)
+        if kT > 1:
+            for t_out in range(T_out):
+                create_observer(f"accumulator_t", self._acc_obs, t_out)
 
         self._dynamic_obs_calibrated = True
+        self._dynamic_profile = (kT, T_out)
 
     @staticmethod
     def _same_padding_pair(kernel_size: int, dilation: int) -> Tuple[int, int]:

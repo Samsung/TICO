@@ -63,8 +63,10 @@ def _flatten_fx_nodes(obj: object) -> list[torch.fx.Node]:
 
 def _is_qparam_buffer_node(node: torch.fx.Node) -> bool:
     """
-    Identify nodes that correspond to cached quantization parameters
-    (e.g., scale / zero-point buffers).
+    Identify lifted affine snapshot buffers in the exported graph.
+
+    These are graph-signature names from the common observer's registered
+    buffers, not a read of observer state or a calibration readiness check.
     """
     name = node.name
     return name.endswith("_cached_scale") or name.endswith("_cached_zp")

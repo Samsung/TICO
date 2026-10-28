@@ -291,9 +291,7 @@ class TestExportMain(unittest.TestCase):
             "export": {"enabled": True},
         }
         adapter = Mock()
-        checkpoint = Mock()
-        checkpoint.to.return_value = checkpoint
-        checkpoint.eval.return_value = checkpoint
+        checkpoint = torch.nn.Identity()
 
         with (
             patch.object(

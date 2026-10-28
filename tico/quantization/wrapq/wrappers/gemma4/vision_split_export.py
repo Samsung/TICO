@@ -24,6 +24,7 @@ import torch.nn as nn
 
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.utils.static_export import ExportCapabilityGuard
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
 )
@@ -86,8 +87,18 @@ class Gemma4VisionPatchStageExportAdapter(nn.Module):
         *,
         mode: Mode,
         output_observer: ObserverBase,
+        capability_owner: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(
+            (
+                capability_owner
+                if capability_owner is not None
+                else _unwrap(patch_embedder)
+            ),
+            "vision" if capability_owner is not None else "required",
+            mode=mode,
+        )
         self.patch_embedder = patch_embedder
         self.output_observer = output_observer
         self.quantized = _quantized_export(
@@ -97,6 +108,7 @@ class Gemma4VisionPatchStageExportAdapter(nn.Module):
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Return patch states in the first encoder input quantization domain."""
+        self._capability_guard.require()
         hidden_states = self.patch_embedder(pixel_values)
         return _apply_export_observer(
             hidden_states,
@@ -129,8 +141,14 @@ class Gemma4VisionEncoderLayerExportAdapter(nn.Module):
         position_sin_observer: ObserverBase,
         input_observer: ObserverBase | None = None,
         output_observers: Iterable[ObserverBase] = (),
+        capability_owner: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(
+            capability_owner if capability_owner is not None else _unwrap(layer),
+            "vision" if capability_owner is not None else "required",
+            mode=mode,
+        )
         self.layer = layer
         self.attention_mask_observer = attention_mask_observer
         self.position_cos_observer = position_cos_observer
@@ -150,6 +168,7 @@ class Gemma4VisionEncoderLayerExportAdapter(nn.Module):
         position_embeddings_sin: torch.Tensor,
     ) -> torch.Tensor:
         """Run one encoder layer with shared external mask and RoPE inputs."""
+        self._capability_guard.require()
         if self.input_observer is not None:
             hidden_states = _apply_export_observer(
                 hidden_states,
@@ -219,8 +238,18 @@ class Gemma4VisionPostProjectionExportAdapter(nn.Module):
         std_scale_observer: ObserverBase | None = None,
         std_bias: torch.Tensor | None = None,
         std_scale: torch.Tensor | None = None,
+        capability_owner: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(
+            (
+                capability_owner
+                if capability_owner is not None
+                else _unwrap(vision_projection)
+            ),
+            "vision" if capability_owner is not None else "required",
+            mode=mode,
+        )
         if num_valid_pool_outputs <= 0:
             raise ValueError(
                 "num_valid_pool_outputs must be positive for Gemma4 vision export."
@@ -273,6 +302,7 @@ class Gemma4VisionPostProjectionExportAdapter(nn.Module):
 
     def forward(self, pooled_hidden_states: torch.Tensor) -> torch.Tensor:
         """Finalize pooled vision features and project them to text width."""
+        self._capability_guard.require()
         hidden_states = _apply_export_observer(
             pooled_hidden_states,
             self.input_observer,
@@ -411,6 +441,7 @@ def build_gemma4_vision_split_export_bundle(
         patch_embedder,
         mode=vision_mode,
         output_observer=encoder.obs_act_in,
+        capability_owner=wrapped_model,
     )
 
     layer_stages: list[nn.Module] = []
@@ -440,6 +471,7 @@ def build_gemma4_vision_split_export_bundle(
                 position_sin_observer=encoder.obs_position_sin,
                 input_observer=(encoder.obs_act_in if layer_index == 0 else None),
                 output_observers=output_observers,
+                capability_owner=wrapped_model,
             )
         )
 
@@ -496,6 +528,7 @@ def build_gemma4_vision_split_export_bundle(
         std_scale_observer=(vision_model.obs_std_scale if standardize else None),
         std_bias=(vision_model.std_bias if standardize else None),
         std_scale=(vision_model.std_scale if standardize else None),
+        capability_owner=wrapped_model,
     )
 
     return Gemma4VisionSplitExportBundle(

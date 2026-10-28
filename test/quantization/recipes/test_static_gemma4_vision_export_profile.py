@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.recipes.debug.static_gemma4_runtime import StaticGemma4Runtime
+from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
     Gemma4VisionPrefillExportAdapter,
@@ -91,6 +92,7 @@ class _FakeWrappedModel(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
+        self._mode = Mode.NO_QUANT
         self.vision_model = _FakeVisionModel()
         self.vision_tower = _FakePTQWrapper(self.vision_model)
         self.embed_vision = _ScaleProjection()

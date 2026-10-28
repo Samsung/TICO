@@ -295,37 +295,39 @@ def _state_contract(model) -> dict:
                     "dtype",
                     "qscheme",
                     "channel_axis",
-                    "_qparams_locked",
                 )
             }
             fields["buffers"] = {
                 key: tensor_record(tensor) for key, tensor in module.named_buffers()
             }
-            # Some observers keep qparams outside registered buffers.
-            for key, value in vars(module).items():
-                if isinstance(value, torch.Tensor):
-                    fields[key] = tensor_record(value)
-                elif key == "_qparams" and value is not None:
-                    if isinstance(value, (tuple, list)):
-                        fields[key] = [
-                            (
-                                tensor_record(item)
-                                if isinstance(item, torch.Tensor)
-                                else _json_value(item)
-                            )
-                            for item in value
+            snapshot = module.frozen_state
+            fields["snapshot"] = None
+            if snapshot is not None:
+                fields["snapshot"] = {
+                    "kind": snapshot.kind,
+                    "policy": snapshot.policy,
+                    "provenance": snapshot.provenance,
+                    "locked": snapshot.locked,
+                    "observed_shape": snapshot.observed_shape,
+                    "fake_quant_enabled": snapshot.fake_quant_enabled,
+                    "scale": (
+                        None
+                        if snapshot.scale is None
+                        else tensor_record(snapshot.scale)
+                    ),
+                    "zero_point": (
+                        None
+                        if snapshot.zero_point is None
+                        else tensor_record(snapshot.zero_point)
+                    ),
+                    "clipping_bounds": (
+                        None
+                        if snapshot.clipping_bounds is None
+                        else [
+                            tensor_record(tensor) for tensor in snapshot.clipping_bounds
                         ]
-                    elif isinstance(value, dict):
-                        fields[key] = {
-                            str(k): (
-                                tensor_record(v)
-                                if isinstance(v, torch.Tensor)
-                                else _json_value(v)
-                            )
-                            for k, v in value.items()
-                        }
-                    else:
-                        fields[key] = _json_value(value)
+                    ),
+                }
             observers[name] = fields
     if not observers or not any(mode == "QUANT" for mode in modes.values()):
         raise ValueError(
@@ -805,6 +807,9 @@ def _worker(options: argparse.Namespace) -> None:
     model = torch.load(options.checkpoint, map_location="cpu", weights_only=False)
     if not isinstance(model, torch.nn.Module):
         raise TypeError("The checkpoint must be a frozen TICO model, not a state_dict.")
+    from tico.quantization.wrapq.lifecycle import validate_frozen_model
+
+    validate_frozen_model(model)
     non_fp32 = [
         name
         for name, value in model.named_parameters()

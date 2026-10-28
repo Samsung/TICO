@@ -533,10 +533,16 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
             past_key_values = DynamicCache(config=self.config)
 
+        if deepstack_visual_embeds is not None:
+            for layer_idx in range(min(len(deepstack_visual_embeds), len(self.layers))):
+                self.require_capability(f"deepstack_{layer_idx}")
+
         # Get input embeddings
         if inputs_embeds is None:
+            self.require_capability("token_embeddings")
             inputs_embeds = self.embed_tokens(input_ids)
         else:
+            self.require_capability("external_embeddings")
             inputs_embeds = self._fq(inputs_embeds, self.obs_inputs_embeds)
 
         if self.rotate_embedding is not None:
@@ -697,3 +703,18 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             self.obs_sin,
         )
         yield from self.obs_deepstack_visual_embeds
+
+    def local_observer_groups(self):
+        # Input routes and each optional DeepStack layer have independent
+        # calibration coverage; text-only inference must not fabricate their grids.
+        groups = {
+            "required": (self.obs_attention_mask, self.obs_cos, self.obs_sin),
+            "token_embeddings": (),
+            "external_embeddings": (self.obs_inputs_embeds,),
+        }
+        for idx, observer in enumerate(self.obs_deepstack_visual_embeds):
+            groups[f"deepstack_{idx}"] = (observer, self.obs_local_this)
+        return groups
+
+    def _conditional_quant_subtrees(self):
+        return {"token_embeddings": ("embed_tokens",)}

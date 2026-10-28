@@ -268,6 +268,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
             Output hidden states shaped ``(1, S, hidden_size)``.
         """
         # Precomputed position embeddings.
+        self.require_entry_available()
         cos = self._fq(
             self.position_embeddings_cos_template,
             self.obs_position_cos,
@@ -319,6 +320,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         Returns:
             A ``Gemma4VisionEncoderPrefillExportAdapter`` wrapping this module.
         """
+        self.require_entry_available()
         if mode != "prefill":
             raise ValueError(f"Unsupported Gemma4 vision encoder export mode: {mode!r}")
 
@@ -329,9 +331,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
             )
 
         if self._mode is Mode.QUANT:
-            # Make sure that all observers are calibrated.
-            for obs in self._all_observers():
-                assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
+            self.require_capability("required")
 
         # Hugging Face casts vision RoPE to the hidden-state dtype. Match the
         # encoder compute dtype when baking static templates so BF16 models do

@@ -35,10 +35,12 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
     Gemma4VisionModelCase,
     Gemma4VisionPoolerCase,
 )
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
     QuantGemma4VisionModel,
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_layer_type_head_dim
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 def _static_cfg(**overrides: int) -> dict:
@@ -209,28 +211,36 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
         hidden_size = 8
         seq_len = 4
 
-        fake = cast(
-            QuantGemma4VisionModel,
-            SimpleNamespace(
-                config=SimpleNamespace(standardize=False, hidden_size=hidden_size),
-                patch_embedder_export=lambda pixels: pixels,
-                encoder_export=lambda inputs_embeds: inputs_embeds,
-                pooler_export=lambda **kwargs: kwargs["hidden_states"],
-                output_length=seq_len,
-                num_valid_pool_outputs=seq_len,
-                obs_strip_padding=object(),
-                obs_last_hidden_state=object(),
-                obs_minus_bias=object(),
-                obs_std_bias=None,
-                obs_std_scale=None,
-                _fq=lambda tensor, observer: tensor,
-            ),
-        )
+        class StaticPooler(torch.nn.Module):
+            def forward(self, *, hidden_states):
+                return hidden_states
+
+        class StaticVisionOwner(QuantModuleBase):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(
+                    standardize=False, hidden_size=hidden_size
+                )
+                self.patch_embedder_export = torch.nn.Identity()
+                self.encoder_export = torch.nn.Identity()
+                self.pooler_export = StaticPooler()
+                self.output_length = seq_len
+                self.num_valid_pool_outputs = seq_len
+                self.obs_strip_padding = IdentityObserver(name="strip_padding")
+                self.obs_last_hidden_state = IdentityObserver(name="last_hidden_state")
+
+            def _all_observers(self):
+                return (self.obs_strip_padding, self.obs_last_hidden_state)
+
+        fake = cast(QuantGemma4VisionModel, StaticVisionOwner())
         pixel_values = torch.randn(1, seq_len, hidden_size)
 
         output = QuantGemma4VisionModel.forward_export(fake, pixel_values)
 
         self.assertEqual(tuple(output.last_hidden_state.shape), (seq_len, hidden_size))
+        torch.testing.assert_close(
+            output.last_hidden_state, pixel_values.reshape(seq_len, hidden_size)
+        )
 
     def test_standardized_model_keeps_standardization_observers(self):
         """The existing standardized tiny path should retain all observers."""

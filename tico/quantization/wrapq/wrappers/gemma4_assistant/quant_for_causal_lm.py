@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.gemma4_assistant.quant_backbone import (
     QuantGemma4AssistantBackbone,
@@ -48,6 +49,27 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
+
+
+class QuantGemma4AssistantLMHeadWeight(QuantModuleBase):
+    """Own the tied weight used by the ordered host sparse head.
+
+    Ordered decoding never executes a dense LM-head projection, so dense
+    activation observers would claim unreachable calibration requirements.
+    """
+
+    def __init__(self, module: nn.Module, *, qcfg=None, fp_name=None):
+        super().__init__(qcfg, fp_name=fp_name)
+        self.module = cast(nn.Linear, module)
+        self.obs_weight = self._make_obs(
+            "weight", qscheme=QScheme.PER_CHANNEL_ASYMM, channel_axis=0
+        )
+
+    def _prepare_calibration(self) -> None:
+        self.obs_weight.collect(self.module.weight)
+
+    def _all_observers(self) -> Iterable:
+        return (self.obs_weight,)
 
 
 @try_register(HF_GEMMA4_ASSISTANT_CLASS_PATH)
@@ -100,7 +122,12 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
             qcfg=qcfg.child("post_projection") if qcfg else None,
             fp_name=join_name(fp_name, "post_projection"),
         )
-        self.lm_head = PTQWrapper(
+        head_type = (
+            QuantGemma4AssistantLMHeadWeight
+            if self.use_ordered_embeddings
+            else PTQWrapper
+        )
+        self.lm_head = head_type(
             fp_model.lm_head,
             qcfg=qcfg.child("lm_head") if qcfg else None,
             fp_name=join_name(fp_name, "lm_head"),
@@ -220,7 +247,10 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
 
     def _lm_head_weight(self) -> torch.Tensor:
         """Return the single (fake-quantized) tied LM-head weight source."""
-        quant_linear = cast(QuantLinear, self.lm_head.wrapped)
+        quant_linear = cast(
+            QuantLinear | QuantGemma4AssistantLMHeadWeight,
+            getattr(self.lm_head, "wrapped", self.lm_head),
+        )
         weight = quant_linear.module.weight
         if self._mode is Mode.QUANT:
             weight = quant_linear.obs_weight.fake_quant(weight)

@@ -27,6 +27,8 @@ from tico.quantization.recipes.evaluation.selection import (
 from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.utils import set_seed
 
+from tico.quantization.wrapq.lifecycle import validate_frozen_model
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -101,6 +103,7 @@ def main() -> None:
             map_location=ctx.device,
             weights_only=False,
         )
+        validate_frozen_model(checkpoint)
         if hasattr(checkpoint, "to"):
             checkpoint = checkpoint.to(ctx.device)
         ctx.model = checkpoint.eval()

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from collections.abc import MutableMapping
+from hashlib import sha256
 from typing import Any, cast, Iterable, Literal, Optional, Tuple, TYPE_CHECKING
 
 import torch
@@ -564,27 +565,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
         return self.obs_new_k, self.obs_new_v
 
     @staticmethod
-    def _has_cache_statistics(observer: ObserverBase) -> bool:
-        if not isinstance(observer, AffineObserverBase) or isinstance(
-            observer, IdentityObserver
-        ):
-            return True
-        if bool(
-            torch.isposinf(observer.min_val).all()
-            and torch.isneginf(observer.max_val).all()
-        ):
-            return False
-        if not bool(
-            torch.isfinite(observer.min_val).all()
-            and torch.isfinite(observer.max_val).all()
-        ):
-            raise RuntimeError(
-                f"Gemma4 {observer.name} has non-finite calibration statistics; reprepare and recalibrate."
-            )
-        return True
-
-    @staticmethod
-    def _validate_frozen_observer(observer: ObserverBase) -> None:
+    def _validate_cache_policy(observer: ObserverBase) -> None:
+        """Keep Gemma's supported cache policy subset separate from readiness."""
         if isinstance(observer, IdentityObserver):
             return
         if (
@@ -603,35 +585,15 @@ class QuantGemma4TextAttention(QuantModuleBase):
             raise ValueError(
                 "Gemma4 affine cache conversion currently supports UINT8 and INT16 storage/compute grids only."
             )
-        if not observer.has_qparams:
-            raise RuntimeError(
-                f"Gemma4 {observer.name} storage/compute qparams are not ready; run prefill calibration (or load valid frozen qparams)."
-            )
-        scale, zp = observer._cached_scale, observer._cached_zp
-        if (
-            scale.numel() != 1
-            or zp.numel() != 1
-            or not bool(torch.isfinite(scale).all() and (scale > 0).all())
-            or not bool(
-                ((zp >= observer.dtype.qmin) & (zp <= observer.dtype.qmax)).all()
-            )
-        ):
-            raise RuntimeError(
-                f"Gemma4 {observer.name} has invalid frozen cache qparams; reprepare and recalibrate."
-            )
 
-    def validate_export_cache(self, mode: str) -> None:
-        """Validate the storage owner and direct storage-to-compute contract."""
-        self._validate_cache_observers()
-        if self._mode is not Mode.QUANT:
-            return
+    def _validate_cache_conversion(self) -> None:
         storage = self.cache_storage_observers()
         for group in (
             (storage[0], self.obs_present_key),
             (storage[1], self.obs_present_value),
         ):
             for observer in group:
-                self._validate_frozen_observer(observer)
+                self._validate_cache_policy(observer)
             identities = [isinstance(observer, IdentityObserver) for observer in group]
             float_input_conversion = identities[0] and not identities[1]
             if any(identities) and not all(identities) and not float_input_conversion:
@@ -639,208 +601,121 @@ class QuantGemma4TextAttention(QuantModuleBase):
                     "Gemma4 cache conversion supports per-tensor affine grids, all-identity paths, or explicit float storage converted to an affine compute grid; other identity/affine combinations are unsupported."
                 )
 
-    def enable_calibration(self) -> None:
+    def validate_export_cache(self, mode: str) -> None:
+        """Request frozen grids while retaining Gemma's storage/source semantics."""
         self._validate_cache_observers()
-        super().enable_calibration()
+        if self._mode is not Mode.QUANT:
+            return
+        self._validate_loaded_state()
+        if not self.is_kv_shared_layer:
+            self.require_capability("cache")
+        for observer in self.cache_storage_observers():
+            observer.require_frozen()
+        self._validate_cache_conversion()
 
-    def freeze_qparams(self) -> None:
-        """Freeze independently observed storage and compute grids."""
+    def _prepare_calibration(self) -> None:
         self._validate_cache_observers()
-        self._mode = Mode.QUANT
-        cache_observers = (
-            self.obs_new_k,
-            self.obs_new_v,
-            self.obs_present_key,
-            self.obs_present_value,
-        )
-        for observer in self._all_observers():
-            observer.enabled = False
-            if (
-                observer in cache_observers
-                and isinstance(observer, AffineObserverBase)
-                and observer.has_qparams
-            ):
-                # A valid externally loaded frozen grid is sufficient, even
-                # when this calibration run never executed the boundary.
-                self._validate_frozen_observer(observer)
-                if observer._qparams_locked or not self._has_cache_statistics(observer):
-                    continue
-            if observer in cache_observers and not self._has_cache_statistics(observer):
-                raise RuntimeError(
-                    f"Gemma4 {observer.name} has no calibration statistics; "
-                    "run prefill calibration or load valid frozen qparams."
-                )
-            observer.compute_qparams()
-        for child in self._child_quant_modules():
-            child.freeze_qparams()
 
-    _CACHE_OBSERVER_NAMES = (
-        "new_k",
-        "new_v",
-        "present_key",
-        "present_value",
-    )
-
-    def _owned_cache_observer_names(self) -> tuple[str, ...]:
-        # A shared consumer's dormant new_* observers never define storage.
-        return (
-            self._CACHE_OBSERVER_NAMES[2:]
-            if self.is_kv_shared_layer
-            else self._CACHE_OBSERVER_NAMES
-        )
-
-    @staticmethod
-    def _observer_grid_policy(
-        observer: ObserverBase,
-    ) -> tuple[str, str, str, Optional[int], tuple[tuple[str, Any], ...]]:
-        # Record the built-in affine observers' calibration options as well as
-        # their grid type. Statistics and lifecycle flags are saved separately.
-        options = tuple(
-            (name, getattr(observer, name))
-            for name in (
-                "fake_quant_enabled",
-                "momentum",
-                "percentile",
-                "lower_percentile",
-                "upper_percentile",
-                "max_samples",
-                "samples_per_batch",
-                "seed",
-            )
-            if hasattr(observer, name)
-        )
-        return (
-            f"{type(observer).__module__}.{type(observer).__qualname__}",
-            str(observer.dtype),
-            str(observer.qscheme),
-            observer.channel_axis,
-            options,
-        )
-
-    def get_extra_state(self) -> dict[str, Any]:
-        """Persist frozen cache grids, whose generic affine cache is transient."""
-        self._validate_cache_observers()
-        qparams = {}
-        policies = {}
-        for name in self._owned_cache_observer_names():
-            observer = getattr(self, f"obs_{name}")
-            policies[name] = self._observer_grid_policy(observer)
-            if (
-                isinstance(observer, AffineObserverBase)
-                and not isinstance(observer, IdentityObserver)
-                and observer.has_qparams
-            ):
-                qparams[name] = (
-                    observer._cached_scale,
-                    observer._cached_zp,
-                    observer._qparams_locked,
-                )
-        source = getattr(self, "_cache_source", None)
-        source_grids = []
-        if source is not None or getattr(self, "_external_float_cache", False):
-            for observer in self.cache_storage_observers():
-                grid = None
-                if (
-                    isinstance(observer, AffineObserverBase)
-                    and not isinstance(observer, IdentityObserver)
-                    and observer.has_qparams
-                ):
-                    grid = (observer._cached_scale, observer._cached_zp)
-                source_grids.append((self._observer_grid_policy(observer), grid))
+    def local_observer_groups(self) -> dict[str, tuple[ObserverBase, ...]]:
+        observers = tuple(self._all_observers())
+        if self.is_kv_shared_layer:
+            return {"required": observers}
+        storage = (self.obs_new_k, self.obs_new_v)
         return {
-            "version": 2,
-            "frozen": self._mode is Mode.QUANT,
-            "qparams": qparams,
-            "source_grids": source_grids,
-            "external_float_cache": bool(getattr(self, "_external_float_cache", False)),
-            "policies": policies,
-            "source_layer_idx": None if source is None else source.layer_idx,
-            "source_layer_type": None if source is None else source.layer_type,
+            "required": tuple(obs for obs in observers if obs not in storage),
+            "cache": storage,
         }
 
+    def _freeze_dependencies(self) -> tuple[ObserverBase, ...]:
+        if self.is_kv_shared_layer:
+            return self.cache_storage_observers()
+        return ()
+
+    def _validate_freeze(self, plan, available: set[str]) -> None:
+        self._validate_cache_observers()
+        if self.is_kv_shared_layer or "cache" in available:
+            self._validate_cache_conversion()
+
+    @staticmethod
+    def _source_fingerprint(observer: ObserverBase) -> tuple:
+        """Record a borrowed boundary's identity without copying its ownership."""
+        state = observer.frozen_state
+        policy = observer.policy_signature()
+        if state is None:
+            return policy, None
+        digest = sha256()
+        for tensor in (state.scale, state.zero_point):
+            if tensor is not None:
+                value = tensor.detach().cpu().contiguous()
+                digest.update(str(value.dtype).encode())
+                digest.update(str(tuple(value.shape)).encode())
+                digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+        return policy, digest.hexdigest()
+
+    def get_extra_state(self) -> dict[str, Any]:
+        """Persist source binding; common observers own every frozen grid."""
+        self._validate_cache_observers()
+        state = super().get_extra_state()
+        source = getattr(self, "_cache_source", None)
+        has_source = source is not None or getattr(self, "_external_float_cache", False)
+        state["gemma_cache"] = {
+            "version": 3,
+            "external_float_cache": bool(getattr(self, "_external_float_cache", False)),
+            "source_layer_idx": None if source is None else source.layer_idx,
+            "source_layer_type": None if source is None else source.layer_type,
+            "source_fingerprints": (
+                tuple(
+                    self._source_fingerprint(observer)
+                    for observer in self.cache_storage_observers()
+                )
+                if has_source
+                else ()
+            ),
+        }
+        return state
+
     def set_extra_state(self, state: dict[str, Any]) -> None:
-        """Restore frozen grids and validate the constructor's source binding."""
-        if state.get("version") != 2:
-            raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
-        names = self._owned_cache_observer_names()
-        if set(state.get("policies", {})) != set(names) or not set(
-            state.get("qparams", {})
-        ).issubset(names):
-            raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
-        if bool(state.get("external_float_cache", False)) != bool(
+        binding = state.get("gemma_cache", {})
+        if binding.get("version") != 3:
+            raise RuntimeError(
+                "Gemma4 legacy cache-only state cannot restore exact non-cache frozen grids; reprepare and recalibrate."
+            )
+        if bool(binding.get("external_float_cache", False)) != bool(
             getattr(self, "_external_float_cache", False)
         ):
             raise RuntimeError(
                 "Gemma4 checkpoint external float cache contract differs; declare the original cache boundary before loading state_dict."
             )
         source = getattr(self, "_cache_source", None)
-        expected = state.get("source_layer_idx")
-        if expected != (None if source is None else source.layer_idx) or state.get(
-            "source_layer_type"
-        ) != (None if source is None else source.layer_type):
+        if binding.get("source_layer_idx") != (
+            None if source is None else source.layer_idx
+        ) or binding.get("source_layer_type") != (
+            None if source is None else source.layer_type
+        ):
             raise RuntimeError(
                 "Gemma4 checkpoint cache producer binding differs; bind the original producer before loading state_dict."
             )
         has_source = source is not None or getattr(self, "_external_float_cache", False)
-        if len(state.get("source_grids", [])) != (2 if has_source else 0):
+        fingerprints = binding.get("source_fingerprints", ())
+        if len(fingerprints) != (2 if has_source else 0):
             raise RuntimeError(
-                "Gemma4 checkpoint cache source grids differ; restore the original "
-                "producer or external float boundary, or reprepare and recalibrate."
+                "Gemma4 checkpoint cache source contract differs; reprepare and recalibrate."
             )
-        if has_source:
-            for observer, (policy, grid) in zip(
-                self.cache_storage_observers(),
-                state.get("source_grids", []),
-                strict=True,
-            ):
-                if policy != self._observer_grid_policy(observer):
-                    raise RuntimeError(
-                        "Gemma4 checkpoint producer storage policy differs; bind the original producer before loading state_dict."
-                    )
-                if grid is not None and (
-                    not isinstance(observer, AffineObserverBase)
-                    or not observer.has_qparams
-                    or not torch.equal(observer._cached_scale.cpu(), grid[0].cpu())
-                    or not torch.equal(observer._cached_zp.cpu(), grid[1].cpu())
-                ):
-                    raise RuntimeError(
-                        "Gemma4 checkpoint producer storage qparams differ; load the original frozen producer before loading the consumer state_dict."
-                    )
-                if state.get("frozen", False):
-                    if not isinstance(observer, IdentityObserver) and grid is None:
-                        raise RuntimeError(
-                            "Gemma4 checkpoint lacks frozen producer storage qparams; reprepare and recalibrate."
-                        )
-                    self._validate_frozen_observer(observer)
-        for name in names:
-            observer = getattr(self, f"obs_{name}")
-            if state.get("policies", {}).get(name) != self._observer_grid_policy(
-                observer
-            ):
-                raise RuntimeError(
-                    "Gemma4 checkpoint cache observer policy differs; reprepare and recalibrate."
-                )
-        for name, (scale, zp, locked) in state.get("qparams", {}).items():
-            observer = getattr(self, f"obs_{name}")
-            if not isinstance(observer, AffineObserverBase):
-                raise RuntimeError(
-                    "Gemma4 checkpoint cache observer policy differs; reprepare and recalibrate."
-                )
-            observer.load_qparams(
-                scale.to(observer.min_val.device),
-                zp.to(observer.min_val.device),
-                lock=locked or bool(state.get("frozen", False)),
+        self._loaded_source_fingerprints = tuple(fingerprints)
+        super().set_extra_state(state)
+
+    def _validate_loaded_state(self) -> None:
+        expected = getattr(self, "_loaded_source_fingerprints", None)
+        if expected:
+            actual = tuple(
+                self._source_fingerprint(observer)
+                for observer in self.cache_storage_observers()
             )
-        if state.get("frozen", False):
-            for name in names:
-                observer = getattr(self, f"obs_{name}")
-                if not isinstance(observer, IdentityObserver) and name not in state.get(
-                    "qparams", {}
-                ):
-                    raise RuntimeError(
-                        f"Gemma4 checkpoint lacks frozen {name} cache qparams; reprepare and recalibrate."
-                    )
-                self._validate_frozen_observer(observer)
+            if actual != expected:
+                raise RuntimeError(
+                    "Gemma4 checkpoint producer storage qparams differ; load the original frozen producer before loading the consumer state_dict."
+                )
+            del self._loaded_source_fingerprints
 
     def _load_from_state_dict(
         self,
@@ -1285,11 +1160,22 @@ class QuantGemma4TextAttention(QuantModuleBase):
             they do not own K/V projection weights.
         """
         self._validate_cache_observers()
+        self._validate_loaded_state()
         past_key_value = kwargs.pop("past_key_values", past_key_value)
         shared_kv_states = kwargs.pop("shared_kv_states", None)
         cache_output_mode_normalized = self._normalize_cache_output_mode(
             cache_output_mode
         )
+        if (
+            self._mode is Mode.QUANT
+            and not self.is_kv_shared_layer
+            and (
+                use_cache
+                or past_key_value is not None
+                or (self.store_full_length_kv and shared_kv_states is not None)
+            )
+        ):
+            self.require_capability("cache")
 
         hidden = self._fq(hidden_states, self.obs_hidden)
         batch_size, seq_len, _ = hidden.shape

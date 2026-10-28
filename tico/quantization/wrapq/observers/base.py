@@ -13,7 +13,8 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from dataclasses import dataclass, replace
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -22,17 +23,58 @@ from tico.quantization.wrapq.dtypes import DType, UINT8
 from tico.quantization.wrapq.qscheme import QScheme
 
 
-class ObserverBase(nn.Module, ABC):
-    """
-    Minimal abstract base for all observers/quantizers.
+class ObserverNotReadyError(RuntimeError):
+    """A required observation or semantic extent is missing."""
 
-    Subclasses must implement:
-      - reset()
-      - collect(x)
-      - fake_quant(x)
-      - compute_qparams(): optional in practice for some observers (e.g., MX),
-        but still part of the interface; those can return None.
+
+@dataclass(frozen=True)
+class FrozenObserverState:
+    """Frozen-state payload, validated by an observer before installation.
+
+    The dataclass prevents field reassignment, but tensor storage is mutable.
+    Observer snapshot reads clone tensor payloads to protect the owned state.
     """
+
+    kind: str
+    policy: tuple
+    provenance: str
+    locked: bool = False
+    fake_quant_enabled: bool = True
+    scale: Optional[torch.Tensor] = None
+    zero_point: Optional[torch.Tensor] = None
+    observed_shape: Optional[tuple[int, ...]] = None
+    clipping_bounds: Optional[tuple[torch.Tensor, torch.Tensor]] = None
+
+    def clone(self) -> "FrozenObserverState":
+        """Return a snapshot with detached, independently owned tensor payloads."""
+        return replace(
+            self,
+            scale=None if self.scale is None else self.scale.detach().clone(),
+            zero_point=(
+                None if self.zero_point is None else self.zero_point.detach().clone()
+            ),
+            clipping_bounds=(
+                None
+                if self.clipping_bounds is None
+                else (
+                    self.clipping_bounds[0].detach().clone(),
+                    self.clipping_bounds[1].detach().clone(),
+                )
+            ),
+        )
+
+
+class ObserverBase(nn.Module, ABC):
+    """Common calibration, fake-quantization and frozen-state protocol.
+
+    Subclasses implement statistics collection, reset, fake quantization and
+    candidate derivation, extending validation and installation as needed.
+    Collection and fake-quantization flags control independent operations.
+    Model-wide freezing derives and validates every candidate before committing
+    any observer through the lifecycle coordinator.
+    """
+
+    STATE_VERSION = 1
 
     def __init__(
         self,
@@ -40,7 +82,7 @@ class ObserverBase(nn.Module, ABC):
         name: str,
         dtype: DType = UINT8,
         qscheme: QScheme = QScheme.PER_TENSOR_ASYMM,
-        channel_axis: Optional[int] = None,  # None → per-tensor
+        channel_axis: Optional[int] = None,
     ):
         super().__init__()
         self.name = name
@@ -49,65 +91,354 @@ class ObserverBase(nn.Module, ABC):
         self.channel_axis = channel_axis if qscheme.is_per_channel() else None
         self.enabled = True
         self.fake_quant_enabled = True
+        self._frozen = False
+        self._frozen_policy: Optional[tuple] = None
+        self._requires_recalibration = False
+        self._provenance: Optional[str] = None
+        self._observed_shape: Optional[tuple[int, ...]] = None
+
+    def _policy(self) -> tuple:
+        """Identify the observer implementation and its quantization settings."""
+        return (
+            self.__class__.__module__,
+            self.__class__.__qualname__,
+            self.dtype.bits,
+            self.dtype.signed,
+            self.qscheme.name,
+            self.channel_axis,
+        )
+
+    def policy_signature(self) -> tuple:
+        """Return the policy signature used to check frozen-state compatibility."""
+        return self._policy()
+
+    def validate_loaded_state(self) -> None:
+        """Reject unsupported or corrupt restored state and validate frozen state.
+
+        Legacy whole-module checkpoints cannot prove exact frozen semantics and
+        must be prepared and calibrated again.
+        """
+        if not hasattr(self, "_frozen"):
+            raise RuntimeError(
+                f"Observer {self.name!r}: legacy whole-module state cannot prove exact frozen semantics; reprepare and recalibrate."
+            )
+        if any(
+            not isinstance(getattr(self, field, None), bool)
+            for field in ("_frozen", "enabled", "fake_quant_enabled")
+        ):
+            raise RuntimeError(
+                f"Observer {self.name!r}: corrupt frozen flags; reprepare and recalibrate."
+            )
+        if self._frozen:
+            if self.enabled:
+                raise RuntimeError(
+                    f"Observer {self.name!r}: frozen collection cannot be enabled."
+                )
+            self.validate_candidate(self.require_frozen())
+
+    def observe_shape(self, shape) -> None:
+        """Record shape while rejecting changes to per-channel rank or extent.
+
+        Shape observation does not collect numerical statistics, so an empty
+        tensor can still establish the channel extent of an imported grid.
+        Frozen observers check compatibility without replacing the stored shape.
+        """
+        shape = tuple(int(n) for n in shape)
+        if self.channel_axis is not None:
+            axis = self.channel_axis
+            if not -len(shape) <= axis < len(shape):
+                raise RuntimeError(
+                    f"Observer {self.name!r}: channel axis {axis} is invalid for shape {shape}."
+                )
+            if self._observed_shape is not None:
+                old = self._observed_shape
+                if len(old) != len(shape) or old[axis] != shape[axis]:
+                    raise RuntimeError(
+                        f"Observer {self.name!r}: incompatible observed channel extent."
+                    )
+        if not self._frozen:
+            self._observed_shape = shape
+
+    def _reset_frozen_state(self) -> None:
+        """Clear lifecycle metadata without changing collection or fake-quant flags."""
+        self._requires_recalibration = False
+        self._frozen = False
+        self._frozen_policy = None
+        self._provenance = None
+        self._observed_shape = None
 
     def set_fake_quant_enabled(self, enabled: bool) -> None:
-        """Enable or bypass fake quantization independently of calibration."""
+        """Enable or bypass fake quantization independently of calibration.
+
+        Enabling a frozen bypass-only state requires recalibration because that
+        state has no numerical grid. Disabling preserves any existing grid.
+        """
+        if enabled and self._frozen and self._provenance == "bypassed":
+            raise RuntimeError(
+                f"Observer {self.name!r} has no frozen grid; recalibrate before enabling fake quantization."
+            )
         self.fake_quant_enabled = bool(enabled)
 
     def enable_fake_quant(self) -> None:
-        """Enable fake quantization for quantized-mode calls."""
+        """Enable fake quantization, rejecting a frozen bypass-only state."""
         self.set_fake_quant_enabled(True)
 
     def disable_fake_quant(self) -> None:
-        """Bypass fake quantization for quantized-mode calls."""
+        """Bypass fake quantization without changing calibration or frozen grids."""
         self.set_fake_quant_enabled(False)
 
     @abstractmethod
     def reset(self) -> None:
-        """Clear any running statistics or cached params."""
+        """Clear statistics, cached qparams and frozen state for a fresh cycle.
+
+        Subclasses also clear imported locks when applicable. Reset does not
+        itself re-enable collection or change the fake-quantization policy.
+        """
         raise NotImplementedError
 
     def collect(self, x: torch.Tensor) -> None:
-        """
-        Update running statistics with a new batch of data.
+        """Observe shape and update statistics when collection is enabled.
 
-        This base implementation guards on `enabled` and then calls `_update_stats(x)`.
-        Subclasses should implement `_update_stats(x)` instead of overriding `collect`.
+        Frozen observers ignore collection; restored statistics that require
+        recalibration reject calls until reset. Before freezing, nonempty inputs
+        record shape even when numerical collection is disabled by an import.
+        Empty inputs never update statistics; only imported per-channel state
+        learns semantic extent from them.
+
+        Subclasses implement ``_update_stats()`` rather than overriding this gate.
         """
-        if not self.enabled:
+        if self._requires_recalibration:
+            raise ObserverNotReadyError(
+                f"Observer {self.name!r}: restored statistics require a fresh calibration cycle; reset and recalibrate."
+            )
+        if self._frozen:
             return
-        self._update_stats(x)
+        if x.numel() == 0:
+            # Empty storage has no statistics, but an imported grid still needs
+            # the semantic channel extent carried by the tensor's shape.
+            if self._provenance == "imported" and self.channel_axis is not None:
+                self.observe_shape(x.shape)
+            return
+        # Imported locks suppress statistics, but still need the site's extent.
+        self.observe_shape(x.shape)
+        if self.enabled:
+            self._update_stats(x)
 
     @abstractmethod
     def _update_stats(self, x: torch.Tensor) -> None:
-        """
-        Update running statistics (min/max, hist, mse buffers, ...).
+        """Update subclass statistics, such as min/max, histograms or samples.
 
-        Must be implemented by subclasses (e.g., MinMax, EMA, Histogram, MSE).
+        ``collect()`` supplies a nonempty tensor only when collection is enabled.
+        Stateless observers may implement this hook as a no-op.
         """
         raise NotImplementedError
 
     @abstractmethod
     def fake_quant(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Apply the observer's quantization.
-        Implementations may or may not rely on qparams.
+        """Apply this observer's quantization policy, or return the bypass input.
+
+        Implementations honor ``fake_quant_enabled`` independently of collection.
+        Affine observers use their validated grid; stateless Identity and MX
+        policies do not require affine qparams.
         """
         raise NotImplementedError
 
     @abstractmethod
     def compute_qparams(self) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
-        """
-        Compute and (if applicable) cache quantization params.
-        Affine observers typically return (scale, zero_point).
-        Observers that do not use qparams (e.g., MX) may return None.
+        """Finalize this observer and return its affine qparams when applicable.
+
+        Implementations derive and install a candidate; Identity and MX return
+        ``None``. Model-wide freeze uses the separate candidate protocol so every
+        observer can be validated before any state is committed.
         """
         raise NotImplementedError
 
-    # String repr helps debugging
+    def derive_candidate(self) -> FrozenObserverState:
+        """Derive a candidate without mutating statistics or installed state.
+
+        Subclasses may reuse compatible imported grids or describe a stateless
+        policy. Missing required calibration or channel extent must raise
+        ``ObserverNotReadyError`` rather than manufacture qparams.
+        """
+        raise RuntimeError(
+            f"Observer {type(self).__name__} must implement the pure derive_candidate protocol; migrate legacy compute_qparams overrides."
+        )
+
+    def validate_candidate(self, state: FrozenObserverState) -> None:
+        """Check candidate schema and policy compatibility without changing state.
+
+        Subclasses extend these checks for their grid, provenance and shape rules.
+        """
+        if not isinstance(state.locked, bool) or not isinstance(
+            state.fake_quant_enabled, bool
+        ):
+            raise RuntimeError(f"Observer {self.name!r}: invalid frozen flags.")
+        if state.observed_shape is not None and (
+            not isinstance(state.observed_shape, tuple)
+            or not all(isinstance(n, int) and n >= 0 for n in state.observed_shape)
+        ):
+            raise RuntimeError(f"Observer {self.name!r}: invalid frozen shape schema.")
+        if state.policy != self._policy():
+            raise RuntimeError(
+                f"Observer {self.name!r}: incompatible frozen policy; reprepare and recalibrate."
+            )
+        if state.kind not in ("identity", "mx", "bypass", "affine"):
+            raise RuntimeError(f"Observer {self.name!r}: invalid frozen state kind.")
+        if state.provenance not in ("calibrated", "imported", "stateless", "bypassed"):
+            raise RuntimeError(f"Observer {self.name!r}: invalid frozen provenance.")
+
+    def install_candidate(self, state: FrozenObserverState) -> None:
+        """Validate and commit one candidate, disabling further collection.
+
+        Subclasses also install numerical state. The lifecycle coordinator owns
+        atomic freezing and rollback across multiple observers.
+        """
+        self.validate_candidate(state)
+        self._frozen = True
+        self._frozen_policy = state.policy
+        self._provenance = state.provenance
+        self._observed_shape = state.observed_shape
+        self.fake_quant_enabled = state.fake_quant_enabled
+        self.enabled = False
+
+    @property
+    def frozen_state(self) -> Optional[FrozenObserverState]:
+        """Return an installed-state snapshot, or ``None`` before freezing.
+
+        Numerical subclasses include cloned tensor payloads so snapshot mutation
+        cannot change the observer's owned grid.
+        """
+        if not self._frozen:
+            return None
+        if self._provenance is None:
+            raise RuntimeError(
+                f"Observer {self.name!r}: frozen state lacks provenance."
+            )
+        return FrozenObserverState(
+            kind=self._state_kind(),
+            policy=self._frozen_policy or self._policy(),
+            provenance=self._provenance,
+            fake_quant_enabled=self.fake_quant_enabled,
+            observed_shape=self._observed_shape,
+        )
+
+    def _state_kind(self) -> str:
+        """Identify the frozen policy kind; subclasses supply their concrete kind."""
+        return "bypass"
+
+    def _check_frozen_policy(self) -> None:
+        """Reject quantization settings that differ from the frozen policy."""
+        if self._frozen_policy is not None and self._frozen_policy != self._policy():
+            raise RuntimeError(
+                f"Observer {self.name!r}: frozen policy changed; reprepare and recalibrate."
+            )
+
+    def require_frozen(self) -> FrozenObserverState:
+        """Require installed frozen state with an unchanged quantization policy."""
+        state = self.frozen_state
+        if state is None:
+            raise ObserverNotReadyError(
+                f"Observer {self.name!r} is not frozen; calibrate and convert first."
+            )
+        self._check_frozen_policy()
+        return state
+
+    def get_extra_state(self) -> dict[str, Any]:
+        """Serialize versioned lifecycle metadata and execution flags.
+
+        Numerical subclasses preserve exact grids through their registered
+        buffers and any additional subclass metadata.
+        """
+        return {
+            "version": self.STATE_VERSION,
+            "policy": self._frozen_policy or self._policy(),
+            "frozen": self._frozen,
+            "provenance": self._provenance,
+            "observed_shape": self._observed_shape,
+            "enabled": self.enabled,
+            "fake_quant_enabled": self.fake_quant_enabled,
+            "requires_recalibration": self._requires_recalibration,
+        }
+
+    def set_extra_state(self, state) -> None:
+        """Restore lifecycle metadata, rejecting incompatible or corrupt state.
+
+        Installed frozen state must pass validation under the current policy.
+        """
+        if not isinstance(state, dict) or state.get("version") != self.STATE_VERSION:
+            raise RuntimeError(
+                f"Observer {self.name!r}: unsupported frozen-state version; reprepare and recalibrate."
+            )
+        if state.get("policy") != self._policy():
+            raise RuntimeError(
+                f"Observer {self.name!r}: incompatible frozen policy; reprepare and recalibrate."
+            )
+        for field in (
+            "frozen",
+            "enabled",
+            "fake_quant_enabled",
+            "requires_recalibration",
+        ):
+            if not isinstance(state.get(field), bool):
+                raise RuntimeError(
+                    f"Observer {self.name!r}: corrupt frozen-state field {field}."
+                )
+        self._frozen_policy = (
+            state["policy"]
+            if state["frozen"] or state.get("provenance") == "imported"
+            else None
+        )
+        self._requires_recalibration = state["requires_recalibration"]
+        self._frozen = state["frozen"]
+        if self._frozen and self._requires_recalibration:
+            raise RuntimeError(
+                f"Observer {self.name!r}: frozen state requires recalibration."
+            )
+        if "provenance" not in state or "observed_shape" not in state:
+            raise RuntimeError(
+                f"Observer {self.name!r}: incomplete frozen-state schema."
+            )
+        self._provenance = state["provenance"]
+        self._observed_shape = state["observed_shape"]
+        self.enabled = state["enabled"]
+        self.fake_quant_enabled = state["fake_quant_enabled"]
+        if self._frozen:
+            snapshot = self.frozen_state
+            if snapshot is None or self.enabled:
+                raise RuntimeError(f"Observer {self.name!r}: corrupt frozen readiness.")
+            self.validate_candidate(snapshot)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """Load state, requiring fresh calibration when legacy metadata is absent."""
+        legacy = prefix + "_extra_state" not in state_dict
+        if legacy:
+            self._reset_frozen_state()
+            self._requires_recalibration = True
+            self.enabled = True
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+        if legacy and prefix + "_extra_state" in missing_keys:
+            missing_keys.remove(prefix + "_extra_state")
+
     def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}(name={self.name}, dtype={str(self.dtype)}, "
-            f"qscheme={str(self.qscheme)}, channel_axis={self.channel_axis}, "
+            f"{self.__class__.__name__}(name={self.name}, dtype={self.dtype}, "
+            f"qscheme={self.qscheme}, channel_axis={self.channel_axis}, "
             f"enabled={self.enabled}, fake_quant_enabled={self.fake_quant_enabled})"
         )

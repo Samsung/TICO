@@ -280,6 +280,7 @@ class TestQuantFairseqEncoder(unittest.TestCase):
                 child_modes.append(m._mode)
         self.assertTrue(any(m == Mode.CALIB for m in child_modes))
 
+        enc(self._make_src())
         enc.freeze_qparams()
         self.assertEqual(enc._mode, Mode.QUANT)
         child_modes = []

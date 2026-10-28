@@ -59,9 +59,8 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
         self.obs_act_out = self._make_obs("act_out")
         self.obs_embed_scale = self._make_obs("embed_scale")
 
-    def enable_calibration(self) -> None:
-        """Enable calibration and collect static weight and scale ranges."""
-        super().enable_calibration()
+    def _prepare_calibration(self) -> None:
+        """Capture static weight and scale ranges after the common reset."""
         self.obs_weight.collect(self.module.weight)
         self.obs_embed_scale.collect(self.module.embed_scale)
 
@@ -107,3 +106,14 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
             self.obs_embed_scale,
             self.obs_act_out,
         )
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Describe active lookup sites without entering the embedding table."""
+        if self._mode is not Mode.QUANT:
+            return
+        device = self.module.weight.device
+        yield "obs_weight", self.obs_weight, device
+        yield "obs_embedding", self.obs_embedding, device
+        if not isinstance(self.module, FusedGemma4PLEEmbedding):
+            yield "obs_embed_scale", self.obs_embed_scale, self.module.embed_scale.device
+        yield "obs_act_out", self.obs_act_out, device

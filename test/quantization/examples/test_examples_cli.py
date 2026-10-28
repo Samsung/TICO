@@ -127,12 +127,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
                 """Record the evaluated context."""
                 calls["ctx"] = ctx
 
-        class FakeCheckpoint:
-            """Fake checkpoint with an eval method."""
-
-            def eval(self):
-                """Return a marker representing the evaluated checkpoint."""
-                return "checkpoint-eval"
+        checkpoint = torch.nn.Identity()
 
         argv = [
             "evaluate.py",
@@ -167,7 +162,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             patch.object(
                 evaluate_cli.torch,
                 "load",
-                lambda path, **kwargs: FakeCheckpoint(),
+                lambda path, **kwargs: checkpoint,
             ),
             patch.object(
                 sys,
@@ -177,7 +172,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         ):
             evaluate_cli.main()
 
-        self.assertEqual(calls["ctx"].model, "checkpoint-eval")
+        self.assertIs(calls["ctx"].model, checkpoint)
         self.assertEqual(
             calls["ctx"].cfg["evaluation"]["selected_tasks"],
             ["lm_eval", "ppl"],

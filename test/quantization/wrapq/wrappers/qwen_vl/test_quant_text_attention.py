@@ -962,9 +962,10 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
                     {"attention": QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)}
                 )
                 state = source.state_dict()
-                # Stateless legacy observers leave no tensor keys to identify
-                # the obsolete contract, so the module version must protect it.
-                self.assertFalse(any("obs_past_" in key for key in state))
+                # Recreate the old stateless schema, which had no observer keys.
+                for key in list(state):
+                    if "obs_past_" in key:
+                        del state[key]
                 getattr(state, "_metadata")["attention"]["version"] = 1
                 with self.assertRaisesRegex(RuntimeError, "reprepare.*recalibrate"):
                     target.load_state_dict(state, strict=strict)
@@ -990,3 +991,31 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
                     )
                     attention.freeze_qparams()
                     attention.as_export_module("decode")
+
+    def test_fused_scale_sites_are_structurally_inactive(self):
+        for fusion in ("k_norm", "none"):
+            with self.subTest(fusion=fusion):
+                qcfg = make_affine_ptq_config(
+                    model_args={"attention": {"scale_fusion": fusion}}
+                )
+                attention = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
+                attention.enable_calibration()
+                hidden = torch.randn(1, 3, self.hidden_size)
+                rope = self._rand_rope(1, 3)
+                attention(hidden, rope, use_cache=False)
+                attention.freeze_qparams()
+                names = dict(attention.named_observers(recurse=False))
+                self.assertEqual("logits_raw" in names, fusion == "none")
+                self.assertEqual("scale" in names, fusion == "none")
+                self.assertEqual(len(attention(hidden, rope, use_cache=False)), 2)
+
+    def test_imported_cache_grids_need_no_range_reconstruction(self):
+        attention = self._prefill_calibrated()
+        for observer in (attention.obs_new_k, attention.obs_new_v):
+            observer.reset()
+            observer.load_qparams(torch.tensor(0.125), torch.tensor(113))
+        attention.require_calibrated_cache()
+        hidden = torch.randn(1, 1, self.hidden_size)
+        rope = self._rand_rope(1, 1)
+        outputs = attention(hidden, rope, use_cache=True)
+        self.assertEqual(outputs[2][0].shape, (1, self.num_kv_heads, 1, self.head_dim))

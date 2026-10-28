@@ -47,6 +47,7 @@ class TestPTQWrapper(unittest.TestCase):
     def test_mode_transitions(self):
         self.wrapper.enable_calibration()
         self.assertIs(self.wrapper._mode, Mode.CALIB)
+        self.wrapper(self.input)
         self.wrapper.freeze_qparams()
         self.assertIs(self.wrapper._mode, Mode.QUANT)
 
@@ -171,7 +172,7 @@ class TestPTQWrapperNoDoubleProcessing(unittest.TestCase):
     class ParentQuant(QuantModuleBase):
         def __init__(self, fp_mod: torch.nn.Module, qcfg: Optional[PTQConfig] = None):
             super().__init__(qcfg or make_affine_ptq_config(dtype=DType.uint(8)))
-            # PTQWrapper is a QuantModuleBase child -> visited by _child_quant_modules()
+            # The coordinator visits the transparent wrapper and its owned child once.
             self.child = PTQWrapper(fp_mod, qcfg=self.qcfg)
 
         def forward(self, x):
@@ -183,7 +184,7 @@ class TestPTQWrapperNoDoubleProcessing(unittest.TestCase):
 
     def _instrument_counters(self, ptq: PTQWrapper):
         """
-        Monkey-patch each child's observer to count reset/compute_qparams calls.
+        Monkey-patch each child's observer to count reset/install_candidate calls.
         Returns a dict: name -> obs (with .reset_calls / .compute_calls fields).
         """
         hooked = {}
@@ -194,7 +195,7 @@ class TestPTQWrapperNoDoubleProcessing(unittest.TestCase):
 
             # stash originals
             orig_reset = obs.reset
-            orig_compute = obs.compute_qparams
+            orig_compute = obs.install_candidate
 
             def make_reset(o=obs, f=orig_reset):
                 def _r(*a, **k):
@@ -211,7 +212,7 @@ class TestPTQWrapperNoDoubleProcessing(unittest.TestCase):
                 return _c
 
             obs.reset = make_reset()
-            obs.compute_qparams = make_compute()
+            obs.install_candidate = make_compute()
             hooked[name] = obs
         return hooked
 
@@ -240,7 +241,7 @@ class TestPTQWrapperNoDoubleProcessing(unittest.TestCase):
         # Run a forward pass to allow observers to collect (if they need it)
         _ = parent(x)
 
-        # 2) freeze_qparams() on parent should compute_qparams for each child observer ONCE
+        # 2) freeze_qparams() on parent should install each child snapshot ONCE
         parent.freeze_qparams()
         for name, obs in obs_map.items():
             self.assertEqual(

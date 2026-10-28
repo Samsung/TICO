@@ -121,6 +121,17 @@ class TestEMAObserver(unittest.TestCase):
                     self.assertEqual(obs.min_val.dtype, dtype)
                     self.assertEqual(obs.max_val.dtype, dtype)
                     self.assertEqual(obs.min_val.device, x.device)
+                    if dtype == torch.float64:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "per-channel scale dtype"
+                        ):
+                            obs.compute_qparams()
+                        self.assertTrue(torch.equal(obs.min_val, original))
+                        self.assertTrue(torch.equal(obs.max_val, original))
+                        self.assertEqual(obs.min_val.dtype, torch.float64)
+                        self.assertIsNone(obs.frozen_state)
+                        self.assertTrue(obs.enabled)
+                        continue
                     scale, zero = obs.compute_qparams()
                     self.assertTrue(torch.equal(scale, original.abs() / 127))
                     self.assertTrue(torch.equal(zero, torch.zeros(3, dtype=torch.int)))

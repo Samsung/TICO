@@ -494,6 +494,7 @@ class QuantLlamaModel(QuantModuleBase):
         """
         Return RoPE tables for the current model step.
         """
+        self.require_capability("generated_rope")
         prepared = getattr(self, "_static_export_inputs", None)
         if prepared is not None:
             cos, sin = prepared.rope(
@@ -535,7 +536,7 @@ class QuantLlamaModel(QuantModuleBase):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
@@ -559,7 +560,10 @@ class QuantLlamaModel(QuantModuleBase):
                 "You must specify exactly one of input_ids or inputs_embeds"
             )
 
+        if position_embeddings is None:
+            self.require_capability("generated_rope")
         if inputs_embeds is None:
+            self.require_capability("token_embeddings")
             inputs_embeds = self.embed_tokens(input_ids)
 
         cache, return_legacy_cache = self._normalize_past_key_values(
@@ -652,3 +656,15 @@ class QuantLlamaModel(QuantModuleBase):
 
     def _all_observers(self):
         yield from (self.obs_causal_mask, self.obs_cos, self.obs_sin)
+
+    def local_observer_groups(self):
+        # Explicit embeddings and RoPE tables bypass these two producers; their
+        # consumers retain their own required quantization points in each layer.
+        return {
+            "required": (self.obs_causal_mask,),
+            "token_embeddings": (),
+            "generated_rope": (self.obs_cos, self.obs_sin),
+        }
+
+    def _conditional_quant_subtrees(self):
+        return {"token_embeddings": ("embed_tokens",)}

@@ -41,6 +41,7 @@ from tico.quantization.algorithm.block_reconstruction.selection import (
 )
 from tico.quantization.wrapq.control import iter_quantization_sites
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import FrozenObserverState
 
 
 @dataclass(frozen=True)
@@ -96,13 +97,7 @@ def build_qdrop_candidates(
 @dataclass(frozen=True)
 class _AffineQParamSiteState:
     site_path: str
-    minimum: torch.Tensor
-    maximum: torch.Tensor
-    scale: torch.Tensor
-    zero_point: torch.Tensor
-    qparams_locked: bool
-    enabled: bool
-    fake_quant_enabled: bool
+    frozen: FrozenObserverState
 
 
 @dataclass(frozen=True)
@@ -134,23 +129,17 @@ class AffineQParamSnapshot:
             observer = sites[path].observer
             if not isinstance(observer, AffineObserverBase):
                 raise TypeError(f"Quantization site {path!r} is not affine.")
-            scale, zero_point = observer.compute_qparams()
+            frozen = observer.require_frozen()
             states.append(
                 _AffineQParamSiteState(
                     site_path=path,
-                    minimum=observer.min_val.detach().cpu().clone(),
-                    maximum=observer.max_val.detach().cpu().clone(),
-                    scale=scale.detach().cpu().clone(),
-                    zero_point=zero_point.detach().cpu().clone(),
-                    qparams_locked=bool(getattr(observer, "_qparams_locked", True)),
-                    enabled=bool(observer.enabled),
-                    fake_quant_enabled=bool(observer.fake_quant_enabled),
+                    frozen=frozen,
                 )
             )
         return cls(tuple(states))
 
     def restore(self, model: nn.Module) -> None:
-        """Restore all observer statistics, qparams, and runtime switches."""
+        """Restore frozen grids, provenance, locks, and runtime policy."""
         sites = {site.path: site for site in iter_quantization_sites(model)}
         for state in self.sites:
             site = sites.get(state.site_path)
@@ -159,29 +148,22 @@ class AffineQParamSnapshot:
             observer = site.observer
             if not isinstance(observer, AffineObserverBase):
                 raise TypeError(f"Quantization site {state.site_path!r} is not affine.")
-            device = observer.min_val.device
-            observer.min_val.copy_(state.minimum.to(device=device))
-            observer.max_val.copy_(state.maximum.to(device=device))
-            observer.load_qparams(
-                state.scale.to(device=device),
-                state.zero_point.to(device=device),
-                lock=state.qparams_locked,
-            )
-            observer.enabled = state.enabled
-            observer.fake_quant_enabled = state.fake_quant_enabled
+            observer.install_candidate(state.frozen)
 
     def to_dict(self) -> dict[str, dict[str, float | int | bool]]:
         """Return scalar qparams for audit-friendly reports."""
-        return {
-            state.site_path: {
-                "scale": float(state.scale.reshape(-1)[0].item()),
-                "zero_point": int(state.zero_point.reshape(-1)[0].item()),
-                "qparams_locked": state.qparams_locked,
-                "enabled": state.enabled,
-                "fake_quant_enabled": state.fake_quant_enabled,
+        result: dict[str, dict[str, float | int | bool]] = {}
+        for state in self.sites:
+            frozen = state.frozen
+            assert frozen.scale is not None and frozen.zero_point is not None
+            result[state.site_path] = {
+                "scale": float(frozen.scale.reshape(-1)[0].item()),
+                "zero_point": int(frozen.zero_point.reshape(-1)[0].item()),
+                "qparams_locked": frozen.locked,
+                "enabled": False,
+                "fake_quant_enabled": frozen.fake_quant_enabled,
             }
-            for state in self.sites
-        }
+        return result
 
 
 @dataclass(frozen=True)

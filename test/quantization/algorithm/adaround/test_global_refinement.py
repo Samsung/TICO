@@ -59,6 +59,7 @@ def _observer(channels: int = 2) -> MinMaxObserver:
         qscheme=QScheme.PER_CHANNEL_ASYMM,
         channel_axis=0,
     )
+    observer.observe_shape((channels, 1, 1, 1))
     observer.load_qparams(
         torch.linspace(0.1, 0.2, channels),
         torch.full((channels,), 128, dtype=torch.int),

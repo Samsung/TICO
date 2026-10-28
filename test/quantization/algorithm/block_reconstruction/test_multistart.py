@@ -98,6 +98,35 @@ def _result(name: str) -> BlockReconstructionResult:
 
 
 class QDropMultiStartTest(unittest.TestCase):
+    def test_snapshot_restore_preserves_calibrated_provenance_and_lock(self) -> None:
+        model = _Model()
+        observer = model.block.obs_act_in
+        observer.reset()
+        observer.enabled = True
+        observer.collect(torch.tensor([-1.0, 1.0]))
+        observer.compute_qparams()
+        original = observer.require_frozen()
+        self.assertEqual(original.provenance, "calibrated")
+        self.assertFalse(original.locked)
+        group = AffineObserverGroup("input", ("block.act_in",))
+        snapshot = AffineQParamSnapshot.capture(model, (group,))
+        observer.load_qparams(torch.tensor(0.5), torch.tensor(3), lock=True)
+        snapshot.restore(model)
+        restored = observer.require_frozen()
+        self.assertEqual(restored.provenance, original.provenance)
+        self.assertEqual(restored.locked, original.locked)
+        assert restored.scale is not None and original.scale is not None
+        assert restored.zero_point is not None and original.zero_point is not None
+        assert (
+            restored.clipping_bounds is not None
+            and original.clipping_bounds is not None
+        )
+        self.assertTrue(torch.equal(restored.scale, original.scale))
+        self.assertTrue(torch.equal(restored.zero_point, original.zero_point))
+        self.assertTrue(
+            torch.equal(restored.clipping_bounds[0], original.clipping_bounds[0])
+        )
+
     def test_candidate_product_deduplicates_control_seed(self) -> None:
         candidates = build_qdrop_candidates(
             (0.0, 0.25),

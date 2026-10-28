@@ -17,7 +17,11 @@ from typing import cast, Optional, Tuple, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
+from tico.quantization.wrapq.utils.static_export import (
+    ExportCapabilityGuard,
+    iter_export_execution_sites,
+    require_static_decoder_inputs,
+)
 
 from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import (
     Qwen3VLVisionGridInput,
@@ -321,6 +325,7 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
     ):
         super().__init__()
         self.wrapped = _find_vision_export_model(wrapped)
+        self._capability_guard = ExportCapabilityGuard(self.wrapped, "required")
         self.profile = Qwen3VLVisionProfile.from_grid_thw(grid_thw)
         spatial_merge_size = int(self.wrapped.spatial_merge_size)
         self.profile.validate_spatial_merge_size(spatial_merge_size)
@@ -405,6 +410,7 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
         pixel_values: torch.Tensor,
     ):
         """Run fixed-profile vision prefill and return merged features."""
+        self._capability_guard.require()
         if pixel_values.dim() not in (2, 3):
             raise RuntimeError(
                 "pixel_values must have rank 2 or 3, "
@@ -510,15 +516,27 @@ class Qwen3VLTextEmbeddingExportAdapter(nn.Module):
     def __init__(self, wrapped: nn.Module):
         super().__init__()
         text_model = _unwrap_qwen3_vl_text_model(wrapped)
+        self._capability_guard = ExportCapabilityGuard(text_model, "token_embeddings")
         self.embed_tokens = text_model.embed_tokens
         self.rotate_embedding = getattr(text_model, "rotate_embedding", None)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Map token IDs to decoder-ready hidden states."""
+        self._capability_guard.require()
         hidden_states = self.embed_tokens(input_ids)
         if self.rotate_embedding is not None:
             hidden_states = self.rotate_embedding(hidden_states)
         return hidden_states
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Preflight the lookup route without traversing other owner branches."""
+        yield from iter_export_execution_sites(
+            self.embed_tokens, example_inputs, kwargs=kwargs, module_path="embed_tokens"
+        )
+        if self.rotate_embedding is not None:
+            yield from iter_export_execution_sites(
+                self.rotate_embedding, module_path="rotate_embedding"
+            )
 
 
 class Qwen3VLMultimodalEmbeddingExportAdapter(nn.Module):
@@ -543,6 +561,12 @@ class Qwen3VLMultimodalEmbeddingExportAdapter(nn.Module):
             raise ValueError("visual_start_idx must be non-negative.")
 
         text_model = _unwrap_qwen3_vl_text_model(wrapped)
+        qmodel = cast("QuantQwen3VLForConditionalGeneration", wrapped)
+        qwen_model = cast("QuantQwen3VLModel", qmodel.model.wrapped)
+        self._token_capability_guard = ExportCapabilityGuard(
+            text_model, "token_embeddings"
+        )
+        self._vision_capability_guard = ExportCapabilityGuard(qwen_model, "vision")
         self.visual_start_idx = int(visual_start_idx)
         self.embed_tokens = text_model.embed_tokens
         self.rotate_embedding = getattr(text_model, "rotate_embedding", None)
@@ -553,6 +577,8 @@ class Qwen3VLMultimodalEmbeddingExportAdapter(nn.Module):
         image_embeds: torch.Tensor,
     ) -> torch.Tensor:
         """Insert fixed-grid image embeddings into the token embedding sequence."""
+        self._token_capability_guard.require()
+        self._vision_capability_guard.require()
         if input_ids.dim() != 2 or input_ids.size(0) != 1:
             raise RuntimeError(
                 "input_ids must have shape `(1, S)`, " f"got {tuple(input_ids.shape)}."
@@ -589,6 +615,16 @@ class Qwen3VLMultimodalEmbeddingExportAdapter(nn.Module):
         if self.rotate_embedding is not None:
             hidden_states = self.rotate_embedding(hidden_states)
         return hidden_states
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Check the selected token path, leaving retained vision state untouched."""
+        yield from iter_export_execution_sites(
+            self.embed_tokens, example_inputs, kwargs=kwargs, module_path="embed_tokens"
+        )
+        if self.rotate_embedding is not None:
+            yield from iter_export_execution_sites(
+                self.rotate_embedding, module_path="rotate_embedding"
+            )
 
 
 class Qwen3VLDeepstackFusionExportAdapter(nn.Module):
