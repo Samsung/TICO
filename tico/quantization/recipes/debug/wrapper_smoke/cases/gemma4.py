@@ -22,6 +22,7 @@ import torch
 from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.recipes.debug.wrapper_smoke.case import (
     CaseAvailability,
+    ExportInvocation,
     ForwardInput,
     WrapperSmokeCase,
 )
@@ -40,9 +41,16 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
 )
 
 if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
+        QuantGemma4ForConditionalGeneration,
+    )
     from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
         QuantGemma4TextAttention,
     )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+        QuantGemma4TextModel,
+    )
+    from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 _GEMMA4_FULL_ROPE_PARAMETERS: dict[str, Any] = {
@@ -2646,13 +2654,87 @@ class Gemma4ModelCase(Gemma4BaseCase):
         )
 
 
-class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
+class Gemma4TextLogitsCase(Gemma4BaseCase):
+    """Host-prepared text prefill through every decoder, norm and LM head."""
+
+    @staticmethod
+    def _text_owner(module: torch.nn.Module) -> "QuantGemma4TextModel":
+        top = cast(
+            "QuantGemma4ForConditionalGeneration", getattr(module, "wrapped", module)
+        )
+        owner = top.model.wrapped
+        language_model = getattr(owner, "language_model", None)
+        return cast(
+            "QuantGemma4TextModel",
+            (
+                cast("PTQWrapper", language_model).wrapped
+                if language_model is not None
+                else owner
+            ),
+        )
+
+    def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
+        """Calibrate the real token and external-embedding/cache routes."""
+        cloned = _clone_forward_input(sample)
+        output = module(*cloned.args, **dict(cloned.kwargs))
+        owner = getattr(module, "wrapped", module)
+        if getattr(owner, "_mode", None) is Mode.CALIB:
+            text = self._text_owner(module)
+            ids = cloned.kwargs["input_ids"]
+            embeds = text.embed_tokens(ids)
+            ple = (
+                text.get_per_layer_inputs(ids, embeds)
+                if text.hidden_size_per_layer_input
+                else None
+            )
+            # Exercise exactly the external-embedding path before freezing.
+            module(inputs_embeds=embeds, per_layer_inputs=ple, use_cache=True)
+        return output
+
+    def export_invocation(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ExportInvocation:
+        """Pair the production text-logits adapter with genuine host inputs."""
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4TextLogitsPrefillExportAdapter,
+        )
+
+        owner = getattr(quantized, "wrapped", quantized)
+        text = self._text_owner(quantized)
+        with torch.no_grad():
+            embeds = text.embed_tokens(eval_sample.kwargs["input_ids"])
+            ple = None
+            if text.hidden_size_per_layer_input:
+                tokens = text.get_per_layer_inputs(
+                    eval_sample.kwargs["input_ids"], embeds
+                )
+                observed_embeds = text.obs_inputs_embeds.fake_quant(embeds)
+                ple = text.project_per_layer_inputs(observed_embeds, tokens)
+            positions = torch.arange(embeds.shape[1], device=embeds.device).unsqueeze(0)
+            rope = {}
+            masks = {}
+            for layer_type in text.unique_layer_types:
+                cos, sin = text.rotary_emb(embeds, positions, layer_type)
+                rope[layer_type] = self._export_text_rope((cos, sin), cfg)
+                masks[layer_type] = _causal_mask(
+                    embeds.shape[1], text.qcfg.attention_mask_fill_value
+                )
+        return ExportInvocation(
+            Gemma4TextLogitsPrefillExportAdapter(owner, text).eval(),
+            ForwardInput((embeds, ple, masks, rope)),
+        )
+
+
+class Gemma4ForConditionalGenerationCase(Gemma4TextLogitsCase):
     """Smoke case for one tiny Gemma4ForConditionalGeneration."""
 
     name = "gemma4_for_conditional_generation"
     description = (
         "Quantize one tiny Gemma4ForConditionalGeneration "
-        "(vision + text decoder + lm_head + softcapping)."
+        "(text-only logits; Circle uses the external-embedding text core)."
     )
     tags = ("gemma4", "e2b", "model", "conditional_generation", "image-text")
     max_mean_abs_diff = 5.0
@@ -2733,14 +2815,6 @@ class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
         """Create the Gemma4ForConditionalGeneration evaluation sample."""
         return self._sample()
 
-    def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
-        """Run the Gemma4ForConditionalGeneration without sharing mutable sample state.
-
-        The wrapper returns logits directly (not a Gemma4CausalLMOutputWithPast).
-        """
-        cloned = _clone_forward_input(sample)
-        return module(*cloned.args, **dict(cloned.kwargs))
-
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
     ) -> Any:
@@ -2749,54 +2823,8 @@ class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
         output = reference(*cloned.args, **dict(cloned.kwargs))
         return output.logits if hasattr(output, "logits") else output
 
-    def export_module(
-        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
-    ) -> torch.nn.Module:
-        """Export the wrapped Gemma4ForConditionalGeneration in prefill mode."""
-        wrapped = getattr(quantized, "wrapped", quantized)
-        as_export_module = getattr(wrapped, "as_export_module", None)
-        if callable(as_export_module):
-            return as_export_module(mode="prefill").eval()
-        return quantized
 
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create static export inputs expected by the export adapter.
-
-        The export adapter's forward_export() takes precomputed inputs:
-        - inputs_embeds: (1, S, H)
-        - per_layer_inputs: (1, S, L, P) or None
-        - attention_masks: dict[layer_type -> mask]
-        - position_embeddings: dict[layer_type -> (cos, sin)]
-        """
-        hidden_size = int(self.text_cfg.hidden_size)
-        head_dim = int(self.text_cfg.head_dim)
-        num_layers = int(self.text_cfg.num_hidden_layers)
-        ple_dim = int(getattr(self.text_cfg, "hidden_size_per_layer_input", 0) or 0)
-        layer_types = list(self.text_cfg.layer_types)
-
-        inputs_embeds = torch.randn(1, self.seq_len, hidden_size)
-
-        per_layer_inputs = None
-        if ple_dim > 0:
-            per_layer_inputs = torch.randn(1, self.seq_len, num_layers, ple_dim)
-
-        attention_masks: dict[str, torch.Tensor] = {}
-        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-        for layer_type in layer_types:
-            attention_masks[layer_type] = torch.zeros(1, 1, self.seq_len, self.seq_len)
-            cos = torch.ones(1, self.seq_len, head_dim)
-            sin = torch.zeros(1, self.seq_len, head_dim)
-            position_embeddings[layer_type] = self._export_text_rope((cos, sin), cfg)
-
-        return ForwardInput(
-            (inputs_embeds, per_layer_inputs, attention_masks, position_embeddings),
-            {},
-        )
-
-
-class Gemma4ForCausalLMCase(Gemma4BaseCase):
+class Gemma4ForCausalLMCase(Gemma4TextLogitsCase):
     """Smoke case for one tiny Gemma4ForCausalLM (text-only)."""
 
     name = "gemma4_for_causal_lm"
@@ -2857,14 +2885,6 @@ class Gemma4ForCausalLMCase(Gemma4BaseCase):
         """Create the Gemma4ForCausalLM evaluation sample."""
         return self._sample()
 
-    def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
-        """Run the Gemma4ForCausalLM without sharing mutable sample state.
-
-        The wrapper returns logits directly (not a Gemma4CausalLMOutputWithPast).
-        """
-        cloned = _clone_forward_input(sample)
-        return module(*cloned.args, **dict(cloned.kwargs))
-
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
     ) -> Any:
@@ -2872,52 +2892,6 @@ class Gemma4ForCausalLMCase(Gemma4BaseCase):
         cloned = _clone_forward_input(sample)
         output = reference(*cloned.args, **dict(cloned.kwargs))
         return output.logits if hasattr(output, "logits") else output
-
-    def export_module(
-        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
-    ) -> torch.nn.Module:
-        """Export the wrapped Gemma4ForCausalLM in prefill mode."""
-        wrapped = getattr(quantized, "wrapped", quantized)
-        as_export_module = getattr(wrapped, "as_export_module", None)
-        if callable(as_export_module):
-            return as_export_module(mode="prefill").eval()
-        return quantized
-
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Create static export inputs expected by the export adapter.
-
-        The export adapter's forward_export() takes precomputed inputs:
-        - inputs_embeds: (1, S, H)
-        - per_layer_inputs: (1, S, L, P) or None
-        - attention_masks: dict[layer_type -> mask]
-        - position_embeddings: dict[layer_type -> (cos, sin)]
-        """
-        hidden_size = int(self.text_cfg.hidden_size)
-        head_dim = int(self.text_cfg.head_dim)
-        num_layers = int(self.text_cfg.num_hidden_layers)
-        ple_dim = int(getattr(self.text_cfg, "hidden_size_per_layer_input", 0) or 0)
-        layer_types = list(self.text_cfg.layer_types)
-
-        inputs_embeds = torch.randn(1, self.seq_len, hidden_size)
-
-        per_layer_inputs = None
-        if ple_dim > 0:
-            per_layer_inputs = torch.randn(1, self.seq_len, num_layers, ple_dim)
-
-        attention_masks: dict[str, torch.Tensor] = {}
-        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-        for layer_type in layer_types:
-            attention_masks[layer_type] = torch.zeros(1, 1, self.seq_len, self.seq_len)
-            cos = torch.ones(1, self.seq_len, head_dim)
-            sin = torch.zeros(1, self.seq_len, head_dim)
-            position_embeddings[layer_type] = self._export_text_rope((cos, sin), cfg)
-
-        return ForwardInput(
-            (inputs_embeds, per_layer_inputs, attention_masks, position_embeddings),
-            {},
-        )
 
 
 GEMMA4_CASES = (

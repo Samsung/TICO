@@ -14,6 +14,7 @@
 
 """Smoke cases for Qwen3-VL wrapper checks."""
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, cast, Mapping, Tuple, TYPE_CHECKING
 
@@ -1047,6 +1048,29 @@ class QwenTextModelCase(QwenBaseCase):
         """Create the text-model evaluation sample."""
         return self._sample()
 
+    def export_context(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> AbstractContextManager[None]:
+        """Prepare bounded model-owned positions, RoPE and masks temporarily."""
+        from tico.quantization.wrapq.utils.static_export import prepared_static_export
+
+        del cfg
+        return prepared_static_export(
+            quantized, eval_sample.kwargs["input_ids"].shape[1]
+        )
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Use the cache-free text ABI and tensor tuple output during capture."""
+        del cfg
+        return ForwardInput(
+            (), dict(eval_sample.kwargs, use_cache=False, return_dict=False)
+        )
+
     def output_tensor(self, output: Any) -> torch.Tensor:
         """Select last_hidden_state from model outputs."""
         if hasattr(output, "last_hidden_state"):
@@ -1439,6 +1463,41 @@ class QwenModelCase(QwenBaseCase):
     ) -> ForwardInput:
         """Create the multimodal model evaluation sample."""
         return self._sample(for_eval=True)
+
+    def export_context(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> AbstractContextManager[None]:
+        """Prepare the fixed-image text profile without touching frozen observers."""
+        from tico.quantization.wrapq.utils.static_export import prepared_static_export
+
+        del cfg
+        return prepared_static_export(
+            quantized, eval_sample.kwargs["input_ids"].shape[1]
+        )
+
+    def export_invocation(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ExportInvocation:
+        """Export the complete fixed-image prefill computation with matching inputs."""
+        from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
+            Qwen3VLModelPrefillExportAdapter,
+        )
+
+        del cfg
+        owner = getattr(quantized, "wrapped", quantized)
+        module = Qwen3VLModelPrefillExportAdapter(owner, grid_thw=self.thw).eval()
+        return ExportInvocation(
+            module,
+            ForwardInput(
+                (eval_sample.kwargs["input_ids"], eval_sample.kwargs["pixel_values"])
+            ),
+        )
 
 
 class QwenForConditionalGenerationCase(QwenModelCase):

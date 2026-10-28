@@ -54,6 +54,32 @@ python -m tico.quantization.examples.inspector \
   --case all
 ```
 
+### Tiny top-level export boundaries
+
+The runner keeps each case's production export preparation context active while
+building its adapter/input pair, tracing and saving. The context restores the
+source mode and temporary static profile even when export fails. Frozen source
+observers are consumed without collecting new statistics during export.
+
+`qwen3_vl_text_model` uses the production static text preparation context.
+`qwen3_vl_model` and `qwen3_vl_for_conditional_generation` compose the production
+fixed-grid vision, visual fusion, all text decoders, DeepStack fusion and final
+normalization; the generation case also includes the LM head. Their two tensor
+inputs are token IDs and pixels for one fixed image span. Mask and RoPE use the
+production cache-free static profile, active for the entire capture.
+
+`gemma4_for_causal_lm` and `gemma4_for_conditional_generation` export text-prefill
+logits from external embeddings through every text decoder, final normalization,
+LM head and logit softcapping. This matches their text-only numerical samples.
+Token lookup and optional PLE lookup/projection prepare real host inputs before
+capture; a multimodal vision tower is outside this text stage. The required
+external-embedding and cache paths run during calibration before freezing.
+
+`gemma4_assistant_core` exports the complete draft-one core with all ten supplied
+shared-KV positions padded to full/sliding capacities of sixteen. Its host sparse
+head remains outside that tensor-only core ABI. Capacity checks reject an input
+that exceeds either profile; no shared-KV prefix is discarded.
+
 ### Llama 3.2-3B width and static-runtime Circle export
 
 Llama cases default to `tiny`. The following profiles are available for every

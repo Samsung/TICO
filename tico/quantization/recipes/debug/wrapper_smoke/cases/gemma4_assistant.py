@@ -160,7 +160,7 @@ class Gemma4AssistantCoreCase(WrapperSmokeCase):
     tags = ("gemma4_assistant", "assistant", "core", "shared_kv")
     kv_len = 10
     full_kv_length = 16
-    sliding_kv_length = 8
+    sliding_kv_length = 16
 
     def availability(self) -> CaseAvailability:
         return _has_gemma4_assistant()

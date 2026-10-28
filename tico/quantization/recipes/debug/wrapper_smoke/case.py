@@ -15,6 +15,7 @@
 """Case interfaces for wrapper-level quantization smoke checks."""
 
 import inspect
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, cast, Mapping
 
@@ -248,6 +249,19 @@ class WrapperSmokeCase:
     ) -> ForwardInput:
         """Return the input object to pass to tico.convert for Circle export."""
         return eval_sample
+
+    def export_context(
+        self,
+        quantized: torch.nn.Module,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> AbstractContextManager[None]:
+        """Keep production static preparation active through adapter creation/tracing.
+
+        Model-specific cases override this hook when their production export
+        context owns temporary modes, shape profiles, or forward preparation.
+        """
+        return nullcontext()
 
     def export_invocation(
         self,
