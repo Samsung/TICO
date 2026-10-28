@@ -104,6 +104,21 @@ interval only when unlocked. Candidate installation records clipping diagnostics
 without changing the observed min/max. Loading with `lock=False` still requires
 calibration and recomputes qparams from those statistics.
 
+Frozen-grid validity is independent of the grid's storage device. Per-channel
+affine grids retain the existing FP32/BF16 scale policy: valid CPU-resident BF16
+scales can be imported, frozen and restored exactly for inspection or later
+execution. Import does not cast scales, fabricate statistics or resolve an unknown
+channel extent.
+
+Execution compatibility is checked separately by
+`AffineObserverBase.validate_execution(device)`. Enabled CPU per-channel fake
+quantization with BF16 **scales** rejects before the native operation; BF16
+**inputs** with FP32 scales remain supported. Disabled fake quantization bypasses
+this execution check and preserves the frozen grid. Per-tensor, Identity and MX
+policies do not inherit this per-channel restriction. `fake_quant(x)` always keeps
+the lower-level check using `x.device`, including after a model move or direct
+observer call. Passing a compatibility check is not proof of CUDA/NPU support.
+
 ---
 
 ## 3. Wrapper Design

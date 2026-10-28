@@ -568,17 +568,27 @@ class FrozenObserverStateTest(unittest.TestCase):
                 assert state is not None
                 self.assertEqual(_tensor(state.scale).dtype, dtype)
 
-    def test_cpu_per_channel_bfloat16_scales_reject_before_install(self):
+    def test_cpu_per_channel_bfloat16_scales_store_but_reject_execution(self):
         obs = MinMaxObserver(
             name="weight", qscheme=QScheme.PER_CHANNEL_ASYMM, channel_axis=0
         )
         obs.observe_shape((2, 2))
-        with self.assertRaisesRegex(RuntimeError, "CPU per-channel.*bfloat16 scales"):
-            obs.load_qparams(
-                torch.tensor([0.1, 0.2], dtype=torch.bfloat16), torch.tensor([2, 3])
-            )
-        self.assertFalse(obs.has_qparams)
-        self.assertIsNone(obs.frozen_state)
+        obs.load_qparams(
+            torch.tensor([0.125, 0.25], dtype=torch.bfloat16), torch.tensor([2, 3])
+        )
+        obs.install_candidate(obs.derive_candidate())
+        state = obs.require_frozen()
+        self.assertEqual(_tensor(state.scale).dtype, torch.bfloat16)
+        self.assertEqual(state.provenance, "imported")
+        self.assertTrue(state.locked)
+        with self.assertRaisesRegex(
+            RuntimeError, "execution device cpu.*torch.bfloat16"
+        ):
+            obs.fake_quant(torch.ones(2, 2))
+        self.assertTrue(obs.has_qparams)
+        torch.testing.assert_close(
+            _tensor(obs.require_frozen().scale), _tensor(state.scale), rtol=0, atol=0
+        )
 
     def test_per_tensor_bfloat16_scale_retains_supported_math(self):
         obs = MinMaxObserver(name="activation")

@@ -135,7 +135,10 @@ class AffineObserverBase(ObserverBase):
         quantizers may keep the same qparams in broadcast-ready shapes such as
         ``(C, 1)`` for Linear weights or ``(C, 1, 1, 1)`` for Conv2d weights.
 
-        When locked, subsequent `collect()` calls are ignored.
+        Locks suppress numerical collection, but a pending per-channel import
+        still learns its semantic extent from subsequent ``collect()`` calls.
+        The supplied scale dtype is preserved; successful import does not imply
+        that fake quantization can execute on the current storage device.
         """
         scale = scale.detach().clone()
         zp = zp.detach().clone()
@@ -189,6 +192,7 @@ class AffineObserverBase(ObserverBase):
     def _validate_grid(
         self, state: FrozenObserverState, *, require_extent: bool = True
     ) -> None:
+        """Validate numerical and semantic state independently of storage device."""
         super().validate_candidate(state)
         if state.provenance not in ("calibrated", "imported") or (
             state.locked and state.provenance != "imported"
@@ -230,10 +234,6 @@ class AffineObserverBase(ObserverBase):
             if scale.dtype not in (torch.float32, torch.bfloat16):
                 raise RuntimeError(
                     f"Observer {self.name!r}: per-channel scale dtype must be float32 or bfloat16; received {scale.dtype}."
-                )
-            if scale.dtype == torch.bfloat16 and scale.device.type == "cpu":
-                raise RuntimeError(
-                    f"Observer {self.name!r}: CPU per-channel fake quantization does not support bfloat16 scales; provide float32 qparams explicitly."
                 )
             if (
                 self.channel_axis is None
@@ -526,6 +526,29 @@ class AffineObserverBase(ObserverBase):
                 if prefix + name in missing_keys:
                     missing_keys.remove(prefix + name)
 
+    def validate_execution(
+        self, device: torch.device, *, module_path: Optional[str] = None
+    ) -> None:
+        """Check kernel compatibility on the selected execution device.
+
+        Frozen-grid validity is independent of its current storage device. This
+        metadata-only check neither changes state nor promises support for other
+        device/dtype combinations beyond the explicitly rejected CPU operation.
+        """
+        if not self.fake_quant_enabled:
+            return
+        if (
+            self.channel_axis is not None
+            and device.type == "cpu"
+            and self._cached_scale.dtype == torch.bfloat16
+        ):
+            location = f" at module {module_path!r}" if module_path is not None else ""
+            raise RuntimeError(
+                f"Observer {self.name!r}{location}: torch.fake_quantize_per_channel_affine "
+                f"on execution device {device} does not support scale dtype "
+                f"{self._cached_scale.dtype}; provide float32 qparams explicitly."
+            )
+
     def fake_quant(self, x: torch.Tensor) -> torch.Tensor:
         self._check_frozen_policy()
         if not self.fake_quant_enabled:
@@ -535,14 +558,7 @@ class AffineObserverBase(ObserverBase):
                 "Call compute_qparams()/freeze_qparams() or load_qparams() first."
             )
 
-        if (
-            self.channel_axis is not None
-            and x.device.type == "cpu"
-            and self._cached_scale.dtype == torch.bfloat16
-        ):
-            raise RuntimeError(
-                f"Observer {self.name!r}: CPU per-channel fake quantization does not support bfloat16 scales; provide float32 qparams explicitly."
-            )
+        self.validate_execution(x.device)
 
         # A direct imported per-channel observer may have no site schema yet.
         # Validate this concrete use without promoting or mutating frozen readiness.
