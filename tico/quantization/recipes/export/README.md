@@ -77,6 +77,41 @@ LLaMA, Qwen3-VL, and Gemma4 exporters. It puts the supplied module in eval mode,
 converts and saves it, and returns `None`. Callers own input preparation,
 device placement, output-directory creation, and staged I/O contracts.
 
+Frozen-state validation and fake-quant execution compatibility are separate.
+CPU-resident BF16 per-channel scales remain valid checkpoint state, but enabled
+per-channel fake quantization with those scales cannot run during CPU preparation
+or tracing. BF16 inputs with FP32 scales are a different, supported CPU case. An
+NPU deployment target does not change where the preparation/tracing operation
+runs. Callers must explicitly prepare FP32 qparams when that execution route needs
+them; export never repairs or converts a frozen grid silently.
+
+The shared single-stage writer and `export_full_circle()` run metadata-only
+execution preflight before conversion. Stages declare participating observer
+sites through `_export_execution_sites(example_inputs, kwargs)` and transparent
+wrappers delegate that declaration. Leaf modules identify the actual operation
+device: a weight observer executes on its weight tensor's device, while a directly
+bound input observer uses the corresponding example input's device. The check
+never infers execution from qparam storage, the first model parameter or global
+CUDA availability.
+
+Current declarations cover `QuantLinear`, `QuantEmbedding`, Gemma4 scaled-word
+embeddings, and the LLaMA/Gemma4/Qwen3-VL token lookup adapters. They also cover
+Gemma4 PLE lookup, its producer-owned output observer, and Qwen3-VL's selected
+multimodal token lookup. Rotation children delegate their declared operand sites;
+an input-dependent rotation site without a bound example input retains its
+runtime check.
+
+This declaration is explicit rather than a recursive observer inventory. A live
+capability owner retained outside the stage tree, an unused conditional branch,
+or the source pooler behind a specialized profile is not stage computation.
+Capability and captured-mode guards still apply before checking declared sites.
+Stages without an exact declaration, including decoder, whole-vision, assistant
+core and arbitrary full-model/custom forward routes, retain the per-observer
+runtime check. Direct `tico.convert()` or
+`torch.export.export()` calls also retain that check without recipe preflight.
+Unknown routes do not gain an executability guarantee from a successful
+preflight; moving the model or changing execution inputs requires checking again.
+
 ## Artifact naming
 
 Use stable, predictable artifact names. Avoid embedding timestamps in filenames

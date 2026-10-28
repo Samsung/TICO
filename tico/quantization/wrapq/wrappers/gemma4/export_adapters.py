@@ -29,6 +29,7 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.utils.static_export import (
     ExportCapabilityGuard,
+    iter_export_execution_sites,
     require_static_decoder_inputs,
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
@@ -158,6 +159,12 @@ class Gemma4TokenEmbeddingExportAdapter(nn.Module):
         self._capability_guard.require()
         return self.embed_tokens(input_ids)
 
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Lookup executes independently of unused branches in the text owner."""
+        yield from iter_export_execution_sites(
+            self.embed_tokens, example_inputs, kwargs=kwargs, module_path="embed_tokens"
+        )
+
 
 def _resolve_ple_export_mode(
     wrapped_text_model: nn.Module, mode: Optional[Mode]
@@ -243,6 +250,26 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
     def require_available(self) -> None:
         """Validate the lookup route before executing or serializing its table."""
         self._capability_guard.require()
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Declare the selected lookup without traversing its text-model owner."""
+        if not self.quantized:
+            return
+        yield from iter_export_execution_sites(
+            self.embed_tokens_per_layer,
+            example_inputs,
+            kwargs=kwargs,
+            module_path="embed_tokens_per_layer",
+        )
+        embedding = getattr(
+            self.embed_tokens_per_layer, "wrapped", self.embed_tokens_per_layer
+        )
+        table = getattr(embedding, "module", embedding)
+        yield (
+            "per_layer_token_inputs_observer",
+            self.per_layer_token_inputs_observer,
+            table.weight.device,
+        )
 
     def _fq(self, tensor: torch.Tensor, observer: ObserverBase) -> torch.Tensor:
         """Apply the frozen producer observer in QUANT mode only."""

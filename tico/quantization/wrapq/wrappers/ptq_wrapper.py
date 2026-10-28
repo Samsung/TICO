@@ -45,6 +45,16 @@ class PTQWrapper(QuantModuleBase):
     def forward(self, *args, **kwargs):
         return self.wrapped(*args, **kwargs)
 
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Delegate the transparent stage to its actual computation owner."""
+        from tico.quantization.wrapq.utils.static_export import (
+            iter_export_execution_sites,
+        )
+
+        return iter_export_execution_sites(
+            self.wrapped, example_inputs, kwargs=kwargs, module_path="wrapped"
+        )
+
     def as_export_module(self, mode: str, **kwargs):
         if not hasattr(self.wrapped, "as_export_module"):
             raise NotImplementedError(

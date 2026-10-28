@@ -106,3 +106,14 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
             self.obs_embed_scale,
             self.obs_act_out,
         )
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Describe active lookup sites without entering the embedding table."""
+        if self._mode is not Mode.QUANT:
+            return
+        device = self.module.weight.device
+        yield "obs_weight", self.obs_weight, device
+        yield "obs_embedding", self.obs_embedding, device
+        if not isinstance(self.module, FusedGemma4PLEEmbedding):
+            yield "obs_embed_scale", self.obs_embed_scale, self.module.embed_scale.device
+        yield "obs_act_out", self.obs_act_out, device

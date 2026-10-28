@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from tico.quantization.wrapq.utils.static_export import (
     ExportCapabilityGuard,
+    iter_export_execution_sites,
     require_static_decoder_inputs,
 )
 
@@ -197,6 +198,16 @@ class LlamaTokenEmbeddingExportAdapter(torch.nn.Module):
         if self.rotate_embedding is not None:
             hidden_states = self.rotate_embedding(hidden_states)
         return hidden_states
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Preflight only lookup and rotation, excluding the retained owner."""
+        yield from iter_export_execution_sites(
+            self.embed_tokens, example_inputs, kwargs=kwargs, module_path="embed_tokens"
+        )
+        if self.rotate_embedding is not None:
+            yield from iter_export_execution_sites(
+                self.rotate_embedding, module_path="rotate_embedding"
+            )
 
 
 class LlamaLMHeadExportAdapter(torch.nn.Module):

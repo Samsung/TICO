@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from tico.quantization.wrapq.utils.static_export import (
     ExportCapabilityGuard,
+    iter_export_execution_sites,
     require_static_decoder_inputs,
 )
 
@@ -527,6 +528,16 @@ class Qwen3VLTextEmbeddingExportAdapter(nn.Module):
             hidden_states = self.rotate_embedding(hidden_states)
         return hidden_states
 
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Preflight the lookup route without traversing other owner branches."""
+        yield from iter_export_execution_sites(
+            self.embed_tokens, example_inputs, kwargs=kwargs, module_path="embed_tokens"
+        )
+        if self.rotate_embedding is not None:
+            yield from iter_export_execution_sites(
+                self.rotate_embedding, module_path="rotate_embedding"
+            )
+
 
 class Qwen3VLMultimodalEmbeddingExportAdapter(nn.Module):
     """Export fixed-span visual embedding insertion and optional rotation.
@@ -604,6 +615,16 @@ class Qwen3VLMultimodalEmbeddingExportAdapter(nn.Module):
         if self.rotate_embedding is not None:
             hidden_states = self.rotate_embedding(hidden_states)
         return hidden_states
+
+    def _export_execution_sites(self, example_inputs, kwargs):
+        """Check the selected token path, leaving retained vision state untouched."""
+        yield from iter_export_execution_sites(
+            self.embed_tokens, example_inputs, kwargs=kwargs, module_path="embed_tokens"
+        )
+        if self.rotate_embedding is not None:
+            yield from iter_export_execution_sites(
+                self.rotate_embedding, module_path="rotate_embedding"
+            )
 
 
 class Qwen3VLDeepstackFusionExportAdapter(nn.Module):

@@ -15,12 +15,14 @@
 """Explicit, temporary input preparation for static model export."""
 
 from contextlib import contextmanager, ExitStack
-from typing import Iterator
+from typing import Any, Iterator
 
 import torch
 from torch import nn
 
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
@@ -60,6 +62,51 @@ class ExportCapabilityGuard:
                 "Quantized export requires a WrapQ capability owner; plain "
                 "floating stages must explicitly declare Mode.NO_QUANT."
             )
+
+
+def iter_export_execution_sites(
+    module: nn.Module,
+    example_inputs: tuple[Any, ...] = (),
+    *,
+    kwargs: dict[str, Any] | None = None,
+    module_path: str = "",
+) -> Iterator[tuple[str, ObserverBase, torch.device]]:
+    """Visit only execution sites explicitly declared by the selected stage.
+
+    Registration alone does not imply execution: a stage may retain dormant
+    branches or original and specialized profiles. Unknown routes keep their
+    observer-level runtime checks rather than guessing devices or participation.
+    Capability owners are checked but never traversed as stage computation.
+    """
+    if isinstance(module, QuantModuleBase):
+        module.require_entry_available()
+    for value in vars(module).values():
+        if isinstance(value, ExportCapabilityGuard):
+            value.require()
+    sites = getattr(module, "_export_execution_sites", None)
+    if callable(sites):
+        for name, observer, device in sites(example_inputs, kwargs or {}):
+            path = f"{module_path}.{name}" if module_path else name
+            yield path, observer, device
+
+
+def validate_export_execution(
+    module: nn.Module,
+    example_inputs: tuple[Any, ...],
+    *,
+    kwargs: dict[str, Any] | None = None,
+) -> None:
+    """Reject unsupported declared fake-quant sites before tracing the stage.
+
+    Execution devices come from actual inputs or explicitly known operation
+    operands, independently of where the frozen qparam tensors are stored.
+    This metadata-only preflight does not replace per-call observer checks.
+    """
+    for path, observer, device in iter_export_execution_sites(
+        module, example_inputs, kwargs=kwargs
+    ):
+        if isinstance(observer, AffineObserverBase):
+            observer.validate_execution(device, module_path=path)
 
 
 def validate_static_length(length: object, capacity: int) -> int:
