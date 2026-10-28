@@ -45,6 +45,12 @@ def _retarget_affine_per_tensor_quantize(
     """Retarget a private Quantize boundary without changing its source domain."""
     if len(dst.users) != 1 or src not in dst.users:
         return
+    # Folding has already proven this to be a genuine requantization when
+    # its tensor input has a domain. Retargeting it would remove an earlier
+    # rounding/clamping step, even if it has just one consumer.
+    tensor = dst.args[0] if dst.args else dst.kwargs.get("input")
+    if isinstance(tensor, torch.fx.Node) and QPARAM_KEY in tensor.meta:
+        return
 
     qparam = src.meta.get(QPARAM_KEY)
     if not isinstance(qparam, QuantParam):
@@ -170,10 +176,10 @@ class PropagateQParamBackward(PassBase):
                 logger.debug(f"{src.name}'s MX quantparam is remapped to {dst.name}.")
                 return
 
-            if (
-                QPARAM_KEY in dst.meta
-                and src_qparam.dtype != dst.meta[QPARAM_KEY].dtype
-            ):
+            # Producers own their existing domain, including when scale/ZP
+            # differ with the same storage dtype. Normalize consumer edges
+            # explicitly instead of changing this producer and all its users.
+            if QPARAM_KEY in dst.meta:
                 return
 
             dst.meta[QPARAM_KEY] = copy.deepcopy(src_qparam)

@@ -100,10 +100,9 @@ class PropagateQParamForward(PassBase):
                 logger.debug(f"{src.name}'s MX quantparam is remapped to {dst.name}.")
                 return
 
-            if (
-                QPARAM_KEY in dst.meta
-                and src_qparam.dtype != dst.meta[QPARAM_KEY].dtype
-            ):
+            # An established destination domain is not an invitation to
+            # overwrite scale/ZP merely because the storage dtype agrees.
+            if QPARAM_KEY in dst.meta:
                 return
 
             dst.meta[QPARAM_KEY] = copy.deepcopy(src_qparam)

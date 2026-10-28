@@ -24,6 +24,7 @@ from typing import Any
 import torch
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.concat_qparam import is_width_direction_concat
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
@@ -254,7 +255,20 @@ def _cat_handler(node, logger):
 
     assert len(tensors) > 0
     in_dtype = qparam_dtype(tensors[0])
-    if any(qparam_dtype(x) != in_dtype for x in tensors):
+    mixed_dtype = any(qparam_dtype(x) != in_dtype for x in tensors)
+    first = tensors[0].meta[QPARAM_KEY]
+    distinct_domains = any(
+        qparam.dtype != first.dtype
+        or qparam.scale != first.scale
+        or qparam.zero_point != first.zero_point
+        or qparam.quantized_dimension != first.quantized_dimension
+        for qparam in (x.meta[QPARAM_KEY] for x in tensors[1:])
+    )
+    # The width-direction backend contract explicitly allows independent grids.
+    # Uniform-input concat retains its existing output-boundary behavior.
+    if mixed_dtype or (
+        distinct_domains and not is_width_direction_concat(node, cat_args)
+    ):
         destination = node.meta[QPARAM_KEY]
         qparams = [x.meta[QPARAM_KEY] for x in tensors] + [destination]
         # Preserve the existing treatment of incompletely annotated concats.
@@ -272,7 +286,8 @@ def _cat_handler(node, logger):
             for qparam in qparams
         ):
             raise NotYetSupportedError(
-                f"Unsupported mixed-dtype concat {node.name}: "
+                f"Unsupported {'mixed-dtype' if mixed_dtype else 'distinct-domain'} "
+                f"concat {node.name}: "
                 f"inputs={[qparam_dtype(x) for x in tensors]}, "
                 f"output={destination.dtype}. "
                 "Only per-tensor affine uint8/int16 qparams are supported."

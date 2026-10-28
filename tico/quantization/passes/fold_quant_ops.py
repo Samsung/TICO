@@ -121,8 +121,7 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
     ):
         return False
     if not is_mx_dtype(source_qparam.dtype) and any(
-        view.target in {operator.getitem, torch.ops.aten.constant_pad_nd.default}
-        for view in chain
+        view.target == torch.ops.aten.constant_pad_nd.default for view in chain
     ):
         return False
 

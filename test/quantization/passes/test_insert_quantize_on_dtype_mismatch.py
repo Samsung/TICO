@@ -519,6 +519,35 @@ class MixedCatDtypeMismatchTest(unittest.TestCase):
                     )
                 self._assert_stable(ep)
 
+    def test_same_dtype_distinct_domains_repeated_edges_are_stable(self):
+        destination = QuantParam(scale=[0.25], zero_point=[117], dtype="uint8")
+        sources = [
+            destination,
+            QuantParam(scale=[0.5], zero_point=[29], dtype="uint8"),
+        ]
+        ep, concat = self._export(
+            sources, destination, order=(0, 1, 1, 0), shared_producer=True
+        )
+        operands = tuple(concat.args[0])
+        original_domains = [copy.deepcopy(node.meta[QPARAM_KEY]) for node in operands]
+        InsertQuantizeOnDtypeMismatch().call(ep)
+        converted = concat.args[0]
+        self.assertIs(converted[0], operands[0])
+        self.assertIs(converted[3], operands[3])
+        self.assertIs(converted[1], converted[2])
+        self._assert_conversion(converted[1], operands[1], destination)
+        for node, domain in zip(operands, original_domains):
+            self.assertEqual(node.meta[QPARAM_KEY], domain)
+        self.assertEqual(
+            sum(
+                node.target
+                == torch.ops.quantized_decomposed.quantize_per_tensor.default
+                for node in ep.graph.nodes
+            ),
+            1,
+        )
+        self._assert_stable(ep)
+
     def test_later_mismatch_repeated_operands_and_matching_grid(self):
         destination = QuantParam(scale=[0.25], zero_point=[117], dtype="uint8")
         sources = [
