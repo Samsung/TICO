@@ -476,3 +476,10 @@ The adapter reuses the actual vision, text and optional LM-head weights and
 preserves the full wrapper's multimodal, external-embedding and DeepStack frozen
 observer boundaries. Calibrate those real paths before conversion. No source
 observer is recalibrated during preparation or export.
+
+The adapter aligns temporary mask and RoPE operands to the actual hidden tensor's
+dtype and device before fake quantization. Prepared static buffers keep their
+original dtype and values, and position IDs remain integer tensors. CPU BF16
+activations still require FP32 per-channel scales for enabled fake quantization;
+see the [execution compatibility contract](../../wrapq/README.md). Successful BF16
+adapter execution does not establish BF16 Circle serialization/runtime support.

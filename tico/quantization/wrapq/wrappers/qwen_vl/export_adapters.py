@@ -823,11 +823,16 @@ class Qwen3VLModelPrefillExportAdapter(nn.Module):
         if self.text_model.rotate_embedding is not None:
             hidden = self.text_model.rotate_embedding(hidden)
         mask = self.text_model._fq(
-            self.static_inputs.attention_mask, self.text_model.obs_attention_mask
+            self.static_inputs.attention_mask.to(hidden),
+            self.text_model.obs_attention_mask,
         )
         rope = (
-            self.text_model._fq(self.static_inputs.cos, self.text_model.obs_cos),
-            self.text_model._fq(self.static_inputs.sin, self.text_model.obs_sin),
+            self.text_model._fq(
+                self.static_inputs.cos.to(hidden), self.text_model.obs_cos
+            ),
+            self.text_model._fq(
+                self.static_inputs.sin.to(hidden), self.text_model.obs_sin
+            ),
         )
         start = self.fusion.visual_start_idx
         end = start + image_embeds.shape[0]

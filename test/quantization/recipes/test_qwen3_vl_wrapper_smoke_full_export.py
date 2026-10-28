@@ -31,6 +31,7 @@ from tico.circle import CircleDocument
 from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
 from tico.quantization.recipes.debug.export_regression import _state_contract
 from tico.quantization.recipes.debug.wrapper_smoke import runner
+from tico.quantization.recipes.debug.wrapper_smoke.case import ForwardInput
 from tico.quantization.recipes.debug.wrapper_smoke.cases.qwen3_vl import (
     _has_qwen3_vl,
     QwenForConditionalGenerationCase,
@@ -39,21 +40,142 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.qwen3_vl import (
 )
 from tico.quantization.recipes.debug.wrapper_smoke.result import WrapperSmokeResult
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from torch.utils._pytree import tree_map
 
 
-def _prepare(case):
+def _floating_input_dtype(sample, dtype):
+    def convert(value):
+        if isinstance(value, torch.Tensor) and value.is_floating_point():
+            return value.to(dtype=dtype)
+        return value
+
+    args, kwargs = tree_map(convert, (sample.args, dict(sample.kwargs)))
+    return ForwardInput(args, kwargs)
+
+
+def _prepare(case, *, dtype=None):
     model, _ = case.build({})
+    if dtype is not None:
+        model.to(dtype=dtype)
     prepared = case.prepare_model(model, {})
     case.after_prepare(prepared, {})
     for calibration in case.calibration_inputs(prepared, {}):
+        if dtype is not None:
+            calibration = _floating_input_dtype(calibration, dtype)
         case.forward(prepared, calibration)
     sample = case.eval_input(prepared, {})
+    if dtype is not None:
+        sample = _floating_input_dtype(sample, dtype)
+    if dtype is torch.bfloat16:
+        # BF16 activations with FP32 per-channel scales are supported on CPU.
+        # Import only real calibrated candidates before conversion; BF16 scales
+        # themselves retain the existing CPU execution rejection contract.
+        for observer in prepared.modules():
+            if (
+                isinstance(observer, AffineObserverBase)
+                and observer.channel_axis is not None
+            ):
+                candidate = observer.derive_candidate()
+                assert candidate.scale is not None and candidate.zero_point is not None
+                observer.load_qparams(
+                    candidate.scale.float(), candidate.zero_point, lock=True
+                )
     return case.convert_model(prepared, {}), sample
 
 
 @unittest.skipUnless(_has_qwen3_vl().available, "Qwen3-VL unavailable")
 class TestQwen3VLWrapperSmokeFullExport(unittest.TestCase):
     """Retain vision, DeepStack, text, and optional LM head with frozen source state."""
+
+    @torch.no_grad()
+    def test_bfloat16_full_prefill_matches_eager_and_preserves_static_inputs(self):
+        for case_type in (QwenModelCase, QwenForConditionalGenerationCase):
+            with self.subTest(case=case_type.__name__):
+                case = case_type()
+                quantized, sample = _prepare(case, dtype=torch.bfloat16)
+                quantized.eval()
+                before = _state_contract(quantized)
+                modes = {
+                    name: (module.training, getattr(module, "_mode", None))
+                    for name, module in quantized.named_modules()
+                }
+                self.assertEqual(sample.kwargs["input_ids"].dtype, torch.int64)
+                self.assertEqual(sample.kwargs["image_grid_thw"].dtype, torch.int64)
+                self.assertEqual(sample.kwargs["pixel_values"].dtype, torch.bfloat16)
+                for observer in quantized.modules():
+                    if (
+                        isinstance(observer, AffineObserverBase)
+                        and observer.channel_axis is not None
+                    ):
+                        scale = observer.require_frozen().scale
+                        assert scale is not None
+                        self.assertEqual(scale.dtype, torch.float32)
+                expected = case.output_tensor(case.forward(quantized, sample))
+                self.assertEqual(expected.dtype, torch.bfloat16)
+
+                def check_static_inputs(invocation):
+                    adapter = cast(
+                        "Qwen3VLModelPrefillExportAdapter", invocation.module
+                    )
+                    values = {
+                        name: (value, value.detach().clone())
+                        for name, value in adapter.static_inputs.named_buffers()
+                    }
+                    self.assertEqual(values["position_ids"][0].dtype, torch.int64)
+                    for name in ("attention_mask", "cos", "sin"):
+                        self.assertEqual(values[name][0].dtype, torch.float32)
+                        self.assertEqual(values[name][0].device.type, "cpu")
+                    actual = case.output_tensor(
+                        invocation.module(*invocation.inputs.args)
+                    )
+                    self.assertEqual(actual.shape, expected.shape)
+                    self.assertEqual(actual.dtype, expected.dtype)
+                    self.assertEqual(actual.device, expected.device)
+                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                    for name, (original, saved) in values.items():
+                        value = getattr(adapter.static_inputs, name)
+                        self.assertIs(value, original)
+                        self.assertEqual(value.dtype, saved.dtype)
+                        self.assertEqual(value.device, saved.device)
+                        torch.testing.assert_close(value, saved, atol=0, rtol=0)
+
+                with case.export_context(quantized, sample, {}):
+                    check_static_inputs(case.export_invocation(quantized, sample, {}))
+                self.assertFalse(
+                    any(
+                        hasattr(module, "_static_export_inputs")
+                        for module in quantized.modules()
+                    )
+                )
+                self.assertEqual(before, _state_contract(quantized))
+                self.assertEqual(
+                    modes,
+                    {
+                        name: (module.training, getattr(module, "_mode", None))
+                        for name, module in quantized.named_modules()
+                    },
+                )
+                with self.assertRaisesRegex(RuntimeError, "BF16 context probe"):
+                    with case.export_context(quantized, sample, {}):
+                        check_static_inputs(
+                            case.export_invocation(quantized, sample, {})
+                        )
+                        raise RuntimeError("BF16 context probe")
+                self.assertFalse(
+                    any(
+                        hasattr(module, "_static_export_inputs")
+                        for module in quantized.modules()
+                    )
+                )
+                self.assertEqual(before, _state_contract(quantized))
+                self.assertEqual(
+                    modes,
+                    {
+                        name: (module.training, getattr(module, "_mode", None))
+                        for name, module in quantized.named_modules()
+                    },
+                )
 
     @torch.no_grad()
     def test_full_cases_export_through_runner_and_replay_saved_files(self):
