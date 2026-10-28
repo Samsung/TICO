@@ -21,6 +21,14 @@ GroupKey = tuple[QuantModuleBase, str]
 Groups = dict[GroupKey, tuple[ObserverBase, ...]]
 FreezePlan = dict[ObserverBase, FrozenObserverState]
 Conditions = dict[nn.Module, set[frozenset[GroupKey]]]
+Boundary = tuple[GroupKey, tuple[str, ...]]
+RouteContext = tuple[
+    nn.Module,
+    frozenset[GroupKey],
+    frozenset[GroupKey],
+    frozenset[Boundary],
+    frozenset[nn.Module],
+]
 
 
 def _modules(root: nn.Module) -> list[QuantModuleBase]:
@@ -43,42 +51,102 @@ def _inventory(
     modules: list[QuantModuleBase],
 ) -> tuple[Groups, set[ObserverBase], list[ObserverBase], Conditions]:
     groups: Groups = {}
-    boundaries: dict[nn.Module, list[GroupKey]] = {}
+    declarations: dict[QuantModuleBase, frozenset[Boundary]] = {}
     for owner in modules:
-        for name, subtrees in owner._conditional_quant_subtrees().items():
+        declared: set[Boundary] = set()
+        for name, declared_paths in owner._conditional_quant_subtrees().items():
+            if not isinstance(name, str) or not name or name == "required":
+                raise RuntimeError(
+                    "Conditional capability names must be nonempty and optional."
+                )
+            if not isinstance(declared_paths, tuple) or not declared_paths:
+                raise RuntimeError(
+                    f"Conditional capability {name!r} must declare a nonempty tuple of registered module paths."
+                )
             key = (owner, name)
             groups.setdefault(key, ())
-            for subtree in subtrees:
-                boundaries.setdefault(subtree, []).append(key)
+            for path in declared_paths:
+                if (
+                    not isinstance(path, str)
+                    or not path
+                    or any(not part for part in path.split("."))
+                ):
+                    raise RuntimeError(
+                        "Conditional subtrees require relative registration-path strings; "
+                        "migrate module-object declarations."
+                    )
+                parts = tuple(path.split("."))
+                target: nn.Module = owner
+                path_ancestors: set[nn.Module] = {owner}
+                for part in parts:
+                    child = target._modules.get(part)
+                    if child is None:
+                        raise RuntimeError(
+                            f"Conditional capability {name!r}: path {path!r} is not a registered module path."
+                        )
+                    if child in path_ancestors:
+                        raise RuntimeError(
+                            "Conditional module paths must not cross registration cycles."
+                        )
+                    path_ancestors.add(child)
+                    target = child
+                declared.add((key, parts))
+        declarations[owner] = frozenset(declared)
 
-    # A tied module may be reached through a required path or either of several
-    # optional paths. Preserve those alternatives instead of making every alias
-    # conditional just because one reference sits under an optional branch.
+    # Pending path suffixes are anchored to each owner occurrence. A boundary
+    # belongs to that registration route, even when intermediate containers or
+    # the target module are aliased elsewhere. Raw registrations preserve aliases
+    # that nn.Module.children() intentionally deduplicates.
+    boundary_keys = set(groups)
     paths: Conditions = {}
-    visited: set[tuple[nn.Module, frozenset[GroupKey], frozenset[QuantModuleBase]]] = (
-        set()
-    )
-
-    contexts: list[
-        tuple[nn.Module, frozenset[GroupKey], frozenset[QuantModuleBase]]
-    ] = [(root, frozenset(), frozenset())]
+    requirement_boundaries: dict[QuantModuleBase, set[GroupKey]] = {}
+    contexts: list[RouteContext] = [
+        (root, frozenset(), frozenset(), frozenset(), frozenset())
+    ]
+    visited: set[RouteContext] = set()
     while contexts:
-        node, gates, ancestors = contexts.pop()
-        gates = gates | frozenset(
-            key for key in boundaries.get(node, ()) if key[0] in ancestors
-        )
-        context = (node, gates, ancestors)
+        node, gates, nearest, pending_paths, ancestors = contexts.pop()
+        if isinstance(node, QuantModuleBase):
+            pending_paths = pending_paths | declarations[node]
+        context = (node, gates, nearest, pending_paths, ancestors)
         if context in visited:
             continue
         visited.add(context)
         if isinstance(node, QuantModuleBase):
             paths.setdefault(node, set()).add(gates)
-            ancestors = ancestors | {node}
-        contexts.extend(
-            (child, gates, ancestors)
-            for child in node.children()
-            if child not in ancestors
-        )
+            requirement_boundaries.setdefault(node, set()).update(nearest)
+        ancestors = ancestors | {node}
+        for child_name, child in node._modules.items():
+            if child is None:
+                continue
+            if child in ancestors:
+                if any(remaining[0] == child_name for _, remaining in pending_paths):
+                    raise RuntimeError(
+                        "Conditional module paths must not cross registration cycles."
+                    )
+                continue
+            crossed = frozenset(
+                key for key, remaining in pending_paths if remaining == (child_name,)
+            )
+            if len(crossed) > 1:
+                raise RuntimeError(
+                    "A conditional registration edge must have one capability owner; "
+                    "use distinct registered aliases for alternative capabilities."
+                )
+            remaining_paths = frozenset(
+                (key, remaining[1:])
+                for key, remaining in pending_paths
+                if remaining[0] == child_name and len(remaining) > 1
+            )
+            contexts.append(
+                (
+                    child,
+                    gates | crossed,
+                    crossed or nearest,
+                    remaining_paths,
+                    ancestors,
+                )
+            )
 
     conditional = {
         module: alternatives
@@ -86,7 +154,12 @@ def _inventory(
         if frozenset() not in alternatives
     }
     owners: dict[ObserverBase, QuantModuleBase] = {}
+    local_groups: dict[QuantModuleBase, dict[str, tuple[ObserverBase, ...]]] = {}
     for module in modules:
+        local_groups[module] = {
+            name: tuple(observers)
+            for name, observers in module.local_observer_groups().items()
+        }
         registered = set()
         pending = list(module.children())
         while pending:
@@ -95,8 +168,7 @@ def _inventory(
                 continue
             registered.add(child)
             pending.extend(child.children())
-        for name, observers in module.local_observer_groups().items():
-            observers = tuple(observers)
+        for name, observers in local_groups[module].items():
             for observer in observers:
                 if not isinstance(observer, ObserverBase) or observer not in registered:
                     raise RuntimeError(
@@ -111,11 +183,24 @@ def _inventory(
                 owners[observer] = module
             key = (module, name)
             groups[key] = tuple(dict.fromkeys(observers))
-    for (module, _), owned in list(groups.items()):
-        for parent_key in {
-            key for gates in conditional.get(module, ()) for key in gates
-        }:
-            groups[parent_key] = tuple(dict.fromkeys(groups[parent_key] + owned))
+    for module in modules:
+        local = local_groups[module]
+        for name, observers in local.items():
+            if (
+                name != "required"
+                and not observers
+                and (module, name) not in boundary_keys
+            ):
+                raise RuntimeError(
+                    "Empty optional capability has no declared quantization sites."
+                )
+        # Required work belongs to the nearest boundary. Independent optional
+        # local groups and nested boundaries must not make their enclosing route
+        # unavailable merely because those optional paths were not calibrated.
+        for parent_key in requirement_boundaries.get(module, ()):
+            groups[parent_key] = tuple(
+                dict.fromkeys(groups[parent_key] + tuple(local.get("required", ())))
+            )
     required: set[ObserverBase] = set()
     for (module, name), observers in groups.items():
         if name == "required" and module not in conditional:
@@ -154,7 +239,11 @@ def enable_calibration(root: nn.Module) -> None:
         module._prepare_calibration()
 
 
-def _available(module: QuantModuleBase, groups: Groups, plan: FreezePlan) -> set[str]:
+def _available(
+    module: QuantModuleBase, groups: Groups, plan: FreezePlan, conditional: Conditions
+) -> set[str]:
+    if not _entry_available(module, conditional, groups, plan):
+        return set()
     return {
         name
         for (owner, name), observers in groups.items()
@@ -195,7 +284,7 @@ def freeze_qparams(root: nn.Module) -> None:
         for dependency in module._freeze_dependencies():
             if dependency not in plan:
                 plan[dependency] = dependency.require_frozen()
-        module._validate_freeze(plan, _available(module, groups, plan))
+        module._validate_freeze(plan, _available(module, groups, plan, conditional))
 
     # Installation changes only observer buffers and scalar lifecycle state. Keep
     # their references for rollback, including a failing extension's last install.
@@ -221,7 +310,7 @@ def freeze_qparams(root: nn.Module) -> None:
             else:
                 observer.enabled = False
         for module in modules:
-            module._ready_capabilities = _available(module, groups, plan)
+            module._ready_capabilities = _available(module, groups, plan, conditional)
             module._conditional_unavailable = not _entry_available(
                 module, conditional, groups, plan
             )
@@ -274,7 +363,7 @@ def validate_frozen_model(root: nn.Module) -> None:
         unavailable = not _entry_available(module, conditional, groups, plan)
         if module._conditional_unavailable != unavailable:
             raise RuntimeError("Corrupt conditional subtree readiness; recalibrate.")
-        available = _available(module, groups, plan)
+        available = _available(module, groups, plan, conditional)
         if module._ready_capabilities != available:
             raise RuntimeError(
                 "Corrupt frozen capability state; reprepare and recalibrate."

@@ -15,18 +15,23 @@
 """Regression tests for the split Gemma4 text PLE quantization boundary."""
 
 import unittest
+from unittest import mock
 
 import torch
 from tico.passes.decompose_fake_quantize_tensor_qparams import (
     DecomposeFakeQuantizeTensorQParams,
 )
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4TextDecoderLayerDecodeExportAdapter,
     Gemma4TextDecoderLayerPrefillExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.serialize.quant_param import QPARAM_KEY
 
 
@@ -63,8 +68,16 @@ class _FrozenPLEObserver(ObserverBase):
         )
 
 
-class _FakeDecoderLayer(torch.nn.Module):
+class _FakeDecoderLayer(QuantModuleBase):
     """Consume the decoder adapter ABI while keeping the test graph minimal."""
+
+    def __init__(self, *, mode=Mode.NO_QUANT):
+        super().__init__()
+        if mode is Mode.QUANT:
+            self.freeze_qparams()
+
+    def _all_observers(self):
+        return ()
 
     def forward(
         self,
@@ -141,7 +154,7 @@ class TestGemma4TextPLEExportBoundary(unittest.TestCase):
         per_layer_input = torch.randn_like(hidden)
 
         prefill = Gemma4TextDecoderLayerPrefillExportAdapter(
-            _FakeDecoderLayer(),
+            _FakeDecoderLayer(mode=Mode.QUANT),
             return_kv=False,
             mode=Mode.QUANT,
             per_layer_input_observer=observer,
@@ -153,7 +166,7 @@ class TestGemma4TextPLEExportBoundary(unittest.TestCase):
         )
 
         decode = Gemma4TextDecoderLayerDecodeExportAdapter(
-            _FakeDecoderLayer(),
+            _FakeDecoderLayer(mode=Mode.QUANT),
             return_kv=False,
             mode=Mode.QUANT,
             per_layer_input_observer=observer,
@@ -195,6 +208,81 @@ class TestGemma4TextPLEExportBoundary(unittest.TestCase):
             per_layer_input=per_layer_input,
         )
         torch.testing.assert_close(output, hidden + per_layer_input)
+
+    def test_unavailable_decoder_rejects_before_borrowed_ple_quantization(self) -> None:
+        class InputLayer(_FakeDecoderLayer):
+            def __init__(self):
+                super().__init__()
+                self.obs_input = MinMaxObserver(
+                    name="input", dtype=DType.uint(8), qscheme=QScheme.PER_TENSOR_ASYMM
+                )
+
+            def _all_observers(self):
+                return (self.obs_input,)
+
+        class OptionalHolder(QuantModuleBase):
+            def __init__(self):
+                super().__init__()
+                self.layer = InputLayer()
+
+            def _all_observers(self):
+                return ()
+
+            def _conditional_quant_subtrees(self):
+                return {"layer": ("layer",)}
+
+        holder = OptionalHolder()
+        holder.enable_calibration()
+        holder.freeze_qparams()
+        observer = _FrozenPLEObserver()
+        for adapter_type in (
+            Gemma4TextDecoderLayerPrefillExportAdapter,
+            Gemma4TextDecoderLayerDecodeExportAdapter,
+        ):
+            with mock.patch.object(
+                observer, "fake_quant", wraps=observer.fake_quant
+            ) as quantize:
+                with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                    adapter_type(
+                        holder.layer,
+                        return_kv=False,
+                        mode=Mode.QUANT,
+                        per_layer_input_observer=observer,
+                    )(
+                        torch.zeros(1, 1, 4),
+                        torch.zeros(1, 1, 1, 1),
+                        (torch.zeros(1, 1, 4), torch.zeros(1, 1, 4)),
+                        per_layer_input=torch.zeros(1, 1, 4),
+                    )
+                quantize.assert_not_called()
+
+    def test_ready_decoder_rejects_changed_mode_before_boundary_quantization(
+        self,
+    ) -> None:
+        for adapter_type in (
+            Gemma4TextDecoderLayerPrefillExportAdapter,
+            Gemma4TextDecoderLayerDecodeExportAdapter,
+        ):
+            layer = _FakeDecoderLayer()
+            observer = _FrozenPLEObserver()
+            adapter = adapter_type(
+                layer,
+                return_kv=False,
+                mode=Mode.NO_QUANT,
+                per_layer_input_observer=observer,
+            )
+            layer.freeze_qparams()
+            with mock.patch.object(
+                observer, "fake_quant", wraps=observer.fake_quant
+            ) as quantize:
+                with self.assertRaisesRegex(RuntimeError, "mode"):
+                    adapter(
+                        torch.zeros(1, 1, 4),
+                        torch.zeros(1, 1, 1, 1),
+                        (torch.zeros(1, 1, 4), torch.zeros(1, 1, 4)),
+                        per_layer_input=torch.zeros(1, 1, 4),
+                    )
+                quantize.assert_not_called()
 
     def test_calibration_mode_is_rejected_at_export_boundary(self) -> None:
         """A split artifact must be produced only before or after calibration."""

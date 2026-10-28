@@ -72,6 +72,30 @@ reject with migration guidance. Exporters read `require_frozen()` snapshots;
 profile-generated constants use separate local observers. They never recalibrate
 source-model sites.
 
+Conditional subtree declarations identify owner-relative registration paths, for
+example `{"token_embeddings": ("embed_tokens",)}` or
+`{"vision": ("stages.0.vision",)}`. A gate applies only when that path's registration
+edge is crossed. An ungated alias keeps the child required; distinct optional
+aliases are alternative entry routes. Nested optional sites do not become
+requirements of an enclosing capability. Each conditional edge has one named
+owner; empty declarations, paths through registration cycles and old module-object
+declarations reject with migration guidance. Ordinary aliases and registration
+cycles remain supported by the once-only inventory.
+
+Quantized module-call dispatch rejects completely unavailable subtrees, including
+direct child calls and restored whole-module objects. Detached stages also retain
+an `ExportCapabilityGuard` for the named route, outside their registered tensor
+tree, and check it before executing a child or building a profile. This keeps the
+live readiness owner without copying or registering its unused weights. Stages
+with a captured export mode must be rebuilt if the owner changes mode; an explicit
+float mode cannot bypass a quantized owner's capability or producer observer.
+Plain floating stages require an explicit `Mode.NO_QUANT` contract.
+
+An empty imported per-channel tensor can establish rank and channel extent even
+though it contributes no numerical statistics. Locked grids are validated against
+that shape before it is recorded. Empty uncalibrated tensors still cannot create
+qparams or establish calibration readiness.
+
 The [frozen-state report](../../../docs/archive/wrapq-frozen-state-design-investigation-20261027.md)
 records the ownership rationale, migration decisions and validation evidence.
 

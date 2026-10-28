@@ -33,13 +33,17 @@ import tico.quantization.recipes.export.gemma4 as gemma_export
 import torch
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.identity import IdentityObserver
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4PLEEmbeddingExportAdapter,
     Gemma4PLEProjectionExportAdapter,
     Gemma4VisionPrefillExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 class FakePTQWrapper(torch.nn.Module):
@@ -201,6 +205,7 @@ class FakeGemmaModel(torch.nn.Module):
 
     def __init__(self, *, ple_dim: int = 2):
         super().__init__()
+        self._mode = Mode.NO_QUANT
         self.vision_tower = FakePTQWrapper(FakeVision())
         self.language_model = FakePTQWrapper(FakeText(ple_dim=ple_dim))
         self.embed_vision = torch.nn.Identity()
@@ -250,6 +255,57 @@ def _model_args():
 
 
 class TestGemma4PerLayerExport(unittest.TestCase):
+    def test_unavailable_fusion_rejects_before_any_stage_write(self):
+        class FusionOwner(QuantModuleBase):
+            def __init__(self, source):
+                super().__init__()
+                self.vision_tower = source.vision_tower
+                self.embed_vision = source.embed_vision
+                self.language_model = source.language_model
+                self.visual_start_idx = source.visual_start_idx
+                self.num_visual_tokens = source.num_visual_tokens
+                self.obs_vision = IdentityObserver(name="vision")
+                self.obs_mm_fusion = MinMaxObserver(
+                    name="mm_fusion",
+                    dtype=DType.uint(8),
+                    qscheme=QScheme.PER_TENSOR_ASYMM,
+                )
+                self.freeze_qparams()
+
+            def _all_observers(self):
+                return (self.obs_vision, self.obs_mm_fusion)
+
+            def local_observer_groups(self):
+                return {
+                    "required": (),
+                    "vision": (self.obs_vision,),
+                    "multimodal_fusion": (self.obs_mm_fusion,),
+                }
+
+        export_model = FakeExportModel()
+        gemma = FusionOwner(export_model.wrapped.model.wrapped)
+        export_model.wrapped.model.wrapped = gemma
+        self.assertTrue(gemma.has_capability("vision"))
+        self.assertFalse(gemma.has_capability("multimodal_fusion"))
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+                return_value=(export_model, "q"),
+            ),
+            _patch_small_ple_table(),
+            patch.object(gemma_export, "_convert_and_save") as write_stage,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "capability.*multimodal_fusion"):
+                gemma_export.export_gemma4_per_layer(
+                    q_model=export_model,
+                    max_seq_len=4,
+                    output_dir=tmpdir,
+                    model_args=_model_args(),
+                )
+            write_stage.assert_not_called()
+
     def test_exports_all_static_runtime_stages(self):
         """Gemma4 staged export should emit vision, PLE, prefill, and decode graphs."""
         calls = []

@@ -473,6 +473,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         Returns:
             The version-compatible Qwen3-VL vision output.
         """
+        self.require_capability("required")
         return self._forward_impl(
             hidden_states,
             pos_embeds=pos_embeds,

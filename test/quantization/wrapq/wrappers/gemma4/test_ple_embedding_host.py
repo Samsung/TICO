@@ -17,6 +17,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -222,19 +223,37 @@ class TestGemma4PLEEmbeddingHostArtifact(unittest.TestCase):
         self._assert_parity(adapter, host)
 
     def test_quant_artifact_requires_frozen_qparams(self):
-        """Saving before convert must fail loudly instead of writing junk."""
+        """A reset site cannot be serialized under stale wrapper readiness."""
+        from tico.quantization.wrapq.wrappers.gemma4 import ple_embedding_host
+
+        qtext, adapter = _make_adapter(self.cfg, quantized=True)
+        qtext.embed_tokens_per_layer.wrapped.obs_weight.reset()
+        with mock.patch.object(
+            ple_embedding_host,
+            "_observer_payload",
+            wraps=ple_embedding_host._observer_payload,
+        ) as observer_payload:
+            with self.assertRaisesRegex(RuntimeError, "not frozen"):
+                ple_embedding_host.build_gemma4_ple_embedding_artifact(adapter)
+            observer_payload.assert_not_called()
+
+    def test_explicit_quant_mode_rejects_unconverted_owner_before_payload(self):
+        """An export-mode override cannot fabricate converted readiness."""
+        from tico.quantization.wrapq.wrappers.gemma4 import ple_embedding_host
         from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
             Gemma4PLEEmbeddingExportAdapter,
         )
-        from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
-            build_gemma4_ple_embedding_artifact,
-        )
 
         qtext, _adapter = _make_adapter(self.cfg, quantized=False)
-        # Pretend the model is quantized without ever computing qparams.
-        adapter = Gemma4PLEEmbeddingExportAdapter(qtext, mode=Mode.QUANT)
-        with self.assertRaisesRegex(RuntimeError, "not frozen"):
-            build_gemma4_ple_embedding_artifact(adapter)
+        with mock.patch.object(
+            ple_embedding_host,
+            "_quantized_weight_payload",
+            wraps=ple_embedding_host._quantized_weight_payload,
+        ) as weight_payload:
+            with self.assertRaisesRegex(RuntimeError, "mode"):
+                adapter = Gemma4PLEEmbeddingExportAdapter(qtext, mode=Mode.QUANT)
+                ple_embedding_host.build_gemma4_ple_embedding_artifact(adapter)
+            weight_payload.assert_not_called()
 
     def test_loader_rejects_foreign_or_versioned_payloads(self):
         """The host table validates stage and schema before use."""

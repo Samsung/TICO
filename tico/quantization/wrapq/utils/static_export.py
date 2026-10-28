@@ -20,6 +20,47 @@ from typing import Iterator
 import torch
 from torch import nn
 
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+
+
+class ExportCapabilityGuard:
+    """Retain a stage's readiness owner without registering its unused weights.
+
+    Stages may be constructed before freeze, so readiness is checked both here
+    and at every entry. A plain floating stage must explicitly declare NO_QUANT;
+    quantized stages always require the live WrapQ owner's capability protocol.
+    """
+
+    def __init__(
+        self,
+        owner: nn.Module,
+        *capabilities: str,
+        mode: Mode | None = None,
+    ) -> None:
+        self.owner = owner
+        self.capabilities = capabilities
+        self.mode = mode
+        self.require()
+
+    def require(self) -> None:
+        if isinstance(self.owner, QuantModuleBase):
+            self.owner.require_entry_available()
+            for capability in self.capabilities:
+                self.owner.require_capability(capability)
+            if self.mode is not None and self.owner._mode is not self.mode:
+                raise RuntimeError(
+                    "Export stage mode does not match its capability owner; rebuild "
+                    "the adapter after calibration or conversion."
+                )
+        elif self.mode not in (None, Mode.NO_QUANT) or (
+            getattr(self.owner, "_mode", self.mode) is not Mode.NO_QUANT
+        ):
+            raise TypeError(
+                "Quantized export requires a WrapQ capability owner; plain "
+                "floating stages must explicitly declare Mode.NO_QUANT."
+            )
+
 
 def validate_static_length(length: object, capacity: int) -> int:
     """Validate an explicit profile without consulting calibration settings."""

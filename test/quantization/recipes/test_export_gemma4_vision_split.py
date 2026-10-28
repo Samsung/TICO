@@ -36,6 +36,7 @@ from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
@@ -43,6 +44,7 @@ from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
     Gemma4VisionEncoderLayerExportAdapter,
     Gemma4VisionPatchStageExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 class FakeObserver(MinMaxObserver):
@@ -244,7 +246,7 @@ class FakeVisionModelExport(torch.nn.Module):
         return self.wrapped.forward_export(pixel_values)
 
 
-class FakeVision(torch.nn.Module):
+class FakeVision(QuantModuleBase):
     """Expose the production vision-wrapper attributes needed by the builder."""
 
     std_bias: torch.Tensor
@@ -270,6 +272,11 @@ class FakeVision(torch.nn.Module):
         self.obs_std_scale = FakeObserver("std_scale", 0.125)
         self.register_buffer("std_bias", torch.tensor([0.125, -0.25]))
         self.register_buffer("std_scale", torch.tensor([1.0, 0.5]))
+
+    def _all_observers(self):
+        return tuple(
+            module for module in self.modules() if isinstance(module, MinMaxObserver)
+        )
 
     def as_export_module(
         self,
@@ -341,6 +348,7 @@ class FakeText(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
+        self._mode = Mode.NO_QUANT
         self.config = SimpleNamespace(
             hidden_size=4,
             hidden_size_per_layer_input=0,
@@ -356,7 +364,7 @@ class FakeText(torch.nn.Module):
         self.norm = torch.nn.Identity()
 
 
-class FakeGemmaModel(torch.nn.Module):
+class FakeGemmaModel(QuantModuleBase):
     """Provide the multimodal Gemma4 wrapper hierarchy."""
 
     def __init__(self, *, num_vision_layers: int = 3) -> None:
@@ -379,6 +387,18 @@ class FakeGemmaModel(torch.nn.Module):
             )
         self.visual_start_idx = 0
         self.num_visual_tokens = 4
+
+        self.obs_mm_fusion = IdentityObserver(name="mm_fusion")
+        self.freeze_qparams()
+
+    def _all_observers(self):
+        return (self.obs_mm_fusion,)
+
+    def local_observer_groups(self):
+        return {"required": (), "multimodal_fusion": (self.obs_mm_fusion,)}
+
+    def _conditional_quant_subtrees(self):
+        return {"vision": ("vision_tower", "embed_vision")}
 
 
 class FakeTopLevelGemma(torch.nn.Module):

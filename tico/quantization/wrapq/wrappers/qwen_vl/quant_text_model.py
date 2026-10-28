@@ -717,4 +717,4 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         return groups
 
     def _conditional_quant_subtrees(self):
-        return {"token_embeddings": (self.embed_tokens,)}
+        return {"token_embeddings": ("embed_tokens",)}

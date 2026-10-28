@@ -27,6 +27,7 @@ from tico.quantization.recipes.export.circle import (
     convert_and_save_circle as _convert_and_save,
 )
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.utils.static_export import ExportCapabilityGuard
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
@@ -975,6 +976,8 @@ def export_gemma4_per_layer(
         normalized_model_args,
     )
     qmodel, gemma_model, qvision, qtext = _unwrap_gemma4_components(export_model)
+    # The arithmetic-only fusion stage has no quantized child entry to guard it.
+    ExportCapabilityGuard(gemma_model, "multimodal_fusion")
     assert_gemma4_e2b_no_moe(qtext.config)
 
     text_capacity = int(qtext.config.max_position_embeddings)

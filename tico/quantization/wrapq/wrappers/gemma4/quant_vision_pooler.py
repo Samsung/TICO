@@ -286,6 +286,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         Returns:
             Pooled features with shape ``(1, V, D)`` in float32.
         """
+        self.require_entry_available()
         hidden_states = self._fq(hidden_states, self.obs_act_in)
 
         # Step 1: Fake-quantize input (collects stats in CALIB, applies Q-DQ in QUANT).
@@ -317,6 +318,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         output_length: int,
         pixel_position_ids: torch.Tensor,
     ) -> "Gemma4VisionPoolerPrefillExportAdapter":
+        self.require_entry_available()
         if mode != "prefill":
             raise ValueError(f"Unsupported Gemma4 VisionPooler export mode: {mode!r}")
 
@@ -356,4 +358,6 @@ class QuantGemma4VisionPooler(QuantModuleBase):
                 specialized.obs_pool_weight.derive_candidate()
             )
 
-        return Gemma4VisionPoolerPrefillExportAdapter(specialized)
+        return Gemma4VisionPoolerPrefillExportAdapter(
+            specialized, capability_owner=self
+        )

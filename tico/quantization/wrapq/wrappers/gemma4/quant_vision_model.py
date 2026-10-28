@@ -224,6 +224,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
         values and cannot mix runtime coordinates with baked encoder or pooler
         templates.
         """
+        self.require_entry_available()
         from transformers.models.gemma4.modeling_gemma4 import BaseModelOutputWithPast
 
         inputs_embeds = self.patch_embedder_export(pixel_values)
@@ -285,6 +286,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
         Returns:
             Gemma4VisionModelPrefillExportAdapter wrapping this module.
         """
+        self.require_entry_available()
         if mode != "prefill":
             raise ValueError(f"Unsupported Gemma4 VisionModel export mode: {mode!r}")
 

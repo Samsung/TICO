@@ -42,6 +42,8 @@ def _validate_local_loaded_state(module, incompatible_keys):
         return
     groups = module.local_observer_groups()
     declared = set(groups) | set(module._conditional_quant_subtrees())
+    if module._conditional_unavailable and module._ready_capabilities:
+        raise RuntimeError("Corrupt unavailable subtree capabilities; recalibrate.")
     if not module._ready_capabilities <= declared:
         raise RuntimeError("Unknown frozen capability; reprepare and recalibrate.")
     if not module._conditional_unavailable:
@@ -84,6 +86,12 @@ class QuantModuleBase(nn.Module, ABC):
         self._conditional_unavailable = False
         self.register_load_state_dict_post_hook(_validate_local_loaded_state)
 
+    def _call_impl(self, *args, **kwargs):
+        # Class-owned dispatch also protects restored whole-module objects whose
+        # constructors were not rerun; a serialized hook cannot ensure that.
+        self.require_entry_available()
+        return super()._call_impl(*args, **kwargs)
+
     def _named_child_quant_modules(self) -> Iterator[Tuple[str, "QuantModuleBase"]]:
         """
         Yield immediate QuantModuleBase descendants with their module-tree names,
@@ -125,7 +133,12 @@ class QuantModuleBase(nn.Module, ABC):
         """Declare required sites and optional execution capabilities."""
         return {"required": tuple(self._all_observers())}
 
-    def _conditional_quant_subtrees(self) -> dict[str, tuple[nn.Module, ...]]:
+    def _conditional_quant_subtrees(self) -> dict[str, tuple[str, ...]]:
+        """Name owner-relative registration paths gated by each capability.
+
+        A path identifies registration edges, including aliases and paths through
+        plain containers. Module objects cannot distinguish those routes.
+        """
         return {}
 
     def _freeze_dependencies(self) -> tuple[ObserverBase, ...]:
@@ -138,9 +151,18 @@ class QuantModuleBase(nn.Module, ABC):
         """Check semantic references after the complete subtree has loaded."""
 
     def has_capability(self, name: str) -> bool:
-        return name in self._ready_capabilities
+        return not self._conditional_unavailable and name in self._ready_capabilities
+
+    def require_entry_available(self) -> None:
+        """Protect direct child entry as well as owner-mediated execution."""
+        if self._mode is Mode.QUANT and self._conditional_unavailable:
+            raise RuntimeError(
+                f"{type(self).__name__}: conditional subtree is unavailable; "
+                "reprepare and recalibrate the owning capability."
+            )
 
     def require_capability(self, name: str) -> None:
+        self.require_entry_available()
         if self._mode is Mode.QUANT and name not in self._ready_capabilities:
             raise RuntimeError(
                 f"{type(self).__name__}: capability {name!r} is unavailable; "

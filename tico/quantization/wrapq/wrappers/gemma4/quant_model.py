@@ -320,6 +320,7 @@ class QuantGemma4Model(QuantModuleBase):
                 llm_input_ids = torch.where(
                     multimodal_mask, pad_token_id, llm_input_ids
                 )
+            text_model.require_capability("token_embeddings")
             inputs_embeds = text_model.embed_tokens(llm_input_ids)
 
         # --- Per-Layer Embeddings (PLE) -----------------------------------
@@ -485,12 +486,14 @@ class QuantGemma4Model(QuantModuleBase):
             Final hidden states after the text decoder and final norm,
             shape ``(1, S, H)``.
         """
+        self.require_entry_available()
         if not hasattr(self, "prefill_layers"):
             raise RuntimeError(
                 "forward_export() requires as_export_module() to be called first."
             )
 
         text_model = cast("QuantGemma4TextModel", self.language_model.wrapped)
+        text_model.require_capability("external_embeddings")
         text_config = self.config.get_text_config()
 
         # mypy: attention_masks and position_embeddings are required when
@@ -552,11 +555,13 @@ class QuantGemma4Model(QuantModuleBase):
         Returns:
             ``Gemma4ModelPrefillExportAdapter`` wrapping this module.
         """
+        self.require_entry_available()
         assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
 
         self.require_capability("required")
 
         text_model = cast("QuantGemma4TextModel", self.language_model.wrapped)
+        text_model.require_capability("external_embeddings")
         text_config = self.config.get_text_config()
 
         # Create text decoder layer export adapters.
@@ -610,10 +615,9 @@ class QuantGemma4Model(QuantModuleBase):
         }
 
     def _conditional_quant_subtrees(self):
-        return {
-            "vision": tuple(
-                module
-                for module in (self.vision_tower, self.embed_vision)
-                if module is not None
-            )
-        }
+        paths = tuple(
+            name
+            for name in ("vision_tower", "embed_vision")
+            if getattr(self, name) is not None
+        )
+        return {"vision": paths} if paths else {}

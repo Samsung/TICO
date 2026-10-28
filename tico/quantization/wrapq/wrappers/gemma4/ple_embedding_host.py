@@ -235,6 +235,7 @@ def _quantized_weight_payload(
 def build_gemma4_ple_embedding_artifact(adapter: nn.Module) -> dict[str, Any]:
     """Return the host ``ple_embedding`` payload for a PLE embedding adapter."""
     adapter = cast("Gemma4PLEEmbeddingExportAdapter", adapter)
+    adapter.require_available()
     embedding = _unwrap_embedding(adapter)
     module = embedding.module
     quantized = bool(adapter.quantized)

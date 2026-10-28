@@ -181,6 +181,7 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         """Run static patch projection with a pre-masked positional template."""
+        self.require_entry_available()
         hidden_states = self._project_pixel_values(pixel_values)
         position_embeddings = self._fq(
             position_embeddings,
@@ -207,6 +208,7 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         **kwargs,
     ) -> nn.Module:
         """Build a pixel-values-only adapter for one fixed position profile."""
+        self.require_entry_available()
         if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
             raise RuntimeError(
                 "Gemma4 VisionPatchEmbedder export requires NO_QUANT or "

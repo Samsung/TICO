@@ -753,4 +753,4 @@ class QuantQwen3VLModel(QuantModuleBase):
         return {"required": (), "vision": (self.obs_mm_fusion,)}
 
     def _conditional_quant_subtrees(self):
-        return {"vision": (self.visual,)}
+        return {"vision": ("visual",)}

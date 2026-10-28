@@ -475,6 +475,23 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
             )
         self.assertEqual(initial, _state_contract(q_pooler))
 
+    def test_float_profile_rejects_source_freeze_instead_of_using_stale_mode(self):
+        pooler = QuantGemma4VisionPooler(_make_pooler()).eval()
+        positions = _pixel_position_ids(1, 16)
+        hidden = torch.linspace(-1, 1, 16 * self.hidden_size).reshape(
+            1, 16, self.hidden_size
+        )
+        adapter = pooler.as_export_module(output_length=4, pixel_position_ids=positions)
+        pooler.enable_calibration()
+        pooler(hidden, positions, torch.zeros(1, 16, dtype=torch.bool), 4)
+        pooler.freeze_qparams()
+        with mock.patch.object(
+            adapter.wrapped, "forward_export", wraps=adapter.wrapped.forward_export
+        ) as compute:
+            with self.assertRaisesRegex(RuntimeError, "mode"):
+                adapter(hidden)
+            compute.assert_not_called()
+
     def test_profile_circle_constants_and_reference_parity(self):
         """Inspect real default-O1 bytes for two independently frozen profiles."""
         q_pooler = QuantGemma4VisionPooler(_make_pooler()).eval()

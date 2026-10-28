@@ -860,6 +860,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         """
         if not self.hidden_size_per_layer_input:
             raise RuntimeError("Per-layer projection is disabled for this config.")
+        self.require_capability("required")
         validate_gemma4_ple_projection_state(self)
         projection = self.per_layer_model_projection
         projection_norm = self.per_layer_projection_norm
@@ -1120,9 +1121,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         }
 
     def _conditional_quant_subtrees(self):
-        groups: dict[str, tuple[nn.Module, ...]] = {
-            "token_embeddings": (self.embed_tokens,)
-        }
+        groups: dict[str, tuple[str, ...]] = {"token_embeddings": ("embed_tokens",)}
         if self.embed_tokens_per_layer is not None:
-            groups["token_ple"] = (self.embed_tokens_per_layer,)
+            groups["token_ple"] = ("embed_tokens_per_layer",)
         return groups

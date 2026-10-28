@@ -51,6 +51,30 @@ class Conditional(Pair):
         return self._fq(x, self.first)
 
 
+class AliasHolder(QuantModuleBase):
+    def __init__(self, *, required_alias=False, leaf=None):
+        super().__init__()
+        self.optional_ref = leaf if leaf is not None else Pair()
+        self.alternative_ref = self.optional_ref
+        if required_alias:
+            self.required_ref = self.optional_ref
+        self.first_trigger = MinMaxObserver(name="first_trigger")
+        self.second_trigger = MinMaxObserver(name="second_trigger")
+
+    def _all_observers(self):
+        return self.first_trigger, self.second_trigger
+
+    def local_observer_groups(self):
+        return {
+            "required": (),
+            "first": (self.first_trigger,),
+            "second": (self.second_trigger,),
+        }
+
+    def _conditional_quant_subtrees(self):
+        return {"first": ("optional_ref",), "second": ("alternative_ref",)}
+
+
 class TestFrozenLifecycle(unittest.TestCase):
     def test_once_only_arbitrary_containers_and_aliases(self):
         leaf = Pair()
@@ -107,7 +131,7 @@ class TestFrozenLifecycle(unittest.TestCase):
                 return ()
 
             def _conditional_quant_subtrees(self):
-                return {"branch": (self.branch,)}
+                return {"branch": ("branch",)}
 
         leaf = Pair()
         root = nn.ModuleList([Holder(leaf), leaf])
@@ -130,7 +154,7 @@ class TestFrozenLifecycle(unittest.TestCase):
                 return {"required": (), "branch": (self.trigger,)}
 
             def _conditional_quant_subtrees(self):
-                return {"branch": (self.branch,)}
+                return {"branch": ("branch",)}
 
         leaf = Pair()
         first, second = Holder(leaf), Holder(leaf)
@@ -146,6 +170,325 @@ class TestFrozenLifecycle(unittest.TestCase):
         self.assertFalse(leaf._conditional_unavailable)
         root.load_state_dict(copy.deepcopy(root.state_dict()))
 
+    def test_same_parent_required_alias_cannot_hide_missing_calibration(self):
+        model = AliasHolder(required_alias=True)
+        model.enable_calibration()
+        with self.assertRaisesRegex(RuntimeError, "calibration"):
+            model.freeze_qparams()
+        self.assertIs(model.optional_ref, model.required_ref)
+        self.assertIs(model.required_ref._mode, Mode.CALIB)
+        self.assertIsNone(model.required_ref.first.frozen_state)
+
+    def test_same_parent_optional_aliases_admit_either_complete_capability(self):
+        for selected in ("first", "second", None):
+            with self.subTest(selected=selected):
+                model = AliasHolder()
+                model.enable_calibration()
+                x = torch.tensor([-1.0, 2.0])
+                model.optional_ref(x)
+                if selected is not None:
+                    getattr(model, selected + "_trigger").collect(x)
+                with patch.object(
+                    model.optional_ref.first,
+                    "install_candidate",
+                    wraps=model.optional_ref.first.install_candidate,
+                ) as install:
+                    model.freeze_qparams()
+                self.assertEqual(install.call_count, int(selected is not None))
+                self.assertEqual(model.has_capability("first"), selected == "first")
+                self.assertEqual(model.has_capability("second"), selected == "second")
+                self.assertEqual(
+                    model.optional_ref._conditional_unavailable, selected is None
+                )
+                restored = AliasHolder()
+                restored.load_state_dict(copy.deepcopy(model.state_dict()))
+                self.assertIs(restored.optional_ref, restored.alternative_ref)
+                self.assertEqual(
+                    restored._ready_capabilities, model._ready_capabilities
+                )
+                self.assertEqual(
+                    restored.optional_ref._ready_capabilities,
+                    model.optional_ref._ready_capabilities,
+                )
+                if selected is not None:
+                    self.assertTrue(
+                        torch.equal(model.optional_ref(x), restored.optional_ref(x))
+                    )
+                else:
+                    self.assertFalse(restored.optional_ref.has_capability("required"))
+
+    def test_required_alias_topology_roundtrip_and_readiness_validation(self):
+        model = AliasHolder(required_alias=True)
+        model.enable_calibration()
+        x = torch.tensor([-1.0, 2.0])
+        model.required_ref(x)
+        model.first_trigger.collect(x)
+        model.freeze_qparams()
+        state = copy.deepcopy(model.state_dict())
+        restored = AliasHolder(required_alias=True)
+        restored.load_state_dict(state)
+        self.assertIs(restored.required_ref, restored.optional_ref)
+        self.assertIs(restored.required_ref, restored.alternative_ref)
+        self.assertTrue(restored.has_capability("first"))
+        self.assertFalse(restored.has_capability("second"))
+        self.assertFalse(restored.required_ref._conditional_unavailable)
+        self.assertTrue(torch.equal(model.required_ref(x), restored.required_ref(x)))
+        for alias in ("required_ref", "optional_ref", "alternative_ref"):
+            state[alias + "._extra_state"]["conditional_unavailable"] = True
+        with self.assertRaisesRegex(RuntimeError, "[Cc]onditional|[Uu]navailable"):
+            restored.load_state_dict(state, strict=False)
+
+    def test_conditional_paths_preserve_aliases_of_intermediate_containers(self):
+        containers = {
+            "plain": lambda leaf: (nn.Module(), "leaf"),
+            "list": lambda leaf: (nn.ModuleList([leaf]), "0"),
+            "dict": lambda leaf: (nn.ModuleDict({"leaf": leaf}), "leaf"),
+            "sequential": lambda leaf: (nn.Sequential(leaf), "0"),
+        }
+        for name, build in containers.items():
+            with self.subTest(container=name):
+
+                class Holder(QuantModuleBase):
+                    def __init__(self):
+                        super().__init__()
+                        leaf = Pair()
+                        container, child_name = build(leaf)
+                        if name == "plain":
+                            container.leaf = leaf
+                        self.required_container = container
+                        self.optional_container = container
+                        self.path = "optional_container." + child_name
+
+                    def _all_observers(self):
+                        return ()
+
+                    def _conditional_quant_subtrees(self):
+                        return {"optional": (self.path,)}
+
+                model = Holder()
+                model.enable_calibration()
+                with self.assertRaisesRegex(RuntimeError, "calibration"):
+                    model.freeze_qparams()
+
+    def test_conditional_paths_through_plain_containers_can_be_unavailable(self):
+        class Holder(QuantModuleBase):
+            def __init__(self):
+                super().__init__()
+                self.container = nn.Module()
+                self.container.entries = nn.ModuleDict({"leaf": Pair()})
+
+            def _all_observers(self):
+                return ()
+
+            def _conditional_quant_subtrees(self):
+                return {"optional": ("container.entries.leaf",)}
+
+        model = Holder()
+        model.enable_calibration()
+        model.freeze_qparams()
+        self.assertFalse(model.has_capability("optional"))
+        leaf = model.get_submodule("container.entries.leaf")
+        assert isinstance(leaf, Pair)
+        self.assertTrue(leaf._conditional_unavailable)
+        restored = Holder()
+        restored.load_state_dict(copy.deepcopy(model.state_dict()))
+        self.assertFalse(restored.has_capability("optional"))
+
+    def test_registration_cycles_do_not_duplicate_or_reclassify_required_work(self):
+        model = AliasHolder(required_alias=True)
+        model.plain = nn.Module()
+        model.plain.loop = model.plain
+        model.loop = model
+        model.enable_calibration()
+        x = torch.tensor([-1.0, 2.0])
+        model.required_ref(x)
+        with patch.object(
+            model.required_ref.first,
+            "install_candidate",
+            wraps=model.required_ref.first.install_candidate,
+        ) as install:
+            model.freeze_qparams()
+        self.assertEqual(install.call_count, 1)
+        self.assertFalse(model.required_ref._conditional_unavailable)
+
+    def test_nested_optional_local_group_does_not_disable_required_child_route(self):
+        child = Conditional()
+        model = AliasHolder(leaf=child)
+        model.enable_calibration()
+        x = torch.tensor([-1.0, 2.0])
+        child(x)
+        model.first_trigger.collect(x)
+        model.freeze_qparams()
+        self.assertTrue(model.has_capability("first"))
+        self.assertFalse(child._conditional_unavailable)
+        self.assertTrue(child.has_capability("required"))
+        self.assertFalse(child.has_capability("cache"))
+        self.assertIsNotNone(child.first.frozen_state)
+        self.assertIsNone(child.last.frozen_state)
+        child(x)
+        with self.assertRaisesRegex(RuntimeError, "capability 'cache'"):
+            child(x, use_cache=True)
+        restored = AliasHolder(leaf=Conditional())
+        restored.load_state_dict(copy.deepcopy(model.state_dict()))
+        self.assertTrue(restored.has_capability("first"))
+        self.assertFalse(restored.optional_ref.has_capability("cache"))
+
+    def test_nested_conditional_boundary_does_not_disable_outer_required_route(self):
+        class Nested(Pair):
+            def __init__(self):
+                super().__init__()
+                self.optional_child = Pair()
+
+            def _conditional_quant_subtrees(self):
+                return {"nested": ("optional_child",)}
+
+        model = AliasHolder(leaf=Nested())
+        model.enable_calibration()
+        x = torch.tensor([-1.0, 2.0])
+        model.optional_ref(x)
+        model.first_trigger.collect(x)
+        model.freeze_qparams()
+        self.assertTrue(model.has_capability("first"))
+        self.assertFalse(model.optional_ref.has_capability("nested"))
+        nested_child = model.optional_ref.get_submodule("optional_child")
+        assert isinstance(nested_child, Pair)
+        self.assertTrue(nested_child._conditional_unavailable)
+        restored = AliasHolder(leaf=Nested())
+        restored.load_state_dict(copy.deepcopy(model.state_dict()))
+        self.assertTrue(restored.has_capability("first"))
+        self.assertFalse(restored.optional_ref.has_capability("nested"))
+        state = copy.deepcopy(model.state_dict())
+        for alias in ("optional_ref", "alternative_ref"):
+            state[alias + "._extra_state"]["capabilities"].append("nested")
+        with self.assertRaisesRegex(RuntimeError, "Corrupt frozen capability"):
+            restored.load_state_dict(state, strict=False)
+
+    def test_unavailable_stateless_child_has_no_vacuously_ready_groups(self):
+        class Stateless(QuantModuleBase):
+            def _all_observers(self):
+                return ()
+
+        model = AliasHolder(leaf=Stateless())
+        model.enable_calibration()
+        model.freeze_qparams()
+        self.assertTrue(model.optional_ref._conditional_unavailable)
+        self.assertEqual(model.optional_ref._ready_capabilities, set())
+        restored = AliasHolder(leaf=Stateless())
+        restored.load_state_dict(copy.deepcopy(model.state_dict()))
+        self.assertEqual(restored.optional_ref._ready_capabilities, set())
+
+    def test_optional_groups_can_share_an_observer_without_sharing_readiness(self):
+        class Shared(Pair):
+            def __init__(self):
+                super().__init__()
+                self.shared = MinMaxObserver(name="shared")
+
+            def _all_observers(self):
+                return super()._all_observers() + (self.shared,)
+
+            def local_observer_groups(self):
+                return {
+                    "required": (),
+                    "first": (self.first, self.shared),
+                    "last": (self.last, self.shared),
+                }
+
+        model = Shared()
+        model.enable_calibration()
+        x = torch.tensor([-1.0, 2.0])
+        model.first.collect(x)
+        model.shared.collect(x)
+        with patch.object(
+            model.shared, "install_candidate", wraps=model.shared.install_candidate
+        ) as install:
+            model.freeze_qparams()
+        self.assertEqual(install.call_count, 1)
+        self.assertTrue(model.has_capability("first"))
+        self.assertFalse(model.has_capability("last"))
+        restored = Shared()
+        restored.load_state_dict(copy.deepcopy(model.state_dict()))
+        self.assertTrue(restored.has_capability("first"))
+        self.assertFalse(restored.has_capability("last"))
+
+    def test_invalid_conditional_declarations_reject_with_migration_guidance(self):
+        class Invalid(Pair):
+            declaration: object
+
+            def _conditional_quant_subtrees(self):
+                return {"invalid": self.declaration}
+
+        empty_paths: tuple[str, ...] = ()
+        for declaration, message in (
+            ((Pair(),), "registration-path strings"),
+            ((), "registered module paths"),
+            ([], "nonempty tuple"),
+            ((item for item in empty_paths), "nonempty tuple"),
+            ((item for item in ("first",)), "nonempty tuple"),
+            (("missing",), "not a registered module path"),
+            (("first..missing",), "registration-path strings"),
+        ):
+            with self.subTest(message=message):
+                model = Invalid()
+                model.declaration = declaration
+                with self.assertRaisesRegex(RuntimeError, message):
+                    model.enable_calibration()
+
+    def test_one_registration_edge_cannot_have_multiple_capability_owners(self):
+        class SharedEdge(Pair):
+            def __init__(self):
+                super().__init__()
+                self.child = Pair()
+
+            def _conditional_quant_subtrees(self):
+                return {"first_route": ("child",), "second_route": ("child",)}
+
+        class Nested(Pair):
+            def __init__(self):
+                super().__init__()
+                self.child = Pair()
+
+            def _conditional_quant_subtrees(self):
+                return {"child_route": ("child",)}
+
+        class Ancestor(Pair):
+            def __init__(self):
+                super().__init__()
+                self.nested = Nested()
+
+            def _conditional_quant_subtrees(self):
+                return {"ancestor_route": ("nested.child",)}
+
+        for model in (SharedEdge(), Ancestor()):
+            with self.subTest(model=type(model).__name__):
+                with self.assertRaisesRegex(RuntimeError, "one capability owner"):
+                    model.enable_calibration()
+
+    def test_conditional_registration_cycles_reject_instead_of_claiming_readiness(self):
+        class Cycle(Pair):
+            def _conditional_quant_subtrees(self):
+                return {"cycle": ("parent",)}
+
+        model = Cycle()
+        model.parent = model
+        with self.assertRaisesRegex(RuntimeError, "registration cycles"):
+            model.enable_calibration()
+        root = nn.Module()
+        root.child = Cycle()
+        root.child.parent = root
+        with self.assertRaisesRegex(RuntimeError, "registration cycles"):
+            enable_calibration(root)
+
+    def test_empty_optional_group_without_subtree_is_rejected(self):
+        class Empty(QuantModuleBase):
+            def _all_observers(self):
+                return ()
+
+            def local_observer_groups(self):
+                return {"required": (), "missing": ()}
+
+        with self.assertRaisesRegex(RuntimeError, "Empty optional capability"):
+            Empty().enable_calibration()
+
     def test_conflicting_observer_owners_reject(self):
         first, second = Pair(), Pair()
         second.first = first.first
@@ -160,7 +503,7 @@ class TestFrozenLifecycle(unittest.TestCase):
                 self.branch = Pair()
 
             def _conditional_quant_subtrees(self):
-                return {"branch": (self.branch,)}
+                return {"branch": ("branch",)}
 
         model = OptionalTree()
         model.enable_calibration()

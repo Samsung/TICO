@@ -268,6 +268,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
             Output hidden states shaped ``(1, S, hidden_size)``.
         """
         # Precomputed position embeddings.
+        self.require_entry_available()
         cos = self._fq(
             self.position_embeddings_cos_template,
             self.obs_position_cos,
@@ -319,6 +320,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         Returns:
             A ``Gemma4VisionEncoderPrefillExportAdapter`` wrapping this module.
         """
+        self.require_entry_available()
         if mode != "prefill":
             raise ValueError(f"Unsupported Gemma4 vision encoder export mode: {mode!r}")
 

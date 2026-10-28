@@ -1584,3 +1584,309 @@ The branch remains `fix/wrapq-frozen-state`, with one implementation commit on
 `TICO-DCO-1.0-Signed-off-by: seongwoo <mhs4670go@naver.com>` are retained.
 Republishing is restricted to this branch using an explicit force-with-lease
 expectation of the previously published `273e5c53df2cd87fe83844a0514d708ce5b3856b`.
+
+
+## 25. PR #1097 review corrections (2026-10-27–28)
+
+### Revalidation baseline and scope
+
+Read the current PR diff against canonical main before modifying this slice. Both
+GitHub PR/ref inspection and fresh Git fetch confirmed branch
+`fix/wrapq-frozen-state` at `017d07a7f5fea74323ac7ab5cf3bd5dd3125247e`, with canonical
+main `261bda28ec55fdac42f59346c950326e4065f8fa`. The working tree was clean; no unrelated
+changes were overwritten. This section adds implementation corrections and fresh
+validation evidence without rewriting the approved investigation in §§1–18.
+The CPU/Python/Torch environment is unchanged from the preceding implementation.
+
+### Root causes and final ownership
+
+1. **Aliased conditional registrations.** Inventory keyed boundaries by target
+   object, and ordinary child iteration deduplicated aliases. A required edge to a
+   child consequently inherited another registration's optional gate. Declarations
+   now contain nonempty tuples of owner-relative registration paths. Raw
+   registrations preserve all edges; pending path suffixes stay anchored to the
+   particular owner occurrence. A gate applies only at its declared crossing.
+   Ungated routes remain required; distinct optional routes are alternatives.
+2. **Nested optional coupling and vacuous readiness.** Descendant optional groups
+   were folded into enclosing capability requirements, while empty groups could
+   claim readiness inside an unavailable owner. Only required sites propagate to
+   the nearest conditional boundary. Independent nested/local optional groups
+   retain their own readiness. Completely unavailable owners have no ready
+   capabilities, and restored contradictory claims reject even with `strict=False`.
+3. **Entry ownership bypass.** Top-level Gemma embedding calls, detached adapters,
+   direct `forward_export()` methods, and pure fusion exporters could bypass the
+   declaring owner's `forward()`. Common class-owned module-call dispatch now
+   rejects completely unavailable children. Named `ExportCapabilityGuard` checks
+   protect detached/direct entries, and recipe preflights check the existing
+   multimodal/DeepStack capabilities before writing any stage artifact. No new
+   quantization point is added to the pure arithmetic stages.
+4. **Stale export mode.** A pre-conversion PLE adapter could retain its float-mode
+   flag after the source became a ready quantized model, silently skipping the
+   producer observer. Stages that capture a mode bind it to the live owner and
+   reject a mismatch before lookup or borrowed fake quantization; rebuild the
+   adapter after calibration/conversion. Mode overrides cannot disable a ready
+   frozen producer boundary. Stages using only live child mode need no snapshot.
+5. **Empty imported tensors.** Collection returned before semantic shape recording.
+   Imported per-channel empty tensors now establish rank/channel extent without
+   updating min/max. The affine owner validates the prospective extent against
+   the locked grid before recording it, so a bad shape cannot poison a later
+   compatible call. Ordinary empty inputs still cannot manufacture calibration.
+
+Class-owned dispatch also protects whole-module objects whose constructors are not
+rerun by unpickling. The stage guard retains the live owner outside the registered
+stage tensor tree: it does not copy or register the source's unused weights, but
+keeps that source authority alive for the adapter lifetime. Plain floating stages
+must explicitly declare `Mode.NO_QUANT`. Validation has no tracing exception path.
+
+The transaction, snapshot schema, producer-owned Gemma shared-KV bindings,
+storage/compute cache domains and profile-local generated constants remain owned
+by the same approved components. Grid derivation/installation is still once-only
+and atomic. No model-name checks, default grids, broad catches or widened numerical
+tolerances are introduced. Existing skips are not broadened; new optional-family
+tests use the existing Transformers availability condition.
+
+### Private hook compatibility
+
+Migrate `_conditional_quant_subtrees()` from module objects to registration paths:
+
+```python
+def _conditional_quant_subtrees(self):
+    return {"optional": ("optional_ref",)}
+```
+
+Dotted paths include plain modules and named/indexed containers. Old object or
+generator declarations, empty path tuples, nonexistent paths and paths crossing a
+registration cycle reject with an explicit error. Each crossed conditional edge
+has one named capability owner; use distinct registered aliases for alternative
+capabilities. Properly nested distinct edges and ordinary module registration
+cycles remain supported. Optional local groups need sites or an actual subtree
+rather than vacuous readiness. Interim PR checkpoints containing invalid phantom
+ready capabilities now reject/recalibrate instead of being silently normalized.
+These are private-hook corrections; no inference from ambiguous object aliases or
+permanent compatibility flag is retained.
+
+### Regression evidence and validation
+
+This correction adds **50 test methods**, removes none, and migrates existing
+synthetic fixtures to real capability ownership or explicit floating mode.
+Existing earlier sections retain their original baseline labels.
+
+| Coverage | Regression and positive controls |
+|---|---|
+| Lifecycle inventory, 14 added methods | Required/optional same-parent aliases; alternative optional aliases; tied parents; dotted paths through all four container types; required routes through another holder; nested optional independence; exact state restore and corrupt readiness; once-only installation; cycles and malformed declarations |
+| Observer snapshots, 5 added methods with subcases | MinMax/EMA, positive/negative channel axes, compatible/mismatched empty imports, ordinary empty tensors, exact pending/frozen state round trips, unchanged grid/policy/provenance/lock |
+| Common entry, 9 new methods | Direct child rejection before `forward`; live named adapter checks; source/state-dict/whole-module restore; no unused source weights registered in stages; explicit float ownership and stale mode rejection; `strict=False` corruption rejection |
+| Llama/Qwen staged entries, 6 new methods | Missing token/vision guards before spies execute; live preconstructed stages; restored readiness; actual Llama token Circle contracts and reference execution |
+| Gemma conditional entries, 9 new methods | External embeddings plus explicit PLE calibration; top-level token rejection; token/PLE/projection/vision/split guards; borrowed observer entry; restored state; stale PLE mode; actual source/restored token and PLE Circle exports |
+| Adjacent boundaries, 7 added methods | Gemma decoder external-embedding and pooler mode boundaries; pure Gemma fusion/Qwen DeepStack recipe preflight before writes; existing PLE state preserved by owner admission; host payload refuses an unconverted owner or corrupted frozen site |
+
+Before-fix checks used isolated copies of the original PR implementation under
+`/tmp`; no temporary revert remains in the repository. In particular,
+`/tmp/tico-review-lifecycle-old-method.py` executes the actual new
+`test_same_parent_required_alias_cannot_hide_missing_calibration` method against
+the original lifecycle, translating only string paths to its equivalent old
+module-object declaration. It exits **1**, one failure, `RuntimeError not raised`.
+The same method on the corrected implementation exits **0**. Additional baseline
+logs show the empty-import tests failing with unknown extent or accepted mismatch,
+Llama/Gemma/Qwen export entries reaching unfrozen observers, and fusion/DeepStack
+recipes failing to reject unavailable capabilities. Positive controls, including
+valid export and exact snapshot assertions, are expected to pass both versions.
+
+The nested-capability probe on `017d07a` reported a calibrated required child
+unavailable because its independent optional cache was absent. The stale PLE probe
+on that baseline reported zero producer fake-quant calls in a stale float adapter,
+versus one in a fresh quantized adapter, and maximum output difference
+`0.05806326866149902`. Both conditions now have explicit regressions.
+
+Focused commands executed from the repository root:
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest discover -s test/quantization/wrapq/observers -t . -q
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.test_conditional_entry_guard test.quantization.wrapq.test_lifecycle test.quantization.wrapq.observers.test_frozen_state test.quantization.recipes.test_frozen_snapshot_consumers -q
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.test_conditional_export_entries test.quantization.recipes.test_export_qwen3_vl -q
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.recipes.test_export_qwen3_vl test.quantization.recipes.test_export_llama test.quantization.wrapq.wrappers.llama.test_quant_model test.quantization.wrapq.wrappers.qwen_vl.test_quant_text_model test.quantization.wrapq.wrappers.qwen_vl.test_quant_model test.quantization.wrapq.wrappers.qwen_vl.test_quant_vision_model -q
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.recipes.test_gemma4_wrapper_smoke_static_runtime_profile test.quantization.recipes.test_static_gemma4_vision_export_profile test.quantization.wrapq.wrappers.gemma4.test_gemma4_ple_scale_fusion_integration test.quantization.wrapq.wrappers.gemma4.test_ple_embedding_host test.quantization.wrapq.wrappers.gemma4.test_conditional_capabilities test.quantization.wrapq.wrappers.gemma4.test_text_decoder_ple_export_boundary test.quantization.wrapq.wrappers.gemma4.test_quant_vision_pooler test.quantization.recipes.test_export_gemma4 test.quantization.recipes.test_export_gemma4_vision_split -q
+PYTHONPATH=/tmp/tico-torch211:$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.recipes.test_gemma4_wrapper_smoke_static_runtime_profile test.quantization.recipes.test_static_gemma4_vision_export_profile test.quantization.wrapq.wrappers.gemma4.test_gemma4_ple_scale_fusion_integration test.quantization.wrapq.wrappers.gemma4.test_ple_embedding_host test.quantization.wrapq.wrappers.gemma4.test_conditional_capabilities test.quantization.wrapq.wrappers.gemma4.test_text_decoder_ple_export_boundary test.quantization.wrapq.wrappers.gemma4.test_quant_vision_pooler test.quantization.recipes.test_export_gemma4 test.quantization.recipes.test_export_gemma4_vision_split -q
+PYTHONPATH=/tmp/tico-torch211:$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.test_conditional_entry_guard test.quantization.wrapq.test_lifecycle test.quantization.wrapq.observers.test_frozen_state test.quantization.wrapq.test_conditional_export_entries test.quantization.recipes.test_frozen_snapshot_consumers -q
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -u -m tico.quantization.examples.inspector --config tico/quantization/examples/configs/wrapper_smoke.yaml --mode wrapper-smoke --case all --no-plot --calibration-iters 1 --output-dir /tmp/tico-1097-wrapper-smoke
+source .venv/bin/activate
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex test
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex format --no-apply-patches
+git diff --check 017d07a7f5fea74323ac7ab5cf3bd5dd3125247e
+```
+
+The Torch 2.11 command uses an isolated installation with matching torchvision;
+the default environment remains Torch 2.13.0+cpu, Python 3.12.14, Transformers 5.18.
+Activation before repository-wide static checks is necessary so their child
+Python resolves the configured venv dependencies.
+
+| Check | Exit / result / evidence |
+|---|---|
+| All observer tests | 0; 83 passed, 2.556 s; `/tmp/tico-pr1097-empty-after.log` |
+| Final common lifecycle, entry, frozen-state and consumer scope | 0; 77 passed, 0.246 s; `/tmp/tico-1097-core-final.log` |
+| Llama/Qwen staged entries and recipe scope | 0; 12 passed, 5.353 s; `/tmp/tico-1097-conditional-export-final.log` |
+| Related existing Llama/Qwen model/adapter scope | 0; 109 passed, 8.980 s; `/tmp/tico-1097-llama-qwen-focused.log` |
+| Final Gemma model, PLE, adapters, recipes and migrated fixtures | 0; 80 passed, 21.428 s; `/tmp/tico-1097-gemma-complete-final.log` |
+| Torch 2.11 common/Llama/Qwen supported endpoint | 0; 83 passed, 1.795 s; `/tmp/tico-1097-torch211.log` |
+| Torch 2.11 Gemma model/PLE/adapters/recipes endpoint | 0; 80 passed, 8.588 s; `/tmp/tico-1097-torch211-gemma.log` |
+| Configured wrapper-smoke matrix | 0; **50/50 PASS**; `/tmp/tico-1097-wrapper-smoke.log` and output directory |
+| Full repository non-model tests | 0; **4,715 run, 4,558 passed, 157 existing skips**, 1,356.953 s; `/tmp/tico-1097-full-final.log` |
+| Full repository UFMT/mypy/Pylint | 0; **No lint issues**; `/tmp/tico-1097-format-complete.log` |
+| Whitespace and declaration/caller searches | 0; all five subtree overrides migrated, no obsolete object declarations or new TODO/FIXME |
+
+All 50 added test methods execute successfully in the final full suite; no new
+family-availability skip fires in this environment. Exact skip evidence is also
+recorded in `/tmp/tico-1097-full-summary.json`:
+
+| Existing skipped coverage | Count / concrete reason |
+|---|---|
+| Internal / internal smoke suites | 57 require `--include-internal`; 68 require `RUN_INTERNAL_TESTS=1` |
+| Unsupported operators/kernels/runtime paths | 11: 2 not yet supported, 5 missing kernels, 3 unsupported operators, 1 dynamic/TransposeConv backend limitation |
+| QuantConv3d wrapper tests | 11; that wrapper is not currently used for Conv3d |
+| Torch redundant-slice cases | 3; this Torch graph does not produce those redundant slices |
+| Gemma assistant/target integration | 2; local `GEMMA4_ASSISTANT_PATH` / `GEMMA4_TARGET_PATH` checkpoints unavailable |
+| Plotting | 1; optional `plotext` is not installed; wrapper smoke runs with `--no-plot` |
+| ONE backend inference | 1; opt-in external runtime |
+| Real >2 GiB serialization | 3; opt-in high-memory integration |
+| Skip-runner fixture | 1 deliberate skip used to test reporting |
+
+Small deterministic model/cache/Circle tests provide the relevant substitute for
+asset-dependent coverage. GPU/NPU execution, opt-in external ONE inference and
+large-checkpoint/real >2 GiB cases remain unverified by this CPU correction run.
+The default environment and installed dependencies were not changed to run the
+isolated Torch 2.11 checks.
+
+An initial full-suite run exposed four invalid static-vision test fixtures and was
+stopped deliberately (exit 130), then targeted audit found the related PLE fixtures.
+They bypassed initialized common owners or requested QUANT on plain/unconverted
+owners. Fixtures now use actual ownership/common freeze or explicit NO_QUANT;
+existing numerical assertions remain, and new assertions retain early mode and
+corrupted-weight payload refusal. This did not require production relaxation.
+The first full static check found a missing type annotation on an empty-generator
+negative fixture (exit 1); adding its tuple annotation made the repeated full
+check pass (exit 0). A later focused rerun had one import error from a misspelled
+module argument (`/tmp/tico-1097-gemma-complete.log`, exit 1); the corrected exact
+command above passed all 80 tests. No source validation or numerical tolerance
+was weakened.
+
+### Actual Circle artifact evidence
+
+Exports below use the default O1 pipeline. Tests and probes inspect serialized
+Circle tensor metadata and operators, then execute the Circle reference runtime.
+Intermediate affine Q/DQ represents quantization points; the final artifacts below
+have **zero Quantize and zero Dequantize nodes**. This is measured from artifacts,
+not inferred from FX or eager parity.
+
+| Stage / artifact | Final ABI and topology | Exact grid / numerical evidence |
+|---|---|---|
+| Llama token, source and restored | `INT64 (1,3)` with no input qparam → `UINT8 (1,3,8)`; one GATHER | Output `(scale=.125, zp=113)`; weight `UINT8 (16,8)`, per-channel axis 0; source/restored contracts, constants and reference outputs exact; encoded eager/reference maximum error 0 |
+| Gemma token, source and restored | `INT64 (1,3)` without qparam → `UINT8 (1,3,16)`; GATHER, MUL; 3,080 bytes | Output `(.0017429371364414692, 131)`; source/restored constants/metadata exact; encoded reference error 0 |
+| Gemma PLE, source and restored | `INT64 (1,3)` without qparam → `UINT8 (1,3,2,8)`; GATHER, MUL, RESHAPE; 3,024 bytes | Output `(.0011358337942510843, 125)`; source/restored contracts/constants exact; encoded reference error 0 |
+| Qwen token, original/current/restored | `INT64 (1,7)` → `UINT8 (1,7,8)`; one GATHER | Output `(.00028570194263011217,150)`; all tensor contracts/constants unchanged; existing eager/reference max error `.00013420346658676863` unchanged |
+| Qwen multimodal embeddings, original/current/restored | INT64 IDs plus `FLOAT32 (4,8)` image input → `FLOAT32 (1,7,8)` without ABI qparam; five operators | Existing mixed representation, constants and metadata unchanged; same existing max error `.00013420346658676863` |
+| Qwen vision, original/current/restored | `UINT8 (16,12)` → two `UINT8 (4,8)` outputs; 109 operators | Input `(.007843137718737125,127)`; outputs `(.0001352409308310598,122)` / `(.00008336875180248171,115)`; reference error 0 |
+| Gemma conditional-holder pooler profiles 4 / 16 | `UINT8 (1,16,32)` → `UINT8 (1,4/16,32)`; BATCH_MATMUL, MUL; 1,336 / 1,528 bytes | Input `(.007843137718737125,127)`; output `(.030475512146949768,128)`; all five tensors UINT8 with qparams; zero verification issues; encoded reference max/RMS 0 |
+
+A separate nine-export comparison loads the original `017d07a` Llama/Gemma
+adapter implementations and compares them with current adapters and restored
+owners on identical current frozen inputs. Llama token (1,024 bytes), Gemma token
+(3,080 bytes) and Gemma PLE (3,024 bytes) are **byte-identical across all three
+variants**, including names, tensor grids, constants, topology/options and outputs.
+All documents verify successfully, reference/eager maximum error is zero, and
+source snapshots remain unchanged. This isolates adapter changes; it does not
+claim to execute the historical lifecycle. Evidence and artifacts are in
+`/tmp/tico-adapter-before-after/comparison.json`.
+
+The pooler is admitted through `{"vision": ("pooler",)}` in a real common owner.
+Both profiles preserve source snapshots, all buffers and capabilities. Their
+generated UINT8 matrices have profile-local scales `.0009803922148421407` and
+`.003921568859368563`, zp 0; building the second profile preserves the first
+adapter's matrix/grid/output and the source model exactly.
+
+Persistent session evidence is under `/tmp`: Gemma token/PLE artifacts and summary
+`tico-gemma-guard-{source,restored}-{token,ple}.circle` /
+`tico-gemma-guard-artifacts.json`; nine Qwen artifacts
+`tico-1097-qwen-{token,multimodal,vision}-{before,after,restored}.circle` /
+`tico-1097-qwen-adapters.json`; pooler artifacts and complete tensor/verification
+evidence in `tico-pr1097-conditional-pooler/`. Reproduction commands executed:
+
+```bash
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_adapter_before_after_artifacts.py
+PYTHONPATH=/workspace/TICO OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_1097_qwen_adapter_probe.py
+PYTHONPATH=/workspace/TICO OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_gemma_guard_artifacts.py
+PYTHONPATH=/workspace/TICO OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -u /tmp/tico_pr1097_conditional_pooler_probe.py
+PYTHONPATH=/workspace/TICO OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico-review-lifecycle-old-method.py
+```
+
+All four artifact probes exit 0; the last command is the deliberate old-code
+regression, expected exit 1. Permanent regression tests include actual exports;
+temporary inspection scripts/artifacts are not added to the source tree.
+CPU FAKE_QUANTIZE reference execution does not establish integer NPU/GPU behavior.
+No large remote model was needed. The fresh full-suite Gemma UINT8 equal-grid
+cache matrix retains the existing decode half-tie: max `.03125`, mean `.00390625`,
+one differing value, for both O1 settings; KV outputs remain exact. The separate
+frozen-state decoder fixture reports max `.03125`, mean `.0052083334885537624`.
+These are existing fixture-specific reference differences, with no widened
+tolerance; the zero-error stage comparisons above do not imply full-model
+integer-runtime parity.
+
+Some mixed/NO_QUANT integration fixtures retain the existing `[QuantCheck]
+WARNING: 1 nodes without qparam` output. These logs are not evidence of a fully
+quantized ABI: the table records each inspected artifact's actual tensor types and
+metadata, including intentionally FLOAT32 Qwen fusion interfaces. No validation
+flag or tolerance was changed to suppress those messages.
+
+### Changed production files and final review
+
+The complete production Python inventory for this review correction is:
+
+```text
+tico/quantization/recipes/export/gemma4.py
+tico/quantization/recipes/export/qwen3_vl.py
+tico/quantization/wrapq/lifecycle.py
+tico/quantization/wrapq/observers/affine_base.py
+tico/quantization/wrapq/observers/base.py
+tico/quantization/wrapq/utils/static_export.py
+tico/quantization/wrapq/wrappers/gemma4/export_adapters.py
+tico/quantization/wrapq/wrappers/gemma4/ple_embedding_host.py
+tico/quantization/wrapq/wrappers/gemma4/quant_model.py
+tico/quantization/wrapq/wrappers/gemma4/quant_text_model.py
+tico/quantization/wrapq/wrappers/gemma4/quant_vision_encoder.py
+tico/quantization/wrapq/wrappers/gemma4/quant_vision_model.py
+tico/quantization/wrapq/wrappers/gemma4/quant_vision_patch_embedder.py
+tico/quantization/wrapq/wrappers/gemma4/quant_vision_pooler.py
+tico/quantization/wrapq/wrappers/gemma4/vision_split_export.py
+tico/quantization/wrapq/wrappers/llama/export_adapters.py
+tico/quantization/wrapq/wrappers/llama/quant_model.py
+tico/quantization/wrapq/wrappers/quant_module_base.py
+tico/quantization/wrapq/wrappers/qwen_vl/export_adapters.py
+tico/quantization/wrapq/wrappers/qwen_vl/quant_model.py
+tico/quantization/wrapq/wrappers/qwen_vl/quant_text_model.py
+tico/quantization/wrapq/wrappers/qwen_vl/quant_vision_model.py
+```
+
+The WrapQ README documents the new private declaration and stage-entry contracts.
+The obsolete object-boundary inventory is removed, with every in-tree declaration
+migrated. No old/new parallel path or permanent migration flag remains. Review of
+all local observer groups, subtree declarations, capability calls and relevant
+direct/export entries covered Llama, Qwen and Gemma, as well as fairseq local
+optional mask/past groups. Existing cache policy validation remains local to its
+model. A Gemma config without a vision module still fails at the pre-existing PTQ
+constructor boundary before observer allocation; supporting it is outside this
+correction, so no unsupported inactive observer path is fabricated.
+
+Independent final maintainer review found no correctness blocker, stale caller,
+unrelated refactor, new TODO, tolerance widening or obsolete production lifecycle
+override. Required calibration, strict corruption detection and atomic rollback
+retain their original owner. The hook migration, unavailable-readiness rejection
+and live stage mode binding are the only compatibility adjustments beyond the
+review's explicitly requested edge ownership and empty-shape behavior. Their
+rationale and migration are documented above.
+
+The correction is split into two follow-up commits on the existing PR head:
+`[wrapq] Preserve imported channel extents from empty tensors` and
+`[wrapq] Track conditional capabilities by registration path`. Both carry
+`TICO-DCO-1.0-Signed-off-by: seongwoo <mhs4670go@naver.com>`. A final fresh fetch
+confirmed the same canonical main baseline; publication is a normal fast-forward
+of `fix/wrapq-frozen-state`. The force-with-lease record in §24 belongs to that
+earlier rebase.

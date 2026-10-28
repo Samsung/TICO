@@ -27,7 +27,10 @@ import torch.nn as nn
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
-from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
+from tico.quantization.wrapq.utils.static_export import (
+    ExportCapabilityGuard,
+    require_static_decoder_inputs,
+)
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     fixed_slot_fuse,
     lookup_gemma4_per_layer_token_inputs,
@@ -143,12 +146,16 @@ class Gemma4TokenEmbeddingExportAdapter(nn.Module):
 
     def __init__(self, wrapped_text_model: nn.Module):
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(
+            wrapped_text_model, "token_embeddings"
+        )
         self.embed_tokens = cast(
             "QuantGemma4TextModel", wrapped_text_model
         ).embed_tokens
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Return token embeddings for static runtime execution."""
+        self._capability_guard.require()
         return self.embed_tokens(input_ids)
 
 
@@ -182,7 +189,9 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
     """Export adapter for the shared, CPU-executed PLE token-identity lookup.
 
     This stage owns ``embed_tokens_per_layer``, the very large per-layer
-    embedding table, and nothing else from the text model. It is exported once
+    embedding table, and no other registered text-model tensor state. A live
+    readiness owner is retained outside the registered stage tree, so capability
+    checks do not register unused weights or copy the source model. It is exported once
     as a dynamic-sequence Circle graph (``ple_embedding``) and reused by both
     prefill (``S = max_seq_len``) and decode (``S = 1``).
 
@@ -211,6 +220,11 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
             raise RuntimeError(
                 "Gemma4 PLE embedding export requires hidden_size_per_layer_input > 0."
             )
+        self._capability_guard = ExportCapabilityGuard(
+            wrapped_text_model,
+            "token_ple",
+            mode=_resolve_ple_export_mode(wrapped_text_model, mode),
+        )
         self.embed_tokens_per_layer = _require_ple_attribute(
             wrapped_text_model, "embed_tokens_per_layer"
         )
@@ -226,12 +240,17 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
             stage_name="Gemma4 PLE embedding",
         )
 
+    def require_available(self) -> None:
+        """Validate the lookup route before executing or serializing its table."""
+        self._capability_guard.require()
+
     def _fq(self, tensor: torch.Tensor, observer: ObserverBase) -> torch.Tensor:
         """Apply the frozen producer observer in QUANT mode only."""
         return observer.fake_quant(tensor) if self.quantized else tensor
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Return observed token-identity PLE with shape ``(1, S, L, P)``."""
+        self.require_available()
         return lookup_gemma4_per_layer_token_inputs(
             input_ids,
             embed_tokens_per_layer=self.embed_tokens_per_layer,
@@ -291,6 +310,11 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
                 "Gemma4 PLE projection export requires "
                 "hidden_size_per_layer_input > 0."
             )
+        self._capability_guard = ExportCapabilityGuard(
+            wrapped_text_model,
+            "required",
+            mode=_resolve_ple_export_mode(wrapped_text_model, mode),
+        )
         validate_gemma4_ple_projection_state(wrapped_text_model)
         self.per_layer_model_projection = _require_ple_attribute(
             wrapped_text_model, "per_layer_model_projection"
@@ -355,6 +379,7 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
         per_layer_token_inputs: torch.Tensor,
     ) -> torch.Tensor:
         """Return packed per-layer inputs with shape ``(1, S, L, P)``."""
+        self._capability_guard.require()
         per_layer_token_inputs = self._fq(
             per_layer_token_inputs, self.per_layer_token_inputs_observer
         )
@@ -402,6 +427,7 @@ class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
     ) -> None:
         wrapped = cast("QuantGemma4VisionPatchEmbedder", wrapped)
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(wrapped, "required")
         self.wrapped = wrapped
         self.register_buffer(
             "position_embeddings_template",
@@ -411,6 +437,7 @@ class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Project pixels and add the baked positional-embedding template."""
+        self._capability_guard.require()
         return self.wrapped.forward_export(
             pixel_values,
             position_embeddings=self.position_embeddings_template,
@@ -437,13 +464,27 @@ class Gemma4VisionPrefillExportAdapter(nn.Module):
         self,
         vision_model: nn.Module,
         vision_projection: nn.Module,
+        capability_owner: nn.Module | None = None,
     ) -> None:
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(
+            (
+                capability_owner
+                if capability_owner is not None
+                else getattr(
+                    vision_model,
+                    "wrapped_model",
+                    getattr(vision_model, "wrapped", vision_model),
+                )
+            ),
+            "vision" if capability_owner is not None else "required",
+        )
         self.vision_model = vision_model
         self.vision_projection = vision_projection
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Run the static vision model and project its soft tokens."""
+        self._capability_guard.require()
         vision_outputs = self.vision_model(pixel_values)
         hidden_states = (
             vision_outputs
@@ -477,6 +518,7 @@ def build_gemma4_vision_prefill_export_module(
             f"got trailing dimension {pixel_position_ids.shape[-1]}."
         )
 
+    ExportCapabilityGuard(wrapped_model, "vision")
     vision_tower = getattr(wrapped_model, "vision_tower", None)
     if vision_tower is None:
         raise ValueError("Gemma4 vision prefill requires a vision tower.")
@@ -496,6 +538,7 @@ def build_gemma4_vision_prefill_export_module(
     return Gemma4VisionPrefillExportAdapter(
         vision_model=vision_model,
         vision_projection=vision_projection,
+        capability_owner=wrapped_model,
     )
 
 
@@ -568,10 +611,12 @@ class Gemma4VisionEncoderPrefillExportAdapter(nn.Module):
     def __init__(self, wrapped_encoder: nn.Module):
         wrapped_encoder = cast("QuantGemma4VisionEncoder", wrapped_encoder)
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(wrapped_encoder, "required")
         self.wrapped = wrapped_encoder
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Run a static vision encoder prefill graph."""
+        self._capability_guard.require()
         return self.wrapped.forward_export(inputs_embeds)
 
 
@@ -695,6 +740,9 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
             mode,
             stage_name="Gemma4 text decoder-layer prefill",
         )
+        self._capability_guard = ExportCapabilityGuard(
+            wrapped_layer, "required", mode=mode
+        )
 
     def forward(
         self,
@@ -705,6 +753,7 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
         shared_key_value: Optional[LayerKV] = None,
     ):
         """Run a static prefill layer graph."""
+        self._capability_guard.require()
         per_layer_input = _apply_export_boundary_observer(
             per_layer_input,
             self.per_layer_input_observer,
@@ -756,6 +805,9 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
             mode,
             stage_name="Gemma4 text decoder-layer decode",
         )
+        self._capability_guard = ExportCapabilityGuard(
+            wrapped_layer, "required", mode=mode
+        )
 
     def forward(
         self,
@@ -767,6 +819,7 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
         shared_key_value: Optional[LayerKV] = None,
     ):
         """Run a static decode layer graph and optionally return the K/V delta."""
+        self._capability_guard.require()
         per_layer_input = _apply_export_boundary_observer(
             per_layer_input,
             self.per_layer_input_observer,
@@ -811,9 +864,16 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
     def __init__(
         self,
         wrapped_pooler: nn.Module,
+        *,
+        capability_owner: nn.Module | None = None,
     ):
         wrapped_pooler = cast("QuantGemma4VisionPooler", wrapped_pooler)
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(
+            capability_owner if capability_owner is not None else wrapped_pooler,
+            "required",
+            mode=wrapped_pooler._mode,
+        )
         self.wrapped = cast("QuantGemma4VisionPooler", wrapped_pooler)
         self.num_valid_outputs = self.wrapped.num_valid_outputs
 
@@ -821,6 +881,7 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        self._capability_guard.require()
         return self.wrapped.forward_export(hidden_states=hidden_states)
 
 
@@ -914,8 +975,10 @@ class Gemma4VisionModelPrefillExportAdapter(nn.Module):
     ):
         wrapped_model = cast("QuantGemma4VisionModel", wrapped_model)
         super().__init__()
+        self._capability_guard = ExportCapabilityGuard(wrapped_model, "required")
         self.wrapped_model = wrapped_model
 
     def forward(self, pixel_values: torch.FloatTensor):
         """Run the pixel-values-only static vision model export path."""
+        self._capability_guard.require()
         return self.wrapped_model.forward_export(pixel_values=pixel_values)
