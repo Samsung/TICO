@@ -175,6 +175,14 @@ class AffineObserverBase(ObserverBase):
             "imported",
         )
 
+    def observe_shape(self, shape) -> None:
+        if self._qparams_locked and self.channel_axis is not None:
+            shape = tuple(int(n) for n in shape)
+            # Validate before recording, so a rejected call cannot replace the
+            # site's extent or change the owned imported grid.
+            self.validate_candidate(replace(self._grid_state(), observed_shape=shape))
+        super().observe_shape(shape)
+
     def _statistics_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
         return self.min_val, self.max_val
 

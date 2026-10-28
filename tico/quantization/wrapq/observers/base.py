@@ -164,7 +164,13 @@ class ObserverBase(nn.Module, ABC):
             raise ObserverNotReadyError(
                 f"Observer {self.name!r}: restored statistics require a fresh calibration cycle; reset and recalibrate."
             )
-        if self._frozen or x.numel() == 0:
+        if self._frozen:
+            return
+        if x.numel() == 0:
+            # Empty storage has no statistics, but an imported grid still needs
+            # the semantic channel extent carried by the tensor's shape.
+            if self._provenance == "imported" and self.channel_axis is not None:
+                self.observe_shape(x.shape)
             return
         # Imported locks suppress statistics, but still need the site's extent.
         self.observe_shape(x.shape)

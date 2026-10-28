@@ -125,13 +125,142 @@ class FrozenObserverStateTest(unittest.TestCase):
             obs.fake_quant(torch.ones(3, 4))
         with self.assertRaisesRegex(ObserverNotReadyError, "extent is unknown"):
             obs.derive_candidate()
-        obs.observe_shape((3, 4))
         with self.assertRaisesRegex(RuntimeError, "channel extent"):
+            obs.observe_shape((3, 4))
+        with self.assertRaisesRegex(ObserverNotReadyError, "extent is unknown"):
             obs.derive_candidate()
         obs.reset()
         obs.observe_shape((2, 4))
         obs.load_qparams(torch.tensor([0.1, 0.2]), torch.tensor([2, 3]))
         self.assertEqual(_tensor(obs.derive_candidate().scale).shape, (2,))
+
+    def test_empty_input_supplies_locked_import_channel_extent(self):
+        scale = torch.tensor([0.125, 0.25, 0.5])
+        zero_point = torch.tensor([7, 11, 13], dtype=torch.int)
+        for cls in (MinMaxObserver, EMAObserver):
+            for axis in (1, -3):
+                with self.subTest(observer=cls.__name__, axis=axis):
+                    obs = cls(
+                        name="imported_empty",
+                        qscheme=QScheme.PER_CHANNEL_ASYMM,
+                        channel_axis=axis,
+                    )
+                    obs.load_qparams(scale, zero_point, lock=True)
+                    obs.collect(torch.empty(1, 3, 0, 4))
+
+                    candidate = obs.derive_candidate()
+                    self.assertEqual(candidate.observed_shape, (1, 3, 0, 4))
+                    self.assertEqual(candidate.provenance, "imported")
+                    self.assertTrue(candidate.locked)
+                    self.assertIsNone(candidate.clipping_bounds)
+                    torch.testing.assert_close(
+                        _tensor(candidate.scale), scale, rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        _tensor(candidate.zero_point), zero_point, rtol=0, atol=0
+                    )
+                    self.assertTrue(bool(torch.isposinf(obs.min_val).all()))
+                    self.assertTrue(bool(torch.isneginf(obs.max_val).all()))
+                    self.assertIsNone(obs.frozen_state)
+                    obs.install_candidate(candidate)
+                    self.assertEqual(obs.require_frozen().observed_shape, (1, 3, 0, 4))
+
+    def test_empty_input_rejects_mismatched_locked_import_extent(self):
+        for cls in (MinMaxObserver, EMAObserver):
+            for axis in (1, -3):
+                with self.subTest(observer=cls.__name__, axis=axis):
+                    obs = cls(
+                        name="mismatched_empty",
+                        qscheme=QScheme.PER_CHANNEL_ASYMM,
+                        channel_axis=axis,
+                    )
+                    obs.load_qparams(torch.ones(3), torch.zeros(3, dtype=torch.int))
+                    with self.assertRaisesRegex(RuntimeError, "channel extent"):
+                        obs.collect(torch.empty(1, 4, 0, 4))
+                    self.assertIsNone(obs.frozen_state)
+                    self.assertTrue(bool(torch.isposinf(obs.min_val).all()))
+                    self.assertTrue(bool(torch.isneginf(obs.max_val).all()))
+                    # A rejected shape must not poison a later compatible input.
+                    obs.collect(torch.empty(1, 3, 0, 4))
+                    self.assertEqual(
+                        obs.derive_candidate().observed_shape, (1, 3, 0, 4)
+                    )
+
+    def test_empty_input_cannot_calibrate_unlocked_or_ordinary_channels(self):
+        for cls in (MinMaxObserver, EMAObserver):
+            for imported in (False, True):
+                with self.subTest(observer=cls.__name__, imported=imported):
+                    obs = cls(
+                        name="uncalibrated_empty",
+                        qscheme=QScheme.PER_CHANNEL_ASYMM,
+                        channel_axis=1,
+                    )
+                    if imported:
+                        obs.load_qparams(
+                            torch.ones(3), torch.zeros(3, dtype=torch.int), lock=False
+                        )
+                    obs.collect(torch.empty(1, 3, 0, 4))
+                    with self.assertRaises(ObserverNotReadyError):
+                        obs.derive_candidate()
+                    self.assertIsNone(obs.frozen_state)
+                    self.assertTrue(bool(torch.isposinf(obs.min_val).all()))
+                    self.assertTrue(bool(torch.isneginf(obs.max_val).all()))
+
+    def test_empty_import_extent_roundtrips_exact_state(self):
+        scale = torch.tensor([0.125, 0.25, 0.5])
+        zero_point = torch.tensor([7, 11, 13], dtype=torch.int)
+        for cls in (MinMaxObserver, EMAObserver):
+            for finalized in (False, True):
+                with self.subTest(observer=cls.__name__, finalized=finalized):
+                    obs = cls(
+                        name="restored_empty",
+                        qscheme=QScheme.PER_CHANNEL_ASYMM,
+                        channel_axis=1,
+                    )
+                    obs.disable_fake_quant()
+                    obs.load_qparams(scale, zero_point, lock=True)
+                    obs.collect(torch.empty(1, 3, 0, 4))
+                    expected = obs.derive_candidate()
+                    if finalized:
+                        obs.install_candidate(expected)
+                    receiver = cls(
+                        name="restored_empty",
+                        qscheme=QScheme.PER_CHANNEL_ASYMM,
+                        channel_axis=1,
+                    )
+                    receiver.load_state_dict(copy.deepcopy(obs.state_dict()))
+
+                    actual = receiver.derive_candidate()
+                    self.assertEqual(actual.observed_shape, (1, 3, 0, 4))
+                    self.assertEqual(actual.policy, expected.policy)
+                    self.assertEqual(actual.provenance, "imported")
+                    self.assertTrue(actual.locked)
+                    self.assertFalse(actual.fake_quant_enabled)
+                    self.assertIsNone(actual.clipping_bounds)
+                    torch.testing.assert_close(
+                        _tensor(actual.scale), scale, rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        _tensor(actual.zero_point), zero_point, rtol=0, atol=0
+                    )
+                    self.assertTrue(bool(torch.isposinf(receiver.min_val).all()))
+                    self.assertTrue(bool(torch.isneginf(receiver.max_val).all()))
+                    receiver.install_candidate(actual)
+                    self.assertEqual(
+                        receiver.require_frozen().observed_shape, (1, 3, 0, 4)
+                    )
+
+    def test_empty_input_does_not_change_stateless_policy_readiness(self):
+        for cls in (IdentityObserver, MXObserver):
+            with self.subTest(observer=cls.__name__):
+                obs = cls(name="stateless_empty")
+                obs.collect(torch.empty(1, 3, 0, 4))
+                candidate = obs.derive_candidate()
+                self.assertEqual(candidate.provenance, "stateless")
+                self.assertIsNone(candidate.observed_shape)
+                self.assertIsNone(candidate.scale)
+                obs.install_candidate(candidate)
+                self.assertEqual(obs.require_frozen().provenance, "stateless")
 
     def test_grid_shape_axis_and_symmetric_policy_validation(self):
         obs = MinMaxObserver(name="scalar")
