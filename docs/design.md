@@ -584,6 +584,13 @@ cleanup, and dtype-bridge insertion.
 These graph passes do not perform calibration and do not select a quantization
 algorithm.
 
+For mixed-input affine `uint8`/`int16` concatenations, dtype legalization inserts
+per-tensor requantization on each input connection whose dtype, scale, or zero-point
+differs from the concat's intended output domain. It preserves that output domain
+and the original producers' qparams and other uses. Fully annotated mixed-input
+domains outside this scope are rejected explicitly; uniform-input concatenations
+retain their existing legalization behavior.
+
 Wrapper fake-quantization calls mark tensor quantization domains and calibration
 points. After decomposition, their Q-DQ pairs are an intermediate representation
 of those domains; they do not require physical Circle `QUANTIZE` and `DEQUANTIZE`

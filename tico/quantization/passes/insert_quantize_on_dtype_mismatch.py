@@ -30,7 +30,7 @@ from tico.utils.errors import NotYetSupportedError
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import quant_min_max, set_new_meta_val
+from tico.utils.utils import quant_min_max
 from tico.utils.validate_args_kwargs import (
     AddTensorArgs,
     BmmArgs,
@@ -98,8 +98,9 @@ def _u8_to_i16(qparam: QuantParam) -> QuantParam:
 def _insert_quantize_op_before(node, inp):
     graph = node.graph
     qparam: QuantParam = node.meta[QPARAM_KEY]
-    assert qparam.scale is not None
-    assert qparam.zero_point is not None
+    assert qparam.scale is not None and len(qparam.scale) == 1
+    assert qparam.zero_point is not None and len(qparam.zero_point) == 1
+    assert qparam.quantized_dimension is None
     scale = qparam.scale[0]
     zerop = qparam.zero_point[0]
     min_, max_ = quant_min_max(qparam.dtype)
@@ -114,7 +115,10 @@ def _insert_quantize_op_before(node, inp):
             origin=node,
         )
         quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
-        set_new_meta_val(quantize)
+        # Folded quantized edges may already have integer value metadata, but
+        # PyTorch's quantize_per_tensor meta kernel accepts only float32 input.
+        # Circle requantization needs just the source shape and destination dtype.
+        quantize.meta["val"] = torch.empty_like(inp.meta["val"], dtype=dtype)
 
     node.replace_input_with(inp, quantize)
 
@@ -250,10 +254,47 @@ def _cat_handler(node, logger):
 
     assert len(tensors) > 0
     in_dtype = qparam_dtype(tensors[0])
-    if in_dtype == qparam_dtype(node):
+    if any(qparam_dtype(x) != in_dtype for x in tensors):
+        destination = node.meta[QPARAM_KEY]
+        qparams = [x.meta[QPARAM_KEY] for x in tensors] + [destination]
+        # Preserve the existing treatment of incompletely annotated concats.
+        if any(
+            not qparam.dtype or qparam.scale is None or qparam.zero_point is None
+            for qparam in qparams
+        ):
+            return
+
+        if any(
+            qparam.dtype not in ("uint8", "int16")
+            or qparam.quantized_dimension is not None
+            or len(qparam.scale) != 1
+            or len(qparam.zero_point) != 1
+            for qparam in qparams
+        ):
+            raise NotYetSupportedError(
+                f"Unsupported mixed-dtype concat {node.name}: "
+                f"inputs={[qparam_dtype(x) for x in tensors]}, "
+                f"output={destination.dtype}. "
+                "Only per-tensor affine uint8/int16 qparams are supported."
+            )
+
+        # Normalize to the intended output grid, including same-dtype operands
+        # with different qparams. Convert only this consumer's connections:
+        # producers may be graph inputs, graph outputs, or shared with other ops.
+        for inp in dict.fromkeys(tensors):
+            source = inp.meta[QPARAM_KEY]
+            if (
+                source.dtype != destination.dtype
+                or source.scale != destination.scale
+                or source.zero_point != destination.zero_point
+            ):
+                _insert_quantize_op_before(node, inp)
+                logger.debug(
+                    f"quantize_per_tensor.default is inserted before {node.name}."
+                )
         return
 
-    if any(qparam_dtype(x) != in_dtype for x in tensors):
+    if in_dtype == qparam_dtype(node):
         return
 
     if in_dtype == "int16" and qparam_dtype(node) == "uint8":

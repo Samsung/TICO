@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import unittest
 
 import torch
@@ -388,6 +389,265 @@ class CatTest(InsertQuantizeOnDtypeMismatchTest):
         target_pass = InsertQuantizeOnDtypeMismatch()
         with self.assertRaises(NotYetSupportedError):
             target_pass.call(self.ep)
+
+
+class _ConcatContract(torch.nn.Module):
+    def __init__(self, order, shared_producer=False):
+        super().__init__()
+        self.order = order
+        self.shared_producer = shared_producer
+
+    def forward(self, *inputs):
+        tensors = list(inputs)
+        if self.shared_producer:
+            tensors[0] = torch.relu(tensors[0])
+        concat = torch.cat([tensors[i] for i in self.order], dim=-1)
+        return concat, tensors[0], torch.neg(tensors[0])
+
+
+class MixedCatDtypeMismatchTest(unittest.TestCase):
+    def _export(self, input_qparams, output_qparam, order=None, shared_producer=False):
+        if order is None:
+            order = tuple(range(len(input_qparams)))
+        module = _ConcatContract(order, shared_producer).eval()
+        inputs = tuple(torch.full((1, 2), float(i)) for i in range(len(input_qparams)))
+        ep = torch.export.export(module, inputs)
+        placeholders = [node for node in ep.graph.nodes if node.op == "placeholder"]
+        for node, qparam in zip(placeholders, input_qparams):
+            node.meta[QPARAM_KEY] = copy.deepcopy(qparam)
+        concat = next(
+            node for node in ep.graph.nodes if node.target == torch.ops.aten.cat.default
+        )
+        concat.meta[QPARAM_KEY] = copy.deepcopy(output_qparam)
+        for node in ep.graph.nodes:
+            if node.target in (torch.ops.aten.relu.default, torch.ops.aten.neg.default):
+                node.meta[QPARAM_KEY] = copy.deepcopy(input_qparams[0])
+        return ep, concat
+
+    def _assert_conversion(self, converted, source, destination):
+        self.assertEqual(
+            converted.target,
+            torch.ops.quantized_decomposed.quantize_per_tensor.default,
+        )
+        limits = torch.iinfo(getattr(torch, destination.dtype))
+        self.assertEqual(
+            converted.args,
+            (
+                source,
+                destination.scale[0],
+                destination.zero_point[0],
+                limits.min,
+                limits.max,
+                getattr(torch, destination.dtype),
+            ),
+        )
+        self.assertEqual(converted.meta[QPARAM_KEY], destination)
+        self.assertIsNot(converted.meta[QPARAM_KEY], destination)
+
+    def _assert_stable(self, ep):
+        nodes = list(ep.graph.nodes)
+        graph = str(ep.graph)
+        qparams = {
+            node: copy.deepcopy(node.meta[QPARAM_KEY])
+            for node in nodes
+            if QPARAM_KEY in node.meta
+        }
+        InsertQuantizeOnDtypeMismatch().call(ep)
+        self.assertEqual(list(ep.graph.nodes), nodes)
+        self.assertEqual(str(ep.graph), graph)
+        for node, qparam in qparams.items():
+            self.assertEqual(node.meta[QPARAM_KEY], qparam)
+
+    def test_all_mixed_dtype_orders_use_actual_destination_grid(self):
+        for input_dtypes in (("uint8", "int16"), ("int16", "uint8")):
+            for output_dtype in ("uint8", "int16"):
+                with self.subTest(inputs=input_dtypes, output=output_dtype):
+                    sources = [
+                        QuantParam(scale=[0.125], zero_point=[91], dtype="uint8"),
+                        QuantParam(scale=[0.0625], zero_point=[0], dtype="int16"),
+                    ]
+                    if input_dtypes[0] == "int16":
+                        sources.reverse()
+                    destination = QuantParam(
+                        scale=[0.375 if output_dtype == "uint8" else 0.03125],
+                        zero_point=[137 if output_dtype == "uint8" else 0],
+                        dtype=output_dtype,
+                    )
+                    ep, concat = self._export(sources, destination)
+                    operands = tuple(concat.args[0])
+                    # Circle dtypes come from QPARAM_KEY, not the float FX values.
+                    self.assertTrue(
+                        all(
+                            node.meta["val"].dtype == torch.float32 for node in operands
+                        )
+                    )
+                    InsertQuantizeOnDtypeMismatch().call(ep)
+                    self.assertEqual(concat.meta[QPARAM_KEY], destination)
+                    for converted, source, qparam in zip(
+                        concat.args[0], operands, sources
+                    ):
+                        self._assert_conversion(converted, source, destination)
+                        self.assertEqual(source.meta[QPARAM_KEY], qparam)
+                    self._assert_stable(ep)
+
+    def test_integer_fx_values_support_both_destination_dtypes(self):
+        sources = [
+            QuantParam(scale=[0.125], zero_point=[91], dtype="uint8"),
+            QuantParam(scale=[0.0625], zero_point=[0], dtype="int16"),
+        ]
+        for output_dtype in ("uint8", "int16"):
+            with self.subTest(output=output_dtype):
+                destination = QuantParam(
+                    scale=[0.25],
+                    zero_point=[137 if output_dtype == "uint8" else 0],
+                    dtype=output_dtype,
+                )
+                ep, concat = self._export(sources, destination)
+                operands = tuple(concat.args[0])
+                for operand, qparam in zip(operands, sources):
+                    operand.meta["val"] = operand.meta["val"].to(
+                        dtype=getattr(torch, qparam.dtype)
+                    )
+                InsertQuantizeOnDtypeMismatch().call(ep)
+                for converted, source in zip(concat.args[0], operands):
+                    self._assert_conversion(converted, source, destination)
+                    self.assertEqual(
+                        converted.meta["val"].dtype, getattr(torch, output_dtype)
+                    )
+                    self.assertEqual(
+                        converted.meta["val"].shape, source.meta["val"].shape
+                    )
+                self._assert_stable(ep)
+
+    def test_later_mismatch_repeated_operands_and_matching_grid(self):
+        destination = QuantParam(scale=[0.25], zero_point=[117], dtype="uint8")
+        sources = [
+            destination,
+            QuantParam(scale=[0.25], zero_point=[29], dtype="uint8"),
+            QuantParam(scale=[0.03125], zero_point=[0], dtype="int16"),
+        ]
+        ep, concat = self._export(sources, destination, order=(0, 1, 2, 2, 0))
+        operands = tuple(concat.args[0])
+        axis = concat.args[1]
+        InsertQuantizeOnDtypeMismatch().call(ep)
+        converted = concat.args[0]
+        self.assertEqual(len(converted), len(operands))
+        self.assertIs(converted[0], operands[0])
+        self.assertIs(converted[4], operands[4])
+        self._assert_conversion(converted[1], operands[1], destination)
+        self._assert_conversion(converted[2], operands[2], destination)
+        self._assert_conversion(converted[3], operands[3], destination)
+        self.assertEqual(concat.args[1], axis)
+        self.assertEqual(concat.meta[QPARAM_KEY], destination)
+        self._assert_stable(ep)
+
+    def test_shared_producer_inputs_and_other_outputs_are_preserved(self):
+        sources = [
+            QuantParam(scale=[0.0625], zero_point=[0], dtype="int16"),
+            QuantParam(scale=[0.5], zero_point=[83], dtype="uint8"),
+        ]
+        destination = QuantParam(scale=[0.25], zero_point=[149], dtype="uint8")
+        ep, concat = self._export(sources, destination, shared_producer=True)
+        operands = tuple(concat.args[0])
+        shared = operands[0]
+        self.assertEqual(shared.target, torch.ops.aten.relu.default)
+        output = next(node for node in ep.graph.nodes if node.op == "output")
+        branch = next(
+            node for node in ep.graph.nodes if node.target == torch.ops.aten.neg.default
+        )
+        output_args = output.args
+        branch_args = branch.args
+        signature = copy.deepcopy(ep.graph_signature)
+        preserved = {
+            node: copy.deepcopy(node.meta[QPARAM_KEY])
+            for node in ep.graph.nodes
+            if QPARAM_KEY in node.meta and node is not concat
+        }
+        InsertQuantizeOnDtypeMismatch().call(ep)
+        self.assertEqual(ep.graph_signature, signature)
+        self.assertEqual(output.args, output_args)
+        self.assertEqual(branch.args, branch_args)
+        self.assertIs(branch.args[0], shared)
+        self.assertIs(output.args[0][1], shared)
+        for node, qparam in preserved.items():
+            self.assertEqual(node.meta[QPARAM_KEY], qparam)
+        for converted, source in zip(concat.args[0], operands):
+            self._assert_conversion(converted, source, destination)
+        self._assert_stable(ep)
+
+    def test_uniform_matching_inputs_remain_noops(self):
+        for dtype in ("uint8", "int16"):
+            with self.subTest(dtype=dtype):
+                qparam = QuantParam(
+                    scale=[0.125],
+                    zero_point=[113 if dtype == "uint8" else 0],
+                    dtype=dtype,
+                )
+                ep, concat = self._export([qparam, qparam, qparam], qparam)
+                graph = str(ep.graph)
+                InsertQuantizeOnDtypeMismatch().call(ep)
+                self.assertEqual(str(ep.graph), graph)
+                self.assertEqual(concat.meta[QPARAM_KEY], qparam)
+                self._assert_stable(ep)
+
+    def test_uniform_int16_to_uint8_keeps_conversion_after_concat(self):
+        source = QuantParam(scale=[0.0625], zero_point=[0], dtype="int16")
+        destination = QuantParam(scale=[0.25], zero_point=[149], dtype="uint8")
+        ep, concat = self._export([source, source], destination)
+        operands = tuple(concat.args[0])
+        InsertQuantizeOnDtypeMismatch().call(ep)
+        self.assertEqual(tuple(concat.args[0]), operands)
+        self.assertEqual(concat.meta[QPARAM_KEY].dtype, "int16")
+        output = next(node for node in ep.graph.nodes if node.op == "output")
+        self._assert_conversion(output.args[0][0], concat, destination)
+        for operand in operands:
+            self.assertEqual(operand.meta[QPARAM_KEY], source)
+        self._assert_stable(ep)
+
+    def test_unsupported_fully_quantized_mixed_inputs_fail_explicitly(self):
+        destination = QuantParam(scale=[0.25], zero_point=[117], dtype="uint8")
+        unsupported = [
+            QuantParam(scale=[0.125], zero_point=[0], dtype="int8"),
+            QuantParam(
+                scale=[0.125, 0.25],
+                zero_point=[0, 0],
+                quantized_dimension=1,
+                dtype="int16",
+            ),
+            QuantParam(
+                scale=[0.125], zero_point=[0], quantized_dimension=1, dtype="int16"
+            ),
+        ]
+        for source in unsupported:
+            with self.subTest(source=source):
+                ep, _ = self._export([destination, source], destination)
+                with self.assertRaisesRegex(
+                    NotYetSupportedError,
+                    "mixed-dtype concat.*per-tensor affine uint8/int16",
+                ):
+                    InsertQuantizeOnDtypeMismatch().call(ep)
+
+    def test_missing_or_incomplete_qparams_remain_unchanged(self):
+        sources = [
+            QuantParam(scale=[0.25], zero_point=[117], dtype="uint8"),
+            QuantParam(scale=[0.125], zero_point=[0], dtype="int16"),
+        ]
+        for missing_from in ("input", "output"):
+            for field in (None, "dtype", "scale", "zero_point"):
+                with self.subTest(missing_from=missing_from, field=field):
+                    ep, concat = self._export(sources, sources[0])
+                    node = concat.args[0][1] if missing_from == "input" else concat
+                    if field is None:
+                        del node.meta[QPARAM_KEY]
+                    else:
+                        setattr(
+                            node.meta[QPARAM_KEY],
+                            field,
+                            "" if field == "dtype" else None,
+                        )
+                    graph = str(ep.graph)
+                    InsertQuantizeOnDtypeMismatch().call(ep)
+                    self.assertEqual(str(ep.graph), graph)
 
 
 class LinearDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
