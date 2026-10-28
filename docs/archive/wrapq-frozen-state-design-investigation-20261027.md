@@ -1890,3 +1890,233 @@ The correction is split into two follow-up commits on the existing PR head:
 confirmed the same canonical main baseline; publication is a normal fast-forward
 of `fix/wrapq-frozen-state`. The force-with-lease record in §24 belongs to that
 earlier rebase.
+
+
+## 26. Pooler ownership and execution-policy follow-up (2026-10-28)
+
+### Baseline and reproduced failures
+
+The working branch and freshly inspected remote PR branch were both
+`fix/wrapq-frozen-state` at `8529074074bf5e8707ff2a340f2788dba7d73cb2`.
+The tree was clean. The PR diff against its existing main baseline was inspected;
+no reset, rebase, remote configuration change or unrelated edit was made.
+No supplied `tico_pr1097_review_repro.py` was found under the workspace or `/tmp`.
+Repository tests recreate both findings instead.
+
+Both findings reproduce in the installed supported environment: Python 3.12.14,
+Torch **2.13.0+cpu**, Transformers 5.18.0, CPU only. Dependency/import failures are
+not used as evidence. Packages were not downgraded to the review probe's Torch 2.10.
+
+1. **Duplicate ownership:** `copy.copy(self)` created a distinct pooler owner while
+   sharing five registered observer objects. The real tiny
+   `QuantGemma4VisionModel.as_export_module()` route registers that second owner
+   beside the original pooler. Initial calibration/freeze/validation and export
+   preparation succeeded, but subsequent validation, refreeze, strict state-dict
+   loading into an equivalent prepared QUANT topology, and whole-module restore
+   plus explicit validation all rejected with the reported `act_in` conflicting
+   wrapper-owner diagnostic. This is the correct inventory check exposing an
+   incorrect profile ownership graph.
+2. **Lost execution policy:** recreating only `obs_pool_weight` with its constructor
+   defaults re-enabled fake quantization. Disabled-before-freeze, disabled-after-
+   freeze and restored-disabled cases all produced enabled installed profile
+   snapshots. Before/after execution flags and candidate installation prove this
+   independently of the exactly representable pooling values.
+
+The primary ownership repository test failed on the unmodified production code
+with one error, exactly at post-preparation `validate_frozen_model`, after its
+source-snapshot assertion passed. The first eight policy methods produced 15
+assertion failures and no errors. The later Percentile method also fails against
+an isolated original method because the observer is shared. The permanent Circle
+methods, run with only the original method injected in a separate process, report
+2 policy failures and 4 ownership errors. All are behavioral failures, not missing
+imports or receiver-topology mismatches. The exploratory ownership probe exits 0
+because it explicitly asserts all four expected failures.
+
+These results extend §25's standalone profile/artifact checks. Those earlier runs
+remain attached to their earlier implementation and did not establish validity of
+an entire vision model after registering its specialized pooler.
+
+### Final ownership and policy contract
+
+A profile now constructs a fresh, small `QuantGemma4VisionPooler` owner, retaining
+only the original stateless floating pooler by reference. It creates all six
+observers through the existing factory. It does not shallow-copy module
+containers, hooks or observer objects, copy model weights, or copy calibration
+reservoirs. The scalar scaling buffer is cloned so profile movement is independent.
+
+| Site | Authoritative owner and state |
+|---|---|
+| Original six pooler observers | Original source pooler; preparation does not mutate their grids, provenance, locks, statistics or execution flags |
+| Profile `act_in`, `pool_in`, `pool_out`, `root_hidden_size`, `pool_matmul_out` | Fresh profile owner and distinct observers; subtype installation consumes exact source `FrozenObserverState` snapshots, including clipping provenance, shape, policy, lock and fake-quant flag |
+| Profile `pool_weight` | Fresh profile owner; copies only the source frozen fake-quant boolean before collection/derivation/installation, then derives the generated matrix's own grid and provenance without inheriting an unrelated grid or import lock |
+| Readiness and export mode | Existing common metadata snapshot API initializes the profile; existing adapter guard continues checking the live source owner's required capability and captured mode |
+
+All profile observers remain registered, declared and visible to ordinary common
+inventory, freezing and checkpoint validation. Identity and MX sites retain their
+own stateless kinds and do not gain fabricated affine grids. Fresh activation
+observers retain no Percentile reservoirs; exact installed frozen state is
+sufficient for refreeze without re-deriving from source statistics. New observer
+buffers use the source scalar's device, while installed snapshots preserve their
+tensor dtypes and values. Generated matrix placement continues to follow the
+construction-time position tensor, as before; callers must supply a compatible
+profile/device combination.
+
+Observer execution flags and numerical state are **snapshots at construction**.
+An already-created profile does not dynamically follow later arbitrary source
+flag changes. Rebuild it to capture those changes. Capability and mode checks
+remain live; unavailable routes or stale captured modes reject before profile
+work or execution. No common validation, conflicting-owner check, tracing guard,
+cache domain or shared-KV policy changed.
+
+### Regression and artifact evidence
+
+Twenty new methods are added in three focused files:
+
+- `test_pooler_export_ownership.py` (9): actual vision registration, exact imported
+  locked/disabled activation state, once-per-site refreeze, strict equivalent
+  two-profile topology restore, whole-module restore, two-profile/failed-profile
+  independence, genuine conflicting owners, unavailable/stale entry, and
+  independent CPU-to-meta profile movement.
+- `test_pooler_profile_policy.py` (9): all disabled timings and restored state,
+  installed candidate policy, enabled control, distinct geometry grids, import
+  lock separation, construction-time policy snapshots, Identity/MX, NO_QUANT,
+  and exact Percentile activation snapshots without reservoir copies.
+- `test_pooler_profile_circle.py` (2): real enabled/disabled profiles at lengths
+  4/16, final ABI/constant qparams, exact pooler reference parity, actual whole
+  vision conversion, post-conversion validation/refreeze, strict equivalent
+  topology restore and exact restored eager/reference results.
+
+Default-O1 artifacts are saved and inspected under
+`/tmp/tico-pooler-followup-artifacts/`, with `summary.json` and
+`vision-summary.json` recording full tensor metadata and topology.
+
+| Actual artifact | Enabled | Disabled | Verified behavior |
+|---|---|---|---|
+| Pooler length 4 | 1,336 bytes | 1,416 bytes | BATCH_MATMUL/MUL; no final Quantize/Dequantize nodes; structural verification passes; eager/FAKE_QUANTIZE reference maximum error 0 |
+| Pooler length 16 | 1,528 bytes | 2,184 bytes | Same operator contracts and exact per-policy reference parity |
+| Tiny complete vision | 30,224 bytes | 30,328 bytes | 77 operators for each policy; post-conversion validation/refreeze and equivalent-topology strict restore pass |
+
+For both pooler geometries the input is UINT8 `(1,16,8)` with scale
+`.007843137718737125`, zp 127. Output is UINT8 `(1,4/16,8)` with scale
+`.015196737833321095`, zp 128. The enabled matrix is UINT8 with per-profile scales
+`.0009803922148421407` / `.003921568859368563`, zp 0; all five pooler tensors have
+UINT8 grids. The disabled matrix correctly remains **FLOAT32 without tensor
+qparams**; the other four tensors retain UINT8 grids. Its observer still owns a
+valid newly derived frozen grid with `fake_quant_enabled=False`; that grid does
+not create a Circle quantization point when execution policy bypasses it.
+
+Enabled pooler profiles and the complete enabled vision artifact are
+**byte-identical to the original `8529074` implementation**. Disabled artifacts
+intentionally change because the original ignored their requested policy. The
+existing QuantCheck warning for one unquantized matrix is expected for that
+explicit disabled policy; no pass flag or validation was changed to suppress it.
+
+The complete vision input is UINT8 `(1,16,48)` with scale
+`.007843137718737125`, zp 127; output is UINT8 `(4,8)` with scale
+`.03365224227309227`, zp 2. Whole-tower reference/eager maximum difference is
+`.033652305603027344` for both policies, identical to the original enabled path.
+No new tolerance asserts this as exact parity. Instead the tests separately
+establish exact pooler parity, exact restored eager output and exact restored
+reference output. Structural verification, CPU fake-quant semantic comparison and
+integer target execution remain distinct; no integer NPU correctness is claimed.
+
+### Exact commands and fresh results
+
+Commands run from the repository root, with logs under `/tmp`. Baseline commands:
+
+```bash
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_pooler_ownership_review_probe.py
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.wrappers.gemma4.test_pooler_export_ownership.TestPoolerExportOwnership.test_actual_vision_export_preparation_preserves_valid_ownership -v
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.wrappers.gemma4.test_pooler_profile_policy -v
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_pooler_percentile_before.py
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_pooler_circle_before_tests.py
+```
+
+| Baseline result | Evidence |
+|---|---|
+| Probe exit 0, all four expected ownership failures asserted | `tico-pooler-ownership-review-before.log` |
+| Primary ownership test exit 1, 1 error, 0.144 s | `tico-pooler-ownership-primary-before.log` |
+| Initial 8 policy methods exit 1, 15 failures, 0 errors, 0.102 s | `tico-pooler-policy-before-final.log` |
+| Later Percentile method exit 1, 1 failure, 0 errors, 0.024 s | `tico-pooler-percentile-before.log` |
+| Circle methods with original method exit 1, 2 policy failures and 4 ownership errors, 2.609 s | `tico-pooler-circle-tests-before.log` |
+
+Post-fix validation commands:
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.wrappers.gemma4.test_pooler_profile_policy test.quantization.wrapq.wrappers.gemma4.test_quant_vision_pooler -q
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.wrappers.gemma4.test_pooler_export_ownership -v
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.wrappers.gemma4.test_pooler_profile_circle -v
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m unittest test.quantization.wrapq.test_lifecycle test.quantization.wrapq.test_conditional_entry_guard test.quantization.wrapq.test_conditional_export_entries test.quantization.wrapq.observers.test_frozen_state test.quantization.wrapq.test_control test.quantization.recipes.test_frozen_snapshot_consumers test.quantization.test_public_interface test.quantization.wrapq.wrappers.gemma4.test_conditional_capabilities test.quantization.wrapq.wrappers.gemma4.test_quant_vision_model test.quantization.recipes.test_export_gemma4 test.quantization.recipes.test_export_gemma4_vision_split test.quantization.recipes.test_gemma4_wrapper_smoke_static_runtime_profile test.quantization.recipes.test_static_gemma4_vision_export_profile -q
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -u -m tico.quantization.examples.inspector --config tico/quantization/examples/configs/wrapper_smoke.yaml --mode wrapper-smoke --case gemma4_vision_pooler --no-plot --calibration-iters 1 --output-dir /tmp/tico-pooler-followup-smoke-pooler
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -u -m tico.quantization.examples.inspector --config tico/quantization/examples/configs/wrapper_smoke.yaml --mode wrapper-smoke --case gemma4_vision_model --no-plot --calibration-iters 1 --output-dir /tmp/tico-pooler-followup-smoke-vision
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_pooler_followup_artifacts.py
+PYTHONPATH=$PWD/test:$PWD OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python /tmp/tico_pooler_followup_vision_artifacts.py
+.venv/bin/python -m ufmt format tico/quantization/wrapq/wrappers/gemma4/quant_vision_pooler.py test/quantization/wrapq/wrappers/gemma4/test_pooler_export_ownership.py test/quantization/wrapq/wrappers/gemma4/test_pooler_profile_policy.py test/quantization/wrapq/wrappers/gemma4/test_pooler_profile_circle.py
+source .venv/bin/activate
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex test
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex format --no-apply-patches
+git diff --check 8529074074bf5e8707ff2a340f2788dba7d73cb2
+```
+
+| Fresh check | Exit / result / evidence |
+|---|---|
+| Policy plus existing pooler suite | 0; 29 passed, 2.720 s; `tico-pooler-policy-final.log` |
+| Registered ownership/lifecycle suite | 0; 9 passed, 1.303 s; `tico-pooler-ownership-tests-final.log` |
+| New Circle suite, final typed fixture | 0; 2 passed, 83.714 s; `tico-pooler-circle-tests-typed-final.log` (initial functional run: 50.828 s, `tico-pooler-circle-tests.log`) |
+| Related lifecycle/alias/entry/empty-import/serialization/public-convert/Gemma model/recipe scope | 0; 147 passed, 9.518 s; `tico-pooler-followup-focused.log` |
+| Pooler wrapper smoke | 0; PASS, mean absolute diff `.052999`, max `1.665758`, PEIR `.114287`, shapes/finite pass; `tico-pooler-followup-smoke-pooler.log` |
+| Vision-model wrapper smoke | 0; PASS, mean absolute diff `.179306`, max `3.909019`, PEIR `.101260`, shapes/finite pass; `tico-pooler-followup-smoke-vision.log` |
+| Real artifact probes | 0; original/current enabled bytes equal, per-policy metadata and metrics above; `tico-pooler-followup-artifacts.log`, `tico-pooler-followup-vision-artifacts-final.log` |
+| Formatting application | 0; all 4 Python files already formatted |
+| Full repository non-model tests | 0; **4,735 run, 4,578 passed, 157 existing skips**, 1,586.108 s; `tico-pooler-followup-full.log` |
+| Full repository UFMT/mypy/Pylint | 0; **No lint issues**; `tico-pooler-followup-format-final.log` |
+| Whitespace and independent maintainer review | 0; no concrete findings, no existing skip/tolerance weakened |
+
+The first full static check exited 1 on three type errors in the new Circle
+fixture (`tico-pooler-followup-format.log`). Two identity `typing.cast()` calls
+and their import fixed the annotations, without ignore directives. An AST
+comparison proves equality after erasing those casts/import; no assertion, data or
+control flow changed. The broad test process had already imported the initial
+fixture; production and all other test bytes remained identical throughout. The
+final typed Circle fixture was separately rerun (2 passed), and the full static
+check was repeated. Proof: `.venv/bin/python
+/tmp/tico_pooler_circle_typing_equivalence.py`, exit 0, with hashes and normalized
+AST equality in `tico-pooler-circle-typing-equivalence.json`.
+
+All 20 new methods execute successfully in this fresh broad run. Its 157 skips
+are the existing categories: 125 opt-in internal cases (57/68), 11 unsupported
+operator/kernel/runtime paths, 11 unused QuantConv3d-wrapper cases, 3 Torch
+redundant-slice cases, 2 local Gemma checkpoint integrations, 1 missing optional
+plotting dependency, 1 deliberate reporting fixture, 1 opt-in ONE inference and
+3 opt-in real >2 GiB serialization cases. Exact fresh counts and reasons are in
+`/tmp/tico-pooler-followup-full-summary.json`; no new skip condition fires.
+
+The smoke metrics compare quantized eager execution with float execution; they are
+not the standalone pooler Circle/reference metrics. The latter are exactly zero.
+Only the installed Torch 2.13 environment is used for this follow-up. An optional
+availability check `test -d /tmp/tico-torch211/torch` returned 1, so no historical
+Torch 2.11 isolation was available and no such follow-up tests were executed.
+Earlier endpoint results remain historical; no dependency downgrade was performed.
+
+### Changed files, compatibility and remaining limits
+
+The only production Python change is
+`tico/quantization/wrapq/wrappers/gemma4/quant_vision_pooler.py`. All common lifecycle,
+observer, entry-guard, alias-path and empty imported-extent implementation files
+remain unchanged from `8529074`. Three new test files are listed above. The export
+README documents independent snapshots and construction-time execution policy;
+this follow-up appends evidence without rewriting historical sections.
+
+Adapter signatures and registered field names are retained. State-dict restore
+requires equivalent profile topology and matching captured QUANT mode; no
+`strict=False` mismatch concealment is used. Source-only checkpoints retain their
+existing contract. Whole-module objects that already embed the old conflicting
+observer graph are not silently repaired by validation: regenerate their profiles.
+Existing profile execution flags are preserved on restore, rather than reinterpreted
+from a later source policy. Regenerate profiles when the source policy changes.
+
+GPU/NPU execution, large checkpoint quality and opt-in external runtimes are not
+established by these CPU synthetic tests. The genuine conflicting-owner check is
+retained and still rejects in the new negative regression. No fallback, additional
+model-specific common rule, cache-domain change, tracing exemption or unrelated
+refactor is introduced.

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
@@ -44,8 +43,8 @@ class QuantGemma4VisionPooler(QuantModuleBase):
     input and the pooled output so that activation quantization ranges are
     calibrated on both sides of the pooler.
 
-    Static export specializes the pooling matrix on an adapter-local view. Its
-    generated constant grid never changes the source model's frozen observers.
+    Static export owns small independent snapshots of the activation boundaries
+    and specializes only its pooling matrix grid. Source observers stay unchanged.
     """
 
     root_hidden_size: torch.Tensor
@@ -342,21 +341,32 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             output_length=output_length,
             pixel_position_ids=pixel_position_ids,
         )
-        # Share the source's immutable activation snapshots and float module,
-        # while giving this profile independent registered state. Copying only
-        # the module dictionaries avoids duplicating model weights or samples.
-        specialized = copy.copy(self)
-        specialized._modules = self._modules.copy()
-        specialized._buffers = self._buffers.copy()
+        # A registered profile is a distinct quantization owner. Fresh observers
+        # install exact small snapshots, never shared observers or sample stores.
+        specialized = QuantGemma4VisionPooler(
+            self.module, qcfg=self.qcfg, fp_name=self.fp_name
+        )
+        specialized.training = self.training
+        specialized.root_hidden_size = self.root_hidden_size.detach().clone()
         specialized.register_buffer("pool_weights", weights)
         specialized.num_valid_outputs = num_valid_outputs
-        specialized.obs_pool_weight = self._make_obs("pool_weight")
-
-        if self._mode is Mode.QUANT:
-            specialized.obs_pool_weight.collect(weights)
-            specialized.obs_pool_weight.install_candidate(
-                specialized.obs_pool_weight.derive_candidate()
-            )
+        for source, profile in zip(
+            self._all_observers(), specialized._all_observers(), strict=True
+        ):
+            profile.to(device=self.root_hidden_size.device)
+            if self._mode is Mode.QUANT:
+                state = source.require_frozen()
+                if source is self.obs_pool_weight:
+                    # A new matrix needs its own numerical grid, but inherits the
+                    # source's execution policy at profile construction time.
+                    profile.set_fake_quant_enabled(state.fake_quant_enabled)
+                    profile.collect(weights)
+                    profile.install_candidate(profile.derive_candidate())
+                else:
+                    profile.install_candidate(state)
+            else:
+                profile.set_fake_quant_enabled(source.fake_quant_enabled)
+        specialized.set_extra_state(self.get_extra_state())
 
         return Gemma4VisionPoolerPrefillExportAdapter(
             specialized, capability_owner=self

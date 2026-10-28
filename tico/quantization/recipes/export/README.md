@@ -34,9 +34,18 @@ repreparing and recalibrating the original float model. Frozen state-dict loads
 restore wrapper mode and capability readiness without another freeze.
 
 Constants generated for a static export profile have separate local observers
-finalized through the common validator. For example, Gemma4 pooler profiles own
-their pooling matrices and grids while sharing the source's frozen activation
-snapshots. Constructing or exporting a profile must not change source snapshots.
+finalized through the common validator. Gemma4 pooler profiles own independent
+small observers: activation sites install exact source frozen snapshots, and the
+generated pooling matrix derives its own grid. Source observers and calibration
+reservoirs are not copied or shared with another quantization owner.
+
+All pooler observer execution policies are captured when constructing the profile.
+In particular, generating a new matrix preserves the source's enabled/disabled
+fake-quant policy without reusing another matrix's grid or lock. Rebuild a profile
+to capture subsequent source-policy changes. Capability and captured-mode guards
+continue to check the live source owner. Constructing or exporting a profile must
+not change source snapshots; prepared vision models remain valid for refreeze and
+checkpointing with equivalent export-profile topology.
 
 For LLaMA, Qwen3-VL, and Gemma4, `export.max_seq_len` owns static text capacity.
 It defaults independently to `min(2048, model context)` and never reads
