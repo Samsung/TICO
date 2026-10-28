@@ -16,24 +16,35 @@ _prepare_ and _convert_.
       configuration. This involves setting up necessary observers or hooks, and may
       optionally use example inputs (provided as separate positional and keyword
       arguments), which is particularly useful for activation quantization.
-  - `convert(model)`
+  - `convert(model, inplace=True)`
     - Converts the model that has been prepared and calibrated into its quantized form.
-      This function leverages the statistics collected during calibration to perform the
-      quantization transformation.
+      It retrieves the quantizer attached by `prepare()` and uses the existing
+      configuration and calibration state. It does not accept `quant_config` or
+      select or instantiate a new quantizer. PTQ wrappers retain their resolved
+      quantization policies.
 
 - Algorithm-Specific Configuration
   - Users supply algorithm-specific configuration objects (e.g., `PTQConfig` for
-    activation quantization or `GPTQConfig` for weight quantization) to the public
-    interface. These configuration objects encapsulate the parameters for each
+    activation quantization or `GPTQConfig` for weight quantization) to `prepare()`.
+    These configuration objects encapsulate the parameters for each
     quantization method.
 
 - Internal Dispatch to Quantizer Implementations
-  - `prepare` and `convert` internally dispatch an appropriate quantizer according to
-    the type of `quant_config`.
+  - `prepare()` selects the algorithm-specific quantizer through
+    `get_quantizer(quant_config)` and attaches it to the returned prepared model as
+    `tico_quantizer`. That quantizer owns its configuration; `convert()` reuses the
+    attached instance.
 
 This design ensures that users interact only with the high-level functions and
 configuration objects, while the internal details of each quantization algorithm are
 encapsulated within dedicated quantizer classes.
+
+After successful conversion, the returned model no longer carries `tico_quantizer`.
+If conversion fails, the original prepared model retains the handle for retry.
+Retaining the handle does not roll back arbitrary in-place algorithm mutations.
+For algorithms supporting `convert(prepared_model, inplace=False)`, the converted
+copy has no handle and the original prepared model keeps its handle even after
+success. GPTQ continues to require `inplace=True`.
 
 ## Basic Usage
 
