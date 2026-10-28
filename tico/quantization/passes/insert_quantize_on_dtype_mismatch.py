@@ -374,19 +374,38 @@ def _cat_handler(node, logger):
         return
 
     assert len(tensors) > 0
-    in_dtype = qparam_dtype(tensors[0])
-    if in_dtype == qparam_dtype(node):
+    out_dtype = qparam_dtype(node)
+    in_dtypes = [qparam_dtype(x) for x in tensors]
+    in_dtype = in_dtypes[0]
+
+    # Mixed inputs: align every input that doesn't match the output's grid.
+    # Cat operands must share the output's dtype & qparams; otherwise circle's
+    # type inference would overwrite the input dtypes with the output dtype.
+    # (e.g. decode KV-cache append: cat(uint8 cache, int16 new row) -> uint8)
+    if len(set(in_dtypes)) > 1:
+        if out_dtype not in ("int16", "uint8", "uint4"):
+            raise NotYetSupportedError(
+                f"Unsupported output dtype {out_dtype} for mixed-input cat (node {node.name})"
+            )
+        for x, dt in zip(tensors, in_dtypes):
+            if dt == out_dtype:
+                continue
+            if dt in ("int16", "uint8", "uint4") or is_mx_dtype(dt):
+                quantize = _insert_quantize_op_before(node, x)
+                quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+                logger.debug(
+                    f"quantize_per_tensor.default is inserted before {node.name} for {x.name}."
+                )
+            else:
+                raise NotYetSupportedError(
+                    f"Unsupported dtype: From {dt} to {out_dtype} (node {node.name})"
+                )
         return
 
-    if any(qparam_dtype(x) != in_dtype for x in tensors):
-        logger.warning(
-            f"{node.name}: cat inputs have mixed dtypes "
-            f"{[qparam_dtype(x) for x in tensors]} with output "
-            f"{qparam_dtype(node)}; skipping dtype alignment."
-        )
+    if in_dtype == out_dtype:
         return
 
-    if in_dtype in ("int16", "uint8", "uint4") and qparam_dtype(node) in (
+    if in_dtype in ("int16", "uint8", "uint4") and out_dtype in (
         "int16",
         "uint8",
         "uint4",
@@ -398,7 +417,7 @@ def _cat_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], in_dtype)
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
-    elif is_mx_dtype(in_dtype) and qparam_dtype(node) in ("int16", "uint8", "uint4"):
+    elif is_mx_dtype(in_dtype) and out_dtype in ("int16", "uint8", "uint4"):
         for inp in tensors:
             quantize = _insert_quantize_op_before(node, inp)
 
@@ -406,8 +425,7 @@ def _cat_handler(node, logger):
             logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
     else:
         raise NotYetSupportedError(
-            f"Unsupported dtype: From {in_dtype} to {qparam_dtype(node)} "
-            f"(node {node.name})"
+            f"Unsupported dtype: From {in_dtype} to {out_dtype} (node {node.name})"
         )
 
 

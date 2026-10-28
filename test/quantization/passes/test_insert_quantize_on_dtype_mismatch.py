@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import unittest
 
 import torch
@@ -21,6 +22,7 @@ from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
 )
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.errors import NotYetSupportedError
+from tico.utils.validate_args_kwargs import CatArgs
 
 from test.modules.op.add import SimpleAdd
 from test.modules.op.bmm import SimpleBatchMatMul
@@ -644,3 +646,88 @@ class ReluDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
         target_pass = InsertQuantizeOnDtypeMismatch()
         with self.assertRaises(NotYetSupportedError):
             target_pass.call(self.ep)
+
+
+class MixedInputCatTest(unittest.TestCase):
+    """
+    Decode KV-cache append pattern: cat(uint8 cache, int16 new_row) -> uint8.
+    Every input whose dtype differs from the cat output's dtype must get a
+    quantize op inserted before the cat, carrying the output's qparam grid
+    (so all cat operands share dtype, scale and zero_point).
+    """
+
+    def _make_qparam(self, scale, zero_point, dtype):
+        qparam = QuantParam()
+        qparam.scale = [scale]
+        qparam.zero_point = [zero_point]
+        qparam.dtype = dtype
+        return qparam
+
+    def _cat_inputs(self, cat_node):
+        return list(CatArgs(*cat_node.args, **cat_node.kwargs).tensors)
+
+    def test_mixed_inputs_cat(self):
+        mod = SimpleCatDefault()
+        args, _ = mod.get_example_inputs()
+        with torch.no_grad():
+            ep = torch.export.export(mod.eval(), args)
+
+        graph = ep.graph_module.graph
+        cat_node = next(
+            n
+            for n in graph.nodes
+            if n.op == "call_function" and n.target == torch.ops.aten.cat.default
+        )
+        cat_inputs = self._cat_inputs(cat_node)
+        self.assertEqual(len(cat_inputs), 2)
+
+        # Input 0: uint8 KV-cache grid (from graph input).
+        cat_inputs[0].meta[QPARAM_KEY] = self._make_qparam(0.01110276, 156, "uint8")
+        # Input 1: int16 new K/V row (activation grid).
+        cat_inputs[1].meta[QPARAM_KEY] = self._make_qparam(5.298e-05, 0, "int16")
+        # Cat output sits on the cache grid.
+        out_qparam = self._make_qparam(0.01110276, 156, "uint8")
+        cat_node.meta[QPARAM_KEY] = copy.deepcopy(out_qparam)
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        after_inputs = self._cat_inputs(cat_node)
+        self.assertEqual(len(after_inputs), 2)
+        for x in after_inputs:
+            self.assertIn(QPARAM_KEY, x.meta)
+            self.assertEqual(x.meta[QPARAM_KEY].dtype, "uint8")
+
+        # The aligned int16 input got a quantize op carrying the cat's qparams.
+        quantize_nodes = [
+            x
+            for x in after_inputs
+            if x.op == "call_function"
+            and x.target == torch.ops.quantized_decomposed.quantize_per_tensor.default
+        ]
+        self.assertEqual(len(quantize_nodes), 1)
+        self.assertEqual(quantize_nodes[0].meta[QPARAM_KEY].scale, out_qparam.scale)
+        self.assertEqual(
+            quantize_nodes[0].meta[QPARAM_KEY].zero_point, out_qparam.zero_point
+        )
+        self.assertEqual(quantize_nodes[0].meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_mixed_inputs_cat_unsupported_out_dtype(self):
+        mod = SimpleCatDefault()
+        args, _ = mod.get_example_inputs()
+        with torch.no_grad():
+            ep = torch.export.export(mod.eval(), args)
+
+        graph = ep.graph_module.graph
+        cat_node = next(
+            n
+            for n in graph.nodes
+            if n.op == "call_function" and n.target == torch.ops.aten.cat.default
+        )
+        cat_inputs = self._cat_inputs(cat_node)
+        cat_inputs[0].meta[QPARAM_KEY] = self._make_qparam(1.0, 0, "uint8")
+        cat_inputs[1].meta[QPARAM_KEY] = self._make_qparam(1.0, 0, "int16")
+        cat_node.meta[QPARAM_KEY] = self._make_qparam(1.0, 0, "float32")
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(ep)
