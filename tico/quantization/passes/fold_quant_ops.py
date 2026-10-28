@@ -24,13 +24,20 @@ from torch.export import ExportedProgram
 
 from tico.quantization.passes.insert_quantize_on_dtype_mismatch import qparam_dtype
 
+from tico.quantization.passes.remove_weight_dequant_op import get_constant
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import get_mx_dtype, get_quant_dtype, quant_min_max, set_new_meta_val
+from tico.utils.utils import (
+    get_mx_dtype,
+    get_quant_dtype,
+    quant_min_max,
+    set_new_meta_val,
+)
 from tico.utils.validate_args_kwargs import (
+    DequantizePerChannelArgs,
     DequantizePerTensorArgs,
     QuantizePerTensorArgs,
 )
@@ -78,6 +85,66 @@ def _insert_quantize_op(node, qparam):
     return quantize
 
 
+def _build_per_channel_qparam(
+    exported_program: ExportedProgram,
+    dq_args: DequantizePerChannelArgs,
+    axis: int,
+) -> QuantParam:
+    """
+    Build a full per-channel QuantParam from a dequantize_per_channel node:
+    all per-channel scales and zero-points are preserved, together with the
+    quantized dimension (normalized to a non-negative axis) and dtype.
+
+    NOTE Circle schema supports multi-element scale/zero_point vectors for any
+    tensor; whether a backend *consumes* them for non-const tensors is a
+    target-side concern. This pass only preserves the calibrated grid.
+    """
+    scales = get_constant(exported_program, dq_args.scales)
+    assert isinstance(scales, torch.Tensor)
+    scales = scales.detach().cpu().flatten()
+
+    if dq_args.zero_points is None:
+        zero_points = torch.zeros_like(scales, dtype=torch.int64)
+    else:
+        zero_points = get_constant(exported_program, dq_args.zero_points)
+        assert isinstance(zero_points, torch.Tensor)
+        # Users can provide fp32 zero points; normalize like RemoveWeightDequantOp.
+        zero_points = zero_points.detach().cpu().flatten().to(torch.int64)
+
+    assert scales.numel() > 0, "Empty per-channel scale vector."
+    assert scales.numel() == zero_points.numel(), (
+        f"Scale ({scales.numel()}) / zero-point ({zero_points.numel()}) "
+        "size mismatch in per-channel qdq pair."
+    )
+
+    # Normalize negative axis (e.g. -1) to a non-negative Circle dimension.
+    if axis < 0:
+        val = None
+        producer = dq_args.input
+        if isinstance(producer, torch.fx.Node):
+            val = producer.meta.get("val")
+            # Decompose-created quantize nodes may not carry "val" meta;
+            # fall back to the op feeding the quantize node.
+            if val is None and producer.args:
+                src_node = producer.args[0]
+                if isinstance(src_node, torch.fx.Node):
+                    val = src_node.meta.get("val")
+        assert (
+            val is not None
+        ), "Cannot resolve input rank to normalize per-channel axis."
+        ndim = val.dim()
+        axis += ndim
+        assert 0 <= axis < ndim, f"Invalid quantized_dimension {dq_args.axis}."
+
+    qparam = QuantParam()
+    qparam.scale = [float(s) for s in scales.tolist()]
+    qparam.zero_point = [int(z) for z in zero_points.tolist()]
+    qparam.quantized_dimension = axis
+    qparam.dtype = get_quant_dtype(dq_args.quant_min, dq_args.quant_max)
+
+    return qparam
+
+
 @trace_graph_diff_on_pass
 class FoldQuantOps(PassBase):
     """
@@ -119,6 +186,67 @@ class FoldQuantOps(PassBase):
     def __init__(self):
         super().__init__()
 
+    def _fold_per_channel_dq(
+        self, exported_program: ExportedProgram, dq: torch.fx.Node, logger
+    ) -> None:
+        """
+        Fold one per-channel (Q - DQ) pair on an activation into the producer
+        op by attaching the FULL per-channel QuantParam (all per-channel
+        scales and zero-points, quantized_dimension, dtype).
+
+        ``quantize_per_channel`` nodes have no Circle activation serializer and
+        are rejected by ``check_unsupported_target``; folding the pair here
+        preserves the calibrated per-channel grid in the tensor's QPARAM.
+        """
+        q = dq.args[0]
+        if (
+            not isinstance(q, torch.fx.Node)
+            or q.target != torch.ops.quantized_decomposed.quantize_per_channel.default
+        ):
+            return
+
+        dq_args = DequantizePerChannelArgs(*dq.args, **dq.kwargs)
+
+        # Q and DQ must share the exact same per-channel params.
+        if q.args[1] is not dq_args.scales or q.args[2] is not dq_args.zero_points:
+            return
+        if q.args[3] != dq_args.axis:
+            return
+        if q.args[4] != dq_args.quant_min or q.args[5] != dq_args.quant_max:
+            return
+
+        op = q.args[0]
+        try:
+            qparam = _build_per_channel_qparam(exported_program, dq_args, dq_args.axis)
+        except Exception as err:
+            logger.error(
+                f"Cannot build per-channel QPARAM for ({q.name}/{dq.name}): {err}"
+            )
+            return
+
+        if QPARAM_KEY not in op.meta:
+            op.meta[QPARAM_KEY] = qparam
+            logger.warning(
+                f"Folded per-channel qdq pair ({q.name}/{dq.name}) into "
+                f"{op.name} with per-channel QPARAM "
+                f"(axis={qparam.quantized_dimension}, "
+                f"channels={len(qparam.scale)}, dtype={qparam.dtype}). NOTE: "
+                "per-channel quantization of non-const tensors is not "
+                "consumed by all Circle backends/runtimes."
+            )
+        else:
+            # Producer already carries a QPARAM; the pair is a requantize that
+            # cannot be represented as a per-channel activation Q node. Keep
+            # the producer's QPARAM; a dtype mismatch, if any, is inserted
+            # downstream by InsertQuantizeOnDtypeMismatchPass.
+            logger.warning(
+                f"{op.name} already has a QPARAM (dtype={qparam_dtype(op)}); "
+                f"dropped the per-channel pair ({q.name}/{dq.name}, "
+                f"dtype={qparam.dtype})."
+            )
+
+        dq.replace_all_uses_with(op, propagate_meta=False)
+
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
 
@@ -126,6 +254,14 @@ class FoldQuantOps(PassBase):
         graph: torch.fx.Graph = graph_module.graph
         for dq in graph.nodes:
             if dq.op != "call_function":
+                continue
+            if (
+                dq.target
+                == torch.ops.quantized_decomposed.dequantize_per_channel.default
+            ):
+                # Per-channel pairs on activations are folded with a full
+                # per-channel QPARAM (see _fold_per_channel_dq).
+                self._fold_per_channel_dq(exported_program, dq, logger)
                 continue
             if (
                 dq.target

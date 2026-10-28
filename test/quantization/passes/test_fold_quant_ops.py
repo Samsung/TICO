@@ -153,3 +153,125 @@ class FoldQuantOpsTest(unittest.TestCase):
                 == torch.ops.quantized_decomposed.quantize_per_tensor.default
             ):
                 self.assertTrue(QPARAM_KEY in node.meta)
+
+    def test_fold_per_channel_activation(self):
+        """Per-channel qdq on an activation folds into a full per-channel QPARAM."""
+        scales = torch.tensor([0.01, 0.02, 0.005, 0.04])
+        zps = torch.zeros(4, dtype=torch.int32)
+
+        class PerChannelActQuant(torch.nn.Module):
+            def __init__(self, scales, zps, axis, qmin, qmax):
+                super().__init__()
+                self.register_buffer("scales", scales)
+                self.register_buffer("zps", zps)
+                self.axis = axis
+                self.qmin = qmin
+                self.qmax = qmax
+
+            def forward(self, x):
+                y = x * 2.0
+                return torch.fake_quantize_per_channel_affine(
+                    y, self.scales, self.zps, self.axis, self.qmin, self.qmax
+                )
+
+        m = PerChannelActQuant(scales, zps, axis=1, qmin=-32768, qmax=32767)
+        ep = torch.export.export(m, (torch.randn(2, 4),))
+
+        DecomposeFakeQuantize().call(ep)
+        self.assertEqual(
+            num_of_ops(
+                ep, [torch.ops.quantized_decomposed.quantize_per_channel.default]
+            ),
+            1,
+        )
+        self.assertEqual(
+            num_of_ops(
+                ep, [torch.ops.quantized_decomposed.dequantize_per_channel.default]
+            ),
+            1,
+        )
+
+        FoldQuantOps().call(ep)
+
+        self.assertEqual(
+            num_of_ops(
+                ep, [torch.ops.quantized_decomposed.quantize_per_channel.default]
+            ),
+            0,
+        )
+        self.assertEqual(
+            num_of_ops(
+                ep, [torch.ops.quantized_decomposed.dequantize_per_channel.default]
+            ),
+            0,
+        )
+
+        mul_nodes = [
+            node
+            for node in ep.graph.nodes
+            if node.op == "call_function" and node.target == torch.ops.aten.mul.Tensor
+        ]
+        self.assertEqual(len(mul_nodes), 1)
+        qparam = mul_nodes[0].meta[QPARAM_KEY]
+        self.assertEqual(qparam.scale, scales.tolist())
+        self.assertEqual(qparam.zero_point, [0, 0, 0, 0])
+        self.assertEqual(qparam.quantized_dimension, 1)
+        self.assertEqual(qparam.dtype, "int16")
+
+    def test_fold_per_channel_activation_asym_negative_axis(self):
+        """Asymmetric per-channel grid is kept in full; negative axis normalized."""
+        scales = torch.tensor([0.2, 0.03])
+        zps = torch.tensor([40, 130], dtype=torch.int32)
+
+        class PerChannelActQuant(torch.nn.Module):
+            def __init__(self, scales, zps, axis, qmin, qmax):
+                super().__init__()
+                self.register_buffer("scales", scales)
+                self.register_buffer("zps", zps)
+                self.axis = axis
+                self.qmin = qmin
+                self.qmax = qmax
+
+            def forward(self, x):
+                y = x * 2.0
+                return torch.fake_quantize_per_channel_affine(
+                    y, self.scales, self.zps, self.axis, self.qmin, self.qmax
+                )
+
+        m = PerChannelActQuant(scales, zps, axis=2, qmin=0, qmax=255)
+        ep = torch.export.export(m, (torch.randn(2, 5, 2),))
+
+        DecomposeFakeQuantize().call(ep)
+
+        # Simulate a calibrated graph carrying axis=-1 (aten kernel requires a
+        # non-negative axis at export time, but the fold must normalize -1).
+        for node in ep.graph.nodes:
+            if node.op != "call_function":
+                continue
+            if "per_channel" not in str(node.target):
+                continue
+            args = list(node.args)
+            args[3] = -1
+            node.args = tuple(args)
+
+        FoldQuantOps().call(ep)
+
+        self.assertEqual(
+            num_of_ops(
+                ep, [torch.ops.quantized_decomposed.dequantize_per_channel.default]
+            ),
+            0,
+        )
+
+        mul_nodes = [
+            node
+            for node in ep.graph.nodes
+            if node.op == "call_function" and node.target == torch.ops.aten.mul.Tensor
+        ]
+        self.assertEqual(len(mul_nodes), 1)
+        qparam = mul_nodes[0].meta[QPARAM_KEY]
+        self.assertEqual(qparam.scale, scales.tolist())
+        self.assertEqual(qparam.zero_point, zps.tolist())
+        # axis=-1 over a 3D tensor must be normalized to 2
+        self.assertEqual(qparam.quantized_dimension, 2)
+        self.assertEqual(qparam.dtype, "uint8")
