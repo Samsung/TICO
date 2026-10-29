@@ -53,7 +53,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
 
     - ``batched`` uses a Hugging Face-like batched GQA implementation and is
       intended for reference evaluation.
-    - ``unrolled`` emits rank-3 attention matmuls for every query head and avoids
+    - ``unrolled`` groups query rows sharing K/V in rank-3 matmuls and avoids
       head-axis broadcasting for static NPU export.
 
     The dense E2B scope supports regular K/V-owning layers, global layers where
@@ -1153,7 +1153,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         value_states: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run NPU-friendly attention with one rank-3 graph per query head."""
+        """Run rank-3 QK/PV with head-major query rows sharing each K/V head."""
         batch_size, _, q_len, num_kv_heads = self._validate_attention_shapes(
             query_states=query_states,
             key_states=key_states,
@@ -1162,6 +1162,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
         )
         kv_rep = self.num_key_value_groups
         attn_mask = attention_mask.squeeze(1)
+        # A singleton query row broadcasts to every head/token. Otherwise repeat
+        # all T rows in head-major order, retaining the original causal offsets.
+        if kv_rep != 1 and attn_mask.size(-2) != 1:
+            attn_mask = torch.cat([attn_mask] * kv_rep, dim=1)
 
         attn_weights_parts: list[torch.Tensor] = []
         attn_out_parts: list[torch.Tensor] = []
@@ -1169,29 +1173,57 @@ class QuantGemma4TextAttention(QuantModuleBase):
         for kv_idx in range(num_kv_heads):
             key_i = key_states[:, kv_idx, :, :]
             value_i = value_states[:, kv_idx, :, :]
+            query_parts = [
+                query_states[:, kv_idx * kv_rep + rep_idx, :, :]
+                for rep_idx in range(kv_rep)
+            ]
+            query_group = (
+                query_parts[0] if kv_rep == 1 else torch.cat(query_parts, dim=1)
+            )
+            logits = query_group @ key_i.transpose(-2, -1)
+            logits = self._apply_attention_scale(logits)
+            logits = self._fq(logits + attn_mask, self.obs_mask_add)
 
-            for rep_idx in range(kv_rep):
-                query_idx = kv_idx * kv_rep + rep_idx
-                query_i = query_states[:, query_idx, :, :]
-
-                logits_i = query_i @ key_i.transpose(-2, -1)
-                logits_i = self._apply_attention_scale(logits_i)
-                logits_i = self._fq(logits_i + attn_mask, self.obs_mask_add)
-
-                attn_i = torch.softmax(logits_i, dim=-1, dtype=torch.float32).to(
-                    query_i.dtype
+            attn_group = torch.softmax(logits, dim=-1, dtype=torch.float32).to(
+                query_group.dtype
+            )
+            if self.training and self.attention_dropout > 0.0:
+                attn_group = F.dropout(
+                    attn_group,
+                    p=self.attention_dropout,
+                    training=True,
                 )
-                if self.training and self.attention_dropout > 0.0:
-                    attn_i = F.dropout(
-                        attn_i,
-                        p=self.attention_dropout,
-                        training=True,
-                    )
-                attn_i = self._fq(attn_i, self.obs_softmax)
+            attn_group = self._fq(attn_group, self.obs_softmax)
+            out_group = attn_group @ value_i
 
-                out_i = self._fq(attn_i @ value_i, self.obs_attn_out)
-                attn_weights_parts.append(attn_i)
-                attn_out_parts.append(out_i)
+            # Calibration retains the original ordered head samples (including
+            # EMA updates). With a frozen scalar affine grid, applying that same
+            # pointwise FQ before splitting is equivalent and gives the grouped
+            # PV tensor a Circle quantization domain. Channel/MX policies retain
+            # their original head-local interpretation.
+            grouped_output_fq = (
+                self._mode is Mode.QUANT
+                and isinstance(self.obs_attn_out, AffineObserverBase)
+                and self.obs_attn_out.channel_axis is None
+            )
+            if kv_rep != 1 and grouped_output_fq:
+                out_group = self._fq(out_group, self.obs_attn_out)
+            if kv_rep == 1:
+                attn_weights_parts.append(attn_group)
+                attn_out_parts.append(self._fq(out_group, self.obs_attn_out))
+            else:
+                weights_heads = attn_group.reshape(batch_size, kv_rep, q_len, -1)
+                output_heads = out_group.reshape(
+                    batch_size, kv_rep, q_len, self.head_dim
+                )
+                for rep_idx in range(kv_rep):
+                    attn_weights_parts.append(weights_heads[:, rep_idx, :, :])
+                    out_i = output_heads[:, rep_idx, :, :]
+                    attn_out_parts.append(
+                        out_i
+                        if grouped_output_fq
+                        else self._fq(out_i, self.obs_attn_out)
+                    )
 
         attn_weights = self._fq(
             torch.stack(attn_weights_parts, dim=1),
