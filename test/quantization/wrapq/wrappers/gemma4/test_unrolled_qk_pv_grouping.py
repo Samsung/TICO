@@ -31,7 +31,7 @@ from test.quantization.wrapq.wrappers.gemma4.test_quant_text_attention import (
 
 
 class _CoreAdapter(nn.Module):
-    """Expose the real wrapper's core without projections obscuring graph counts."""
+    """Expose the real core without Q/K/V projections obscuring graph counts."""
 
     def __init__(self, attention):
         super().__init__()
@@ -62,9 +62,6 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
             num_global_key_value_heads=kv_heads,
         )
         attention = QuantGemma4TextAttention(Gemma4TextAttention(cfg, layer_idx=0))
-        # Identity isolates the exact tensor presented to o_proj. All attention
-        # arithmetic, validation, observers, and layout restoration remain real.
-        attention.o_proj = nn.Identity()
         return attention.eval()
 
     @staticmethod
@@ -150,7 +147,7 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
             for token in range(3):
                 expected[0, token, head] = value[0, head // 3, (head + token) % 4]
         torch.testing.assert_close(
-            output, expected.reshape(1, 3, 24), atol=2e-6, rtol=1e-6
+            output, attention.o_proj(expected.reshape(1, 3, 24)), atol=2e-6, rtol=1e-6
         )
         self.assertEqual(
             weights.argmax(-1).tolist(),
