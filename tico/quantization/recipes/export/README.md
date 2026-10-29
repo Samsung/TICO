@@ -215,6 +215,23 @@ target-device correctness and performance need their own evaluation.
 A file-by-file description of a complete Gemma4 E2B quantized export is kept in
 [`gemma4_artifacts.md`](gemma4_artifacts.md).
 
+### Gemma4 external-embedding text logits
+
+`Gemma4TextLogitsPrefillExportAdapter` composes the existing static prefill
+adapters for every text decoder layer, the final norm, LM head and the original
+top-level logit softcapping. It accepts host-prepared `inputs_embeds`, optional
+projected `per_layer_inputs`, and mask/RoPE dictionaries, and returns all token
+logits. Token lookup, vision/fusion and PLE lookup/projection remain separate
+host or staged operations. Shared-KV models use the existing per-layer staged
+export rather than this composite adapter.
+
+The adapter requires the actual external-embedding and cache paths to have been
+calibrated before conversion. Its live capability/mode guards preserve frozen
+source state; constructing or exporting it does not collect statistics. The two
+Gemma4 top-level wrapper smoke cases use this text-logits scope, including the
+conditional model's text-only route. They do not claim to export its vision
+pipeline in the same artifact.
+
 ### Gemma4 Per-Layer Embedding (PLE) artifacts
 
 When the text config sets `hidden_size_per_layer_input > 0`, the Gemma4
@@ -441,3 +458,28 @@ For a new exporter, test:
 - missing example input behavior;
 - invalid artifact key behavior at the adapter/config level;
 - that the exporter does not run evaluation or quantization implicitly.
+
+### Complete fixed-image Qwen3-VL prefill
+
+`Qwen3VLModelPrefillExportAdapter` composes the existing fixed-grid vision,
+fixed-span fusion, decoder and DeepStack adapters into one complete graph. It
+accepts `[1, S]` token IDs and patchified pixels for one fixed image profile,
+and returns normalized hidden states for `QuantQwen3VLModel` or vocabulary logits
+for `QuantQwen3VLForConditionalGeneration`. The prompt must contain the profile's
+contiguous image-token span at the configured `visual_start_idx`. This path is
+cache-free prefill; external cache generation continues to use the staged exporter.
+
+Construct and capture this adapter inside `prepared_static_export(model, S)`.
+That context supplies the configured fixed-grid mRoPE positions, causal mask and
+RoPE tables, then removes its temporary source buffers on exit, including errors.
+The adapter reuses the actual vision, text and optional LM-head weights and
+preserves the full wrapper's multimodal, external-embedding and DeepStack frozen
+observer boundaries. Calibrate those real paths before conversion. No source
+observer is recalibrated during preparation or export.
+
+The adapter aligns temporary mask and RoPE operands to the actual hidden tensor's
+dtype and device before fake quantization. Prepared static buffers keep their
+original dtype and values, and position IDs remain integer tensors. CPU BF16
+activations still require FP32 per-channel scales for enabled fake quantization;
+see the [execution compatibility contract](../../wrapq/README.md). Successful BF16
+adapter execution does not establish BF16 Circle serialization/runtime support.

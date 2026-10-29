@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serialize explicit Quantize domains selected by backward propagation."""
+"""Serialize explicit Quantize boundaries without losing sequential domains."""
 
 import unittest
 
@@ -44,8 +44,8 @@ class _ExplicitQuantize(torch.nn.Module):
 
 
 class QuantizePerTensorRetargetSerializationTest(unittest.TestCase):
-    def test_public_conversion_serializes_retargeted_concat_inputs(self):
-        inputs = (torch.tensor([[0.5, 1.0]]), torch.tensor([[1.5, 2.0]]))
+    def test_public_conversion_preserves_branch_and_concat_domains(self):
+        inputs = (torch.tensor([[-3.0, 1.0]]), torch.tensor([[1.5, 2.0]]))
         for optimize in (False, True):
             with self.subTest(circle_optimize=optimize):
                 converted = tico.convert(
@@ -59,23 +59,39 @@ class QuantizePerTensorRetargetSerializationTest(unittest.TestCase):
                 quantizes = [
                     op for op in runtime.program.operators if op.name == "QUANTIZE"
                 ]
-                self.assertEqual(len(quantizes), 2)
-                for quantize in quantizes:
-                    source = runtime.program.tensor(quantize.inputs[0])
-                    target = runtime.program.tensor(quantize.outputs[0])
-                    self.assertEqual(target.dtype, np.uint8)
-                    assert source.quantization is not None
-                    assert target.quantization is not None
-                    self.assertEqual(source.quantization.scale, (0.5,))
-                    self.assertEqual(source.quantization.zero_point, (127,))
-                    self.assertEqual(target.quantization.scale, (0.375,))
-                    self.assertEqual(target.quantization.zero_point, (29,))
-
+                # Source -> branch and branch -> CAT are distinct transitions.
+                # In particular the left branch saturates -3 to -2.125 before
+                # the CAT grid rounds it to -2.25; direct retargeting gives -3.
+                self.assertEqual(len(quantizes), 4)
                 concat = next(
                     op for op in runtime.program.operators if op.name == "CONCATENATION"
                 )
-                self.assertEqual(
-                    set(concat.inputs), {op.outputs[0] for op in quantizes}
+                producers = {index: op for op in quantizes for index in op.outputs}
+                for index, branch_scale, branch_zp in zip(
+                    concat.inputs, (0.125, 0.25), (17, 23)
+                ):
+                    final = producers[index]
+                    branch = producers[final.inputs[0]]
+                    source = runtime.program.tensor(branch.inputs[0])
+                    intermediate = runtime.program.tensor(branch.outputs[0])
+                    destination = runtime.program.tensor(final.outputs[0])
+                    for tensor, scale, zp in (
+                        (source, 0.5, 127),
+                        (intermediate, branch_scale, branch_zp),
+                        (destination, 0.375, 29),
+                    ):
+                        self.assertEqual(tensor.dtype, np.uint8)
+                        assert tensor.quantization is not None
+                        self.assertEqual(tensor.quantization.scale, (scale,))
+                        self.assertEqual(tensor.quantization.zero_point, (zp,))
+                result = runtime.run(
+                    [
+                        np.array([[121, 129]], dtype=np.uint8),
+                        np.array([[130, 131]], dtype=np.uint8),
+                    ]
+                )
+                np.testing.assert_array_equal(
+                    result.outputs[0], np.array([[23, 32, 33, 34]], dtype=np.uint8)
                 )
                 output = runtime.program.tensor(concat.outputs[0])
                 assert output.quantization is not None

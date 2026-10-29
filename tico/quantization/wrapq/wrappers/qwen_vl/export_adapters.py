@@ -29,6 +29,7 @@ from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import (
 )
 
 if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
     from tico.quantization.wrapq.wrappers.qwen_vl.quant_for_conditional_generation import (
         QuantQwen3VLForConditionalGeneration,
     )
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
     )
     from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
         QuantQwen3VLVisionModel,
+    )
+    from tico.quantization.wrapq.wrappers.qwen_vl.static_inputs import (
+        Qwen3VLStaticTextInputs,
     )
 
 
@@ -717,3 +721,137 @@ class Qwen3VLLMHeadExportAdapter(nn.Module):
         if self.rotate_lm_head is not None:
             hidden_states = self.rotate_lm_head(hidden_states)
         return self.lm_head(hidden_states)
+
+
+class Qwen3VLModelPrefillExportAdapter(nn.Module):
+    """Compose complete batch-one, single-image, cache-free static prefill.
+
+    This retains the full eager model's quantization boundaries, including
+    multimodal and DeepStack observers. The existing fixed-grid vision and
+    fixed-span fusion adapters replace only dynamic metadata/indexing. A
+    ``prepared_static_export`` context must cover construction and capture.
+    Inputs are token IDs ``[1, S]`` and pixels for the selected vision profile;
+    outputs are normalized hidden states, or logits for a generation owner.
+    The fixed prompt has one contiguous image span at ``visual_start_idx``.
+    """
+
+    def __init__(
+        self,
+        wrapped: nn.Module,
+        *,
+        grid_thw: Qwen3VLVisionProfile | Qwen3VLVisionGridInput,
+    ):
+        super().__init__()
+        generation_owner = (
+            cast("QuantQwen3VLForConditionalGeneration", wrapped)
+            if hasattr(wrapped, "lm_head")
+            else None
+        )
+        self.model = cast(
+            "QuantQwen3VLModel",
+            generation_owner.model.wrapped if generation_owner is not None else wrapped,
+        )
+        self.text_model = cast(
+            "QuantQwen3VLTextModel", self.model.language_model.wrapped
+        )
+        prepared = getattr(self.text_model, "_static_export_inputs", None)
+        if prepared is None:
+            raise ValueError("Full Qwen3-VL prefill requires prepared_static_export.")
+        self.static_inputs = cast("Qwen3VLStaticTextInputs", prepared)
+        profile = Qwen3VLVisionProfile.from_grid_thw(grid_thw)
+        if profile.grid_thw != self.text_model._get_vision_grid_thw(
+            self.text_model.qcfg
+        ):
+            raise ValueError("Vision profile must match the prepared text mRoPE grid.")
+        self.vision = Qwen3VLVisionPrefillExportAdapter(
+            self.model.visual, grid_thw=grid_thw
+        )
+        self._model_guard = ExportCapabilityGuard(
+            self.model, "vision", mode=self.model._mode
+        )
+        self._text_guard = ExportCapabilityGuard(
+            self.text_model,
+            "token_embeddings",
+            "external_embeddings",
+            *(
+                f"deepstack_{index}"
+                for index in range(len(self.vision.wrapped.deepstack_merger_list))
+            ),
+            mode=self.text_model._mode,
+        )
+        self._owner_guard = ExportCapabilityGuard(
+            wrapped, mode=cast("QuantModuleBase", wrapped)._mode
+        )
+        visual_start_idx = self.model.visual_start_idx
+        if visual_start_idx is None:
+            raise ValueError("Full Qwen3-VL prefill requires a fixed visual_start_idx.")
+        self.fusion = Qwen3VLVisualEmbeddingFusionAdapter(visual_start_idx)
+        self.deepstack_fusion = Qwen3VLDeepstackFusionExportAdapter(
+            visual_start_idx=visual_start_idx
+        )
+        self.layers = nn.ModuleList(
+            cast("QuantQwen3VLTextDecoderLayer", layer.wrapped).as_export_module(
+                "prefill", return_kv=False
+            )
+            for layer in self.text_model.layers
+        )
+        self.lm_head: Optional[nn.Module] = (
+            generation_owner.lm_head if generation_owner is not None else None
+        )
+        self.rotate_lm_head: Optional[nn.Module] = (
+            generation_owner.rotate_lm_head if generation_owner is not None else None
+        )
+
+    def forward(
+        self, input_ids: torch.Tensor, pixel_values: torch.Tensor
+    ) -> torch.Tensor:
+        """Run the actual vision, text, DeepStack and optional logits paths."""
+        self._owner_guard.require()
+        self._model_guard.require()
+        self._text_guard.require()
+        if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+            raise ValueError("Full Qwen3-VL static prefill requires input_ids [1, S].")
+        if input_ids.shape[1] != self.static_inputs.max_seq_len:
+            raise ValueError(
+                "Full Qwen3-VL input length must match its static profile."
+            )
+        image_embeds, deepstack = self.vision(pixel_values)
+        hidden = self.text_model.embed_tokens(input_ids)
+        hidden = self.fusion(hidden, image_embeds)
+        hidden = self.model._fq(hidden, self.model.obs_mm_fusion)
+        hidden = self.text_model._fq(hidden, self.text_model.obs_inputs_embeds)
+        if self.text_model.rotate_embedding is not None:
+            hidden = self.text_model.rotate_embedding(hidden)
+        mask = self.text_model._fq(
+            self.static_inputs.attention_mask.to(hidden),
+            self.text_model.obs_attention_mask,
+        )
+        rope = (
+            self.text_model._fq(
+                self.static_inputs.cos.to(hidden), self.text_model.obs_cos
+            ),
+            self.text_model._fq(
+                self.static_inputs.sin.to(hidden), self.text_model.obs_sin
+            ),
+        )
+        start = self.fusion.visual_start_idx
+        end = start + image_embeds.shape[0]
+        for index, layer in enumerate(self.layers):
+            hidden = layer(hidden, attention_mask=mask, position_embeddings=rope)
+            if index < len(deepstack):
+                self.text_model.require_capability(f"deepstack_{index}")
+                visual = self.text_model._fq(
+                    deepstack[index], self.text_model.obs_deepstack_visual_embeds[index]
+                )
+                hidden = self.deepstack_fusion(hidden, visual)
+                local = self.text_model._fq(
+                    hidden[:, start:end, :], self.text_model.obs_local_this
+                )
+                hidden = hidden.clone()
+                hidden[:, start:end, :] = local
+        hidden = self.text_model.norm(hidden)
+        if self.rotate_lm_head is not None:
+            hidden = self.rotate_lm_head(hidden)
+        if self.lm_head is not None:
+            hidden = self.lm_head(hidden)
+        return hidden

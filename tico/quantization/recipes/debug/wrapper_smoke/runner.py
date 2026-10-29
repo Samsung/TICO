@@ -107,20 +107,21 @@ def _export_circle(
     try:
         import tico
 
-        invocation = case.export_invocation(quantized, eval_sample, cfg)
-        invocation.validate_static_decoder_inputs()
-        export_module = invocation.module.eval()
-        export_input = invocation.inputs
-        args = tuple(export_input.args)
-        kwargs = dict(export_input.kwargs)
-        with torch.no_grad(), suppress_tico_warnings():
-            if kwargs:
-                circle_model = tico.convert(export_module, args, kwargs)
-            else:
-                circle_model = tico.convert(export_module, args)
-        path = output_dir / case.export_filename(cfg)
-        circle_model.save(path)
-        result.artifacts["circle"] = str(path)
+        with case.export_context(quantized, eval_sample, cfg):
+            invocation = case.export_invocation(quantized, eval_sample, cfg)
+            invocation.validate_static_decoder_inputs()
+            export_module = invocation.module.eval()
+            export_input = invocation.inputs
+            args = tuple(export_input.args)
+            kwargs = dict(export_input.kwargs)
+            with torch.no_grad(), suppress_tico_warnings():
+                if kwargs:
+                    circle_model = tico.convert(export_module, args, kwargs)
+                else:
+                    circle_model = tico.convert(export_module, args)
+            path = output_dir / case.export_filename(cfg)
+            circle_model.save(path)
+            result.artifacts["circle"] = str(path)
     except Exception as exc:
         result.add_failure("EXPORT", f"Circle export failed: {exc}")
 

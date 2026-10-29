@@ -19,7 +19,7 @@ graphs. CPU runtime code owns dynamic orchestration, cache writes, sampling, and
 processor/tokenizer logic.
 """
 
-from typing import Any, cast, Iterable, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, cast, Iterable, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -45,6 +45,12 @@ if TYPE_CHECKING:
         QuantGemma4ForConditionalGeneration,
     )
     from tico.quantization.wrapq.wrappers.gemma4.quant_model import QuantGemma4Model
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+        QuantGemma4TextAttention,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
+        QuantGemma4TextDecoderLayer,
+    )
     from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
         QuantGemma4TextModel,
     )
@@ -60,6 +66,7 @@ if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.gemma4.quant_vision_pooler import (
         QuantGemma4VisionPooler,
     )
+    from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
@@ -910,6 +917,92 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
     ) -> torch.Tensor:
         self._capability_guard.require()
         return self.wrapped.forward_export(hidden_states=hidden_states)
+
+
+class Gemma4TextLogitsPrefillExportAdapter(nn.Module):
+    """Export the complete external-embedding text core and vocabulary logits.
+
+    Token/vision lookup, fusion and PLE projection are host/staged operations.
+    This composes the production decoder adapters, final norm, LM head and the
+    top-level model's logit softcapping, without calling an HF positional ABI.
+    Shared-KV models require the per-layer staged orchestration instead.
+    """
+
+    def __init__(self, wrapped_lm: nn.Module, wrapped_text_model: nn.Module):
+        super().__init__()
+        text = cast("QuantGemma4TextModel", wrapped_text_model)
+        self._capability_guard = ExportCapabilityGuard(
+            text, "external_embeddings", mode=text._mode
+        )
+        self._logits_guard = ExportCapabilityGuard(
+            wrapped_lm, "required", mode=text._mode
+        )
+        decoders = [
+            cast("QuantGemma4TextDecoderLayer", cast("PTQWrapper", layer).wrapped)
+            for layer in text.layers
+        ]
+        if any(
+            cast("QuantGemma4TextAttention", layer.self_attn.wrapped).is_kv_shared_layer
+            for layer in decoders
+        ):
+            raise ValueError("Shared-KV text logits export requires per-layer stages.")
+        self.layers = nn.ModuleList(
+            [layer.as_export_module("prefill", return_kv=False) for layer in decoders]
+        )
+        self.layer_types = tuple(cast(list[str], text.config.layer_types))
+        self.norm = text.norm
+        lm = cast("QuantGemma4ForConditionalGeneration", wrapped_lm)
+        self.lm_head = lm.lm_head
+        self.inputs_observer = text.obs_inputs_embeds
+        self.cos_observers = text.obs_position_cos
+        self.sin_observers = text.obs_position_sin
+        self.mask_observers = text.obs_attention_masks
+        self.ple_observer = text.obs_per_layer_inputs
+        self.quantized = _quantized_export(text._mode, stage_name="Gemma4 text logits")
+        # Keep the live owner unregistered, just like ExportCapabilityGuard.
+        self._apply_softcap: Callable[[torch.Tensor], torch.Tensor] = (
+            lm._apply_logit_softcapping
+        )
+
+    def _fq(self, value: torch.Tensor, observer: ObserverBase) -> torch.Tensor:
+        return observer.fake_quant(value) if self.quantized else value
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor],
+        attention_masks: dict[str, torch.Tensor],
+        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    ) -> torch.Tensor:
+        """Return all token logits, including the frozen softcapping path."""
+        self._capability_guard.require()
+        self._logits_guard.require()
+        hidden = self._fq(inputs_embeds, self.inputs_observer)
+        if per_layer_inputs is not None:
+            if self.ple_observer is None:
+                raise ValueError("per_layer_inputs requires enabled PLE.")
+            per_layer_inputs = self._fq(per_layer_inputs, self.ple_observer)
+        for index, layer in enumerate(self.layers):
+            layer_type = self.layer_types[index]
+            cos, sin = position_embeddings[layer_type]
+            rope = (
+                self._fq(cos, cast(ObserverBase, self.cos_observers[layer_type])),
+                self._fq(sin, cast(ObserverBase, self.sin_observers[layer_type])),
+            )
+            hidden = layer(
+                hidden,
+                per_layer_input=(
+                    per_layer_inputs[:, :, index, :]
+                    if per_layer_inputs is not None
+                    else None
+                ),
+                attention_mask=self._fq(
+                    attention_masks[layer_type],
+                    cast(ObserverBase, self.mask_observers[layer_type]),
+                ),
+                position_embeddings=rope,
+            )
+        return self._apply_softcap(self.lm_head(self.norm(hidden)))
 
 
 class Gemma4LMHeadExportAdapter(nn.Module):

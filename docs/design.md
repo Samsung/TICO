@@ -338,7 +338,9 @@ It is not a replacement for model calibration or the public quantization workflo
 
 Affine backward propagation may retarget an explicit per-tensor Quantize to a
 non-width Concat's domain, including through reshape/permute nodes, when the
-quantized dtype matches and the Quantize's sole user is the propagating node.
+quantized dtype matches, the Quantize's sole user is the propagating node, and
+its input has no established quantization domain. A proven requantization retains
+its original boundary even when private.
 Retargeting updates its scale/zero-point arguments and output qparam metadata
 atomically and stops at its input boundary. Shared Quantize outputs, unsupported
 overloads, and non-affine or non-scalar domains remain unchanged. Serialization
@@ -584,12 +586,14 @@ cleanup, and dtype-bridge insertion.
 These graph passes do not perform calibration and do not select a quantization
 algorithm.
 
-For mixed-input affine `uint8`/`int16` concatenations, dtype legalization inserts
+For affine `uint8`/`int16` concatenations with distinct input domains (including
+same-dtype inputs with different scales or zero points), legalization inserts
 per-tensor requantization on each input connection whose dtype, scale, or zero-point
 differs from the concat's intended output domain. It preserves that output domain
-and the original producers' qparams and other uses. Fully annotated mixed-input
+and the original producers' qparams and other uses. Fully annotated distinct-input
 domains outside this scope are rejected explicitly; uniform-input concatenations
-retain their existing legalization behavior.
+retain their existing legalization behavior. The documented width-direction TICO
+Concat contract continues to permit independent same-dtype input grids.
 
 Wrapper fake-quantization calls mark tensor quantization domains and calibration
 points. After decomposition, their Q-DQ pairs are an intermediate representation
@@ -617,8 +621,15 @@ op [QPARAM=A] -> Q(B) -> DQ(B)    =>    op [QPARAM=A] -> Quantize [QPARAM=B]
 ```
 
 Scale, zero-point, dtype, and MX element format or axis can distinguish domains.
-Supported view chains and same-domain concatenations must retain proven source
+Supported view chains, per-tensor split/getitem outputs, zero padding in a
+per-tensor affine domain, and same-domain concatenations retain proven source
 domains so folding can distinguish redundant annotation from requantization.
+Zero PAD preserves its input domain; a different requested output grid requires
+an explicit requantization boundary, since native PAD copies interior integer
+codes. Propagation preserves established producer and
+consumer domains, and a private quantizer with a proven source domain cannot be
+retargeted to a later consumer's grid: sequential rounding and saturation remain
+observable even when storage dtypes match.
 MX propagation also checks axis remapping and shared-exponent block membership;
 layouts that regroup blocks are not interchangeable domains.
 
