@@ -46,6 +46,7 @@ from tico.utils.validate_args_kwargs import (
     RMSNormArgs,
     SigmoidArgs,
     SplitWithSizesArgs,
+    SubTensorArgs,
 )
 
 
@@ -215,6 +216,9 @@ def _linear_handler(node, logger):
         )
 
 
+_DTYPE_WIDTH = {"uint4": 0, "uint8": 1, "int16": 2}
+
+
 def _add_handler(node, logger):
     add_args = AddTensorArgs(*node.args, **node.kwargs)
     x = add_args.input
@@ -232,25 +236,60 @@ def _add_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(x) == qparam_dtype(node) and (qparam_dtype(y) == qparam_dtype(node) or (is_mx_dtype(qparam_dtype(y)) == is_mx_dtype(qparam_dtype(node)) and is_mx_dtype(qparam_dtype(y)) == is_mx_dtype(qparam_dtype(x)))):
+    x_dtype = qparam_dtype(x)
+    y_dtype = qparam_dtype(y)
+    out_dtype = qparam_dtype(node)
+
+    if x_dtype == y_dtype == out_dtype:
         return
 
-    # if qparam_dtype(x) != qparam_dtype(y):
-    #    return
-
     if (
-        qparam_dtype(x) in ("int16", "uint8", "uint4")
-        and not is_mx_dtype(qparam_dtype(y))
-        and qparam_dtype(node) in ("int16", "uint8", "uint4")
+        not is_mx_dtype(x_dtype)
+        and not is_mx_dtype(y_dtype)
+        and not is_mx_dtype(out_dtype)
     ):
-        quantize = _insert_quantize_op_after(node)
+        if not (
+            x_dtype in _DTYPE_WIDTH
+            and y_dtype in _DTYPE_WIDTH
+            and out_dtype in _DTYPE_WIDTH
+        ):
+            raise NotYetSupportedError(
+                f"Unsupported dtype: x={x_dtype}, y={y_dtype}, "
+                f"out={out_dtype} (node {node.name})"
+            )
 
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(x))
-        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
-    elif (is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y))) and qparam_dtype(
-        node
-    ) in ("int16", "uint8", "uint4"):
+        if _DTYPE_WIDTH[y_dtype] > _DTYPE_WIDTH[x_dtype]:
+            if _DTYPE_WIDTH[out_dtype] >= _DTYPE_WIDTH[y_dtype]:
+                op_dtype = out_dtype
+            else:
+                op_dtype = y_dtype
+
+            if out_dtype != op_dtype:
+                quantize = _insert_quantize_op_after(node)
+
+                quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+                node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], op_dtype)
+                logger.debug(
+                    f"quantize_per_tensor.default is inserted after {node.name}."
+                )
+
+            _insert_quantize_op_before(node, x, copy.deepcopy(node.meta[QPARAM_KEY]))
+            logger.debug(
+                f"quantize_per_tensor.default is inserted before {node.name} for {x.name}."
+            )
+        elif x_dtype != out_dtype:
+            quantize = _insert_quantize_op_after(node)
+
+            quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+            node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], x_dtype)
+            logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+        return
+
+    if (is_mx_dtype(x_dtype) or is_mx_dtype(y_dtype)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
         mx_node = x
         if qparam_dtype(y) != qparam_dtype(x):
             if qparam_dtype(x) in ("int16", "uint8", "uint4"):
@@ -265,6 +304,7 @@ def _add_handler(node, logger):
                     f"_insert_mx_quantize_op_after.default is inserted after {y.name}."
                 )
         quantize = _insert_quantize_op_after(node)
+
         node.meta[QPARAM_KEY] = copy.deepcopy(mx_node.meta[QPARAM_KEY])
         logger.debug(
             f"_insert_quantize_op_after.default is inserted after {node.name}."
@@ -288,6 +328,66 @@ def _add_handler(node, logger):
             f"Unsupported dtype: x={qparam_dtype(x)}, y={qparam_dtype(y)}, "
             f"out={qparam_dtype(node)} (node {node.name})"
         )
+
+
+def _sub_handler(node, logger):
+    sub_args = SubTensorArgs(*node.args, **node.kwargs)
+    x = sub_args.input
+    y = sub_args.other
+
+    if not isinstance(x, torch.fx.Node):
+        return
+    if not isinstance(y, torch.fx.Node):
+        return
+
+    if QPARAM_KEY not in x.meta:
+        return
+    if QPARAM_KEY not in y.meta:
+        return
+    if QPARAM_KEY not in node.meta:
+        return
+
+    x_dtype = qparam_dtype(x)
+    y_dtype = qparam_dtype(y)
+    out_dtype = qparam_dtype(node)
+
+    if not (
+        x_dtype in _DTYPE_WIDTH
+        and y_dtype in _DTYPE_WIDTH
+        and out_dtype in _DTYPE_WIDTH
+    ):
+        raise NotYetSupportedError(
+            f"Unsupported dtype: x={x_dtype}, y={y_dtype}, "
+            f"out={out_dtype} (node {node.name})"
+        )
+
+    if _DTYPE_WIDTH[y_dtype] <= _DTYPE_WIDTH[x_dtype]:
+        if x_dtype == out_dtype:
+            return
+
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], x_dtype)
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+        return
+
+    if _DTYPE_WIDTH[out_dtype] >= _DTYPE_WIDTH[y_dtype]:
+        op_dtype = out_dtype
+    else:
+        op_dtype = y_dtype
+
+    if out_dtype != op_dtype:
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], op_dtype)
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+
+    _insert_quantize_op_before(node, x, copy.deepcopy(node.meta[QPARAM_KEY]))
+    logger.debug(
+        f"quantize_per_tensor.default is inserted before {node.name} for {x.name}."
+    )
 
 
 def _mul_handler(node, logger):
@@ -872,6 +972,7 @@ def _relu_handler(node, logger):
 _op_handler: defaultdict[Any, Any | None] = defaultdict(lambda: None)
 _op_handler[torch.ops.aten.linear.default] = _linear_handler
 _op_handler[torch.ops.aten.add.Tensor] = _add_handler
+_op_handler[torch.ops.aten.sub.Tensor] = _sub_handler
 _op_handler[torch.ops.aten.mul.Tensor] = _mul_handler
 _op_handler[torch.ops.aten.cat.default] = _cat_handler
 _op_handler[torch.ops.aten.bmm.default] = _bmm_handler
