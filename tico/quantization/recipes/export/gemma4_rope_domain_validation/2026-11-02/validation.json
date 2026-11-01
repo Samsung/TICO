@@ -1,0 +1,156 @@
+{
+ "local": {
+  "ccex_test_full": {
+   "exit": 0,
+   "failures": 0,
+   "ran": [
+    0,
+    1,
+    4818
+   ],
+   "verdict": [
+    "OK",
+    "OK (skipped=1)",
+    "OK (skipped=157)"
+   ]
+  },
+  "ccex_test_k_gemma4": {
+   "exit": 0,
+   "failures": 0,
+   "ran": [
+    742
+   ],
+   "verdict": [
+    "OK (skipped=70)"
+   ]
+  },
+  "equiv_queue": [
+   "[2026-11-02_00:52:02] START R1K1 affine 123",
+   "[2026-11-02_00:52:05] END   R1K1 affine 123 rc=0",
+   "[2026-11-02_00:52:05] START EXP_R1K1 affine 123",
+   "[2026-11-02_00:52:09] END   EXP_R1K1 affine 123 rc=0",
+   "[2026-11-02_00:52:09] START R1K1 affine 456",
+   "[2026-11-02_00:52:13] END   R1K1 affine 456 rc=0",
+   "[2026-11-02_00:52:13] START EXP_R1K1 affine 456",
+   "[2026-11-02_00:52:16] END   EXP_R1K1 affine 456 rc=0",
+   "[2026-11-02_00:52:16] START R1K1 affine 789",
+   "[2026-11-02_00:52:19] END   R1K1 affine 789 rc=0",
+   "[2026-11-02_00:52:19] START EXP_R1K1 affine 789",
+   "[2026-11-02_00:52:23] END   EXP_R1K1 affine 789 rc=0",
+   "[2026-11-02_00:52:23] START R1K1 u8s16c 123",
+   "[2026-11-02_00:52:26] END   R1K1 u8s16c 123 rc=0",
+   "[2026-11-02_00:52:26] START EXP_R1K1 u8s16c 123",
+   "[2026-11-02_00:52:30] END   EXP_R1K1 u8s16c 123 rc=0",
+   "[2026-11-02_00:52:30] START R1K1 u8s16c 456",
+   "[2026-11-02_00:52:34] END   R1K1 u8s16c 456 rc=0",
+   "[2026-11-02_00:52:34] START EXP_R1K1 u8s16c 456",
+   "[2026-11-02_00:52:37] END   EXP_R1K1 u8s16c 456 rc=0",
+   "[2026-11-02_00:52:37] START R1K1 u8s16c 789",
+   "[2026-11-02_00:52:41] END   R1K1 u8s16c 789 rc=0",
+   "[2026-11-02_00:52:41] START EXP_R1K1 u8s16c 789",
+   "[2026-11-02_00:52:44] END   EXP_R1K1 u8s16c 789 rc=0",
+   "[2026-11-02_00:52:44] ALL DONE"
+  ],
+  "existing_gemma4_attention_tests": {
+   "exit": 0,
+   "failures": 0,
+   "ran": [
+    105
+   ],
+   "verdict": [
+    "OK"
+   ]
+  },
+  "lint": {
+   "lint_final": {
+    "errors": 0,
+    "exit": 0,
+    "ok": true
+   },
+   "lint_v1": {
+    "errors": 21,
+    "exit": null,
+    "ok": false
+   },
+   "lint_v2": {
+    "errors": 2,
+    "exit": null,
+    "ok": false
+   },
+   "lint_v3": {
+    "errors": 0,
+    "exit": null,
+    "ok": true
+   }
+  },
+  "matrix_queue": [
+   "[2026-11-02_00:32:41] START matrix steps=128 circle_steps=128",
+   "[2026-11-02_00:32:41] START R0K1 affine 123 tree=CONTROL_REPO_ROOT",
+   "[2026-11-02_00:32:58] END   R0K1 affine 123 rc=0",
+   "[2026-11-02_00:32:58] START R1K1 affine 123 tree=REPO_ROOT",
+   "[2026-11-02_00:33:16] END   R1K1 affine 123 rc=0",
+   "[2026-11-02_00:33:16] START R0K1 affine 456 tree=CONTROL_REPO_ROOT",
+   "[2026-11-02_00:33:34] END   R0K1 affine 456 rc=0",
+   "[2026-11-02_00:33:34] START R1K1 affine 456 tree=REPO_ROOT",
+   "[2026-11-02_00:33:52] END   R1K1 affine 456 rc=0",
+   "[2026-11-02_00:33:52] START R0K1 affine 789 tree=CONTROL_REPO_ROOT",
+   "[2026-11-02_00:34:10] END   R0K1 affine 789 rc=0",
+   "[2026-11-02_00:34:10] START R1K1 affine 789 tree=REPO_ROOT",
+   "[2026-11-02_00:34:28] END   R1K1 affine 789 rc=0",
+   "[2026-11-02_00:34:28] START R0K1 u8s16c 123 tree=CONTROL_REPO_ROOT",
+   "[2026-11-02_00:34:45] END   R0K1 u8s16c 123 rc=0",
+   "[2026-11-02_00:34:45] START R1K1 u8s16c 123 tree=REPO_ROOT",
+   "[2026-11-02_00:35:02] END   R1K1 u8s16c 123 rc=0",
+   "[2026-11-02_00:35:02] START R0K1 u8s16c 456 tree=CONTROL_REPO_ROOT",
+   "[2026-11-02_00:35:19] END   R0K1 u8s16c 456 rc=0",
+   "[2026-11-02_00:35:19] START R1K1 u8s16c 456 tree=REPO_ROOT",
+   "[2026-11-02_00:35:35] END   R1K1 u8s16c 456 rc=0",
+   "[2026-11-02_00:35:35] START R0K1 u8s16c 789 tree=CONTROL_REPO_ROOT",
+   "[2026-11-02_00:35:52] END   R0K1 u8s16c 789 rc=0",
+   "[2026-11-02_00:35:52] START R1K1 u8s16c 789 tree=REPO_ROOT",
+   "[2026-11-02_00:36:08] END   R1K1 u8s16c 789 rc=0",
+   "[2026-11-02_00:36:08] ALL DONE"
+  ],
+  "new_tests_final": {
+   "exit": 0,
+   "failures": 0,
+   "ran": [
+    21
+   ],
+   "verdict": [
+    "OK"
+   ]
+  }
+ },
+ "remote": {
+  "gpu_at_start": [
+   "index, uuid, name, memory.used [MiB]",
+   "0, GPU-67ad48d4-194c-b2c2-52ff-514fb8449752, NVIDIA RTX A6000, 14118 MiB",
+   "1, GPU-d8104d69-0e43-96d2-172b-4b6ee3224c36, NVIDIA RTX A6000, 1 MiB"
+  ],
+  "queue": [
+   "[2026-11-01_18:43:46] START gptq tree=REMOTE_CONTROL_REPO_ROOT",
+   "[2026-11-01_19:31:43] END   gptq rc=0",
+   "[2026-11-01_19:31:43] START ptq_R0K1 tree=REMOTE_CONTROL_REPO_ROOT",
+   "[2026-11-01_21:01:07] END   ptq_R0K1 rc=0",
+   "[2026-11-01_21:01:07] START ptq_R1K1 tree=REMOTE_REPO_ROOT",
+   "[2026-11-01_22:00:35] END   ptq_R1K1 rc=0",
+   "[2026-11-01_22:00:35] START eval_FP tree=REMOTE_REPO_ROOT",
+   "[2026-11-01_22:10:19] END   eval_FP rc=0",
+   "[2026-11-01_22:10:19] START eval_R0K1 tree=REMOTE_CONTROL_REPO_ROOT",
+   "[2026-11-01_23:18:21] END   eval_R0K1 rc=0",
+   "[2026-11-01_23:18:21] START eval_R1K1 tree=REMOTE_REPO_ROOT",
+   "[2026-11-02_00:27:26] END   eval_R1K1 rc=0",
+   "[2026-11-02_00:27:26] START reject_R0K1_in_R1 tree=REMOTE_REPO_ROOT",
+   "[2026-11-02_00:28:09] END   reject_R0K1_in_R1 rc=1",
+   "[2026-11-02_00:28:09] START ppl_FP tree=REMOTE_REPO_ROOT",
+   "[2026-11-02_00:35:15] END   ppl_FP rc=0",
+   "[2026-11-02_00:35:15] START ppl_R0K1 tree=REMOTE_CONTROL_REPO_ROOT",
+   "[2026-11-02_00:46:29] END   ppl_R0K1 rc=0",
+   "[2026-11-02_00:46:29] START ppl_R1K1 tree=REMOTE_REPO_ROOT",
+   "[2026-11-02_00:57:41] END   ppl_R1K1 rc=0",
+   "[2026-11-02_00:57:41] ALL DONE"
+  ],
+  "reject_R0K1_in_feature_tree_tail": " | 1196/1951 [00:03<00:03, 237.79it/s]\nLoading weights:  65%|\u2588\u2588\u2588\u2588\u2588\u2588\u258c   | 1270/1951 [00:03<00:02, 241.77it/s]\nLoading weights:  70%|\u2588\u2588\u2588\u2588\u2588\u2588\u2589   | 1365/1951 [00:04<00:01, 296.31it/s]\nLoading weights:  83%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258e | 1619/1951 [00:04<00:00, 518.58it/s]\nLoading weights:  96%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258b| 1881/1951 [00:04<00:00, 779.26it/s]\nLoading weights: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 1951/1951 [00:04<00:00, 448.81it/s]\nTraceback (most recent call last):\n  File \"REMOTE_ARTIFACT_ROOT/remote/remote_eval.py\", line 171, in <module>\n    sys.exit(main())\n  File \"REMOTE_ARTIFACT_ROOT/remote/remote_eval.py\", line 115, in main\n    checkpoint = torch.load(args.checkpoint, map_location=\"cpu\", weights_only=False)\n  File \"REMOTE_VENV/lib/python3.10/site-packages/torch/serialization.py\", line 1579, in load\n    return _load(\n  File \"REMOTE_VENV/lib/python3.10/site-packages/torch/serialization.py\", line 2190, in _load\n    result = unpickler.load()\n  File \"REMOTE_REPO_ROOT/tico/quantization/wrapq/wrappers/gemma4/quant_text_attention.py\", line 654, in __setstate__\n    raise RuntimeError(self._ROPE_POLICY_CHECKPOINT)\nRuntimeError: Gemma4 checkpoint RoPE domain policy differs from this wrapper: independent q/k half/concat grids and norm-inherited domains cannot be converted into each other; reprepare and recalibrate with the current configuration (explicit q_x1/q_x2/q_cat or k_x1/k_x2/k_cat overrides keep independent grids).\n"
+ }
+}
