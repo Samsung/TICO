@@ -652,7 +652,7 @@ class MixedCatDtypeMismatchTest(unittest.TestCase):
                 ep, _ = self._export([destination, source], destination)
                 with self.assertRaisesRegex(
                     NotYetSupportedError,
-                    "mixed-dtype concat.*per-tensor affine uint8/int16",
+                    "distinct-domain concat.*per-tensor affine uint8/int16",
                 ):
                     InsertQuantizeOnDtypeMismatch().call(ep)
 

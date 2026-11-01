@@ -18,18 +18,23 @@ import unittest
 
 from examples.hand_detector._support.verify_quantized_circle import (
     _require_data_operator_qparams,
+    _require_same_qparams,
+    _require_supported_quantize_transition,
     CircleTensorInfo,
     MAX_POOL_2D,
     PAD,
     QuantizationInfo,
+    TENSOR_INT16,
     TENSOR_UINT8,
 )
 
 
-def _tensor(name: str, scale: float, zero_point: int) -> CircleTensorInfo:
+def _tensor(
+    name: str, scale: float, zero_point: int, tensor_type: int = TENSOR_UINT8
+) -> CircleTensorInfo:
     return CircleTensorInfo(
         shape=(1, 4, 4, 3),
-        tensor_type=TENSOR_UINT8,
+        tensor_type=tensor_type,
         buffer_index=0,
         name=name,
         quantization=QuantizationInfo(
@@ -58,6 +63,58 @@ class HandDetectorQuantizedCircleVerifierTest(unittest.TestCase):
                 PAD,
                 (_tensor("input", 0.125, 117), _tensor("output", 0.25, 103)),
                 context="PAD",
+            )
+
+    def test_concatenation_requires_one_domain_on_every_axis(self) -> None:
+        """Concat inputs and output share one grid; export converts the rest."""
+        _require_same_qparams(
+            (
+                _tensor("lhs", 0.125, 117),
+                _tensor("rhs", 0.125, 117),
+                _tensor("out", 0.125, 117),
+            ),
+            context="CONCATENATION@0",
+        )
+        with self.assertRaisesRegex(RuntimeError, "identical scale and zero point"):
+            _require_same_qparams(
+                (
+                    _tensor("lhs", 0.125, 117),
+                    _tensor("rhs", 0.25, 117),
+                    _tensor("out", 0.125, 117),
+                ),
+                context="CONCATENATION@0",
+            )
+
+    def test_quantize_transitions_follow_measured_triv24_support(self) -> None:
+        """Accept Q8<->Q16 and Q16->Q16 grid changes; reject Q8->Q8 and identity."""
+        int16 = TENSOR_INT16
+        self.assertEqual(
+            _require_supported_quantize_transition(
+                _tensor("in", 0.125, 117),
+                _tensor("out", 0.001, 0, int16),
+                context="QUANTIZE@0",
+            ),
+            (TENSOR_UINT8, int16),
+        )
+        self.assertEqual(
+            _require_supported_quantize_transition(
+                _tensor("in", 0.001, 0, int16),
+                _tensor("out", 0.002, 0, int16),
+                context="QUANTIZE@0",
+            ),
+            (int16, int16),
+        )
+        with self.assertRaisesRegex(RuntimeError, "identity requantization"):
+            _require_supported_quantize_transition(
+                _tensor("in", 0.001, 0, int16),
+                _tensor("out", 0.001, 0, int16),
+                context="QUANTIZE@0",
+            )
+        with self.assertRaisesRegex(RuntimeError, "UINT8->UINT8 requantization"):
+            _require_supported_quantize_transition(
+                _tensor("in", 0.125, 117),
+                _tensor("out", 0.25, 103),
+                context="QUANTIZE@0",
             )
 
 

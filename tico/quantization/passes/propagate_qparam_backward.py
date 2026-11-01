@@ -22,7 +22,6 @@ import math
 import torch
 from torch.export import ExportedProgram
 
-from tico.quantization.passes.concat_qparam import is_width_direction_concat
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.quantization.passes.remove_weight_dequant_op import infer_dtype
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
@@ -192,15 +191,10 @@ class PropagateQParamBackward(PassBase):
                 continue
             if node.target == torch.ops.aten.cat.default:
                 concat_args = CatArgs(*node.args, **node.kwargs)
-                concat_inputs = concat_args.tensors
-
-                node_qparam = node.meta.get(QPARAM_KEY)
-                if is_width_direction_concat(node, concat_args) and (
-                    node_qparam is None or not is_mx_dtype(node_qparam.dtype)
-                ):
-                    continue
-
-                for concat_input in concat_inputs:
+                # Only inputs without a domain inherit the concat domain.
+                # Established producer domains stay independent and are
+                # converted explicitly by InsertQuantizeOnDtypeMismatch.
+                for concat_input in concat_args.tensors:
                     _propagate_qparam_if_possible(node, concat_input)
             elif node.target == torch.ops.aten.reshape.default:
                 args = ReshapeArgs(*node.args, **node.kwargs)

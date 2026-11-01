@@ -31,7 +31,17 @@ class Concat(nn.Module):
         *,
         allow_distinct_input_qparams: bool = False,
     ) -> None:
-        """Store the axis and target-backend input-qparam contract."""
+        """Store the axis and the quantization calibration policy.
+
+        ``allow_distinct_input_qparams`` is a WrapQ calibration policy, not an
+        export contract. When it is false, ``QuantConcat`` fake-quantizes every
+        input with the shared output observer, so all branches are observed and
+        rounded in one domain. When it is true, each input keeps the domain of
+        its own producer during calibration and fake-quantized evaluation. In
+        both cases the exported Circle CONCATENATION uses one domain on all of
+        its inputs and its output; any difference is converted by an explicit
+        QUANTIZE inserted during conversion.
+        """
         super().__init__()
         self.dim = int(dim)
         self.allow_distinct_input_qparams = bool(allow_distinct_input_qparams)
@@ -44,7 +54,7 @@ class Concat(nn.Module):
         return torch.cat(values, dim=self.dim)
 
     def extra_repr(self) -> str:
-        """Return the fixed dimension and nondefault qparam contract."""
+        """Return the fixed dimension and nondefault calibration policy."""
         fields = [f"dim={self.dim}"]
         if self.allow_distinct_input_qparams:
             fields.append("allow_distinct_input_qparams=True")

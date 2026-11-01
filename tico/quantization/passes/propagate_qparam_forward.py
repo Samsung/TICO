@@ -22,7 +22,6 @@ import operator
 import torch
 from torch.export import ExportedProgram
 
-from tico.quantization.passes.concat_qparam import is_width_direction_concat
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
@@ -185,9 +184,9 @@ class PropagateQParamForward(PassBase):
                     _propagate_qparam_if_possible(mx_source, node)
                     continue
 
-                if is_width_direction_concat(node, concat_args):
-                    continue
-
+                # Inference only fills a missing output domain. An established
+                # output domain is preserved and legalized against the input
+                # domains by InsertQuantizeOnDtypeMismatch.
                 if any(
                     QPARAM_KEY not in concat_input.meta
                     for concat_input in concat_inputs

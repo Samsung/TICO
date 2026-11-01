@@ -29,7 +29,16 @@ from tico.quantization.wrapq.wrappers.registry import register
 
 @register(Concat)
 class QuantConcat(QuantModuleBase):
-    """Quantize Concat output while honoring its input-qparam contract."""
+    """Quantize a Concat output and apply its input calibration policy.
+
+    One output observer collects the union range of every input. With
+    ``allow_distinct_input_qparams`` unset, inputs are fake-quantized with that
+    observer before the concatenation, so calibration and evaluation see one
+    shared domain. When set, inputs keep their producers' independently
+    calibrated domains. Export legalization later converts each differing
+    input connection with an explicit QUANTIZE, so the Circle CONCATENATION
+    itself always has one domain on its inputs and output.
+    """
 
     def __init__(
         self,
@@ -44,7 +53,7 @@ class QuantConcat(QuantModuleBase):
         self.obs_act_out = self._make_obs("act_out")
 
     def forward(self, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
-        """Concatenate branch domains and fake-quantize the output."""
+        """Concatenate inputs under the calibration policy and fake-quantize the output."""
         values = tuple(tensors)
         if not values:
             raise ValueError("QuantConcat requires at least one input tensor.")

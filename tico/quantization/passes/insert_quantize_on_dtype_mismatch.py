@@ -24,7 +24,6 @@ from typing import Any
 import torch
 from torch.export import ExportedProgram
 
-from tico.quantization.passes.concat_qparam import is_width_direction_concat
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
@@ -147,6 +146,9 @@ def _insert_quantize_op_after(node):
     quantize.replace_input_with(quantize, node)
 
     quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
+    # Mirror ``_insert_quantize_op_before``: the Quantize output carries the
+    # destination storage dtype, whatever the producer's FX value dtype is.
+    quantize.meta["val"] = torch.empty_like(node.meta["val"], dtype=dtype)
 
     return quantize
 
@@ -243,7 +245,41 @@ def _mul_handler(node, logger):
         raise NotYetSupportedError("Unsupported dtype")
 
 
+def _same_domain(lhs: QuantParam, rhs: QuantParam) -> bool:
+    """Return whether two qparams describe one integer grid.
+
+    The grid is defined by the storage dtype, scale, zero point and the
+    granularity axis. Observer ``min``/``max`` statistics are metadata and must
+    not trigger a conversion. Scales compare exactly: an approximate match
+    would silently skip a conversion the backend requires.
+    """
+    return (
+        lhs.dtype == rhs.dtype
+        and lhs.scale == rhs.scale
+        and lhs.zero_point == rhs.zero_point
+        and lhs.quantized_dimension == rhs.quantized_dimension
+    )
+
+
 def _cat_handler(node, logger):
+    """Make every CONCATENATION input and output share one quantization domain.
+
+    Circle CONCATENATION copies integer codes, so a backend expects identical
+    qparams on all of its inputs and its output. Any domain change is made
+    explicit with a per-tensor Quantize, regardless of the concat axis or the
+    module that produced the concat:
+
+    * identical input and output domains: nothing is inserted;
+    * every input shares domain ``A`` and the output requests ``B``: the
+      concat runs in ``A`` and one Quantize converts its output to ``B``;
+    * distinct input domains: each input connection whose domain differs from
+      the output domain gets a Quantize to that domain. Producers keep their
+      own domain, including graph inputs, graph outputs and tensors shared
+      with other consumers, and a repeated operand reuses one conversion.
+
+    An input that is itself a requantization keeps that earlier rounding step;
+    the new Quantize is chained after it instead of retargeting it.
+    """
     cat_args = CatArgs(*node.args, **node.kwargs)
     tensors = cat_args.tensors
 
@@ -254,72 +290,52 @@ def _cat_handler(node, logger):
         return
 
     assert len(tensors) > 0
-    in_dtype = qparam_dtype(tensors[0])
-    mixed_dtype = any(qparam_dtype(x) != in_dtype for x in tensors)
-    first = tensors[0].meta[QPARAM_KEY]
-    distinct_domains = any(
-        qparam.dtype != first.dtype
-        or qparam.scale != first.scale
-        or qparam.zero_point != first.zero_point
-        or qparam.quantized_dimension != first.quantized_dimension
-        for qparam in (x.meta[QPARAM_KEY] for x in tensors[1:])
-    )
-    # The width-direction backend contract explicitly allows independent grids.
-    # Uniform-input concat retains its existing output-boundary behavior.
-    if mixed_dtype or (
-        distinct_domains and not is_width_direction_concat(node, cat_args)
+    destination: QuantParam = node.meta[QPARAM_KEY]
+    sources = [x.meta[QPARAM_KEY] for x in tensors]
+    if all(_same_domain(source, destination) for source in sources):
+        return
+
+    qparams = sources + [destination]
+    # Preserve the existing treatment of incompletely annotated concats,
+    # including MX domains that carry no affine scale.
+    if any(
+        not qparam.dtype or qparam.scale is None or qparam.zero_point is None
+        for qparam in qparams
     ):
-        destination = node.meta[QPARAM_KEY]
-        qparams = [x.meta[QPARAM_KEY] for x in tensors] + [destination]
-        # Preserve the existing treatment of incompletely annotated concats.
-        if any(
-            not qparam.dtype or qparam.scale is None or qparam.zero_point is None
-            for qparam in qparams
-        ):
-            return
-
-        if any(
-            qparam.dtype not in ("uint8", "int16")
-            or qparam.quantized_dimension is not None
-            or len(qparam.scale) != 1
-            or len(qparam.zero_point) != 1
-            for qparam in qparams
-        ):
-            raise NotYetSupportedError(
-                f"Unsupported {'mixed-dtype' if mixed_dtype else 'distinct-domain'} "
-                f"concat {node.name}: "
-                f"inputs={[qparam_dtype(x) for x in tensors]}, "
-                f"output={destination.dtype}. "
-                "Only per-tensor affine uint8/int16 qparams are supported."
-            )
-
-        # Normalize to the intended output grid, including same-dtype operands
-        # with different qparams. Convert only this consumer's connections:
-        # producers may be graph inputs, graph outputs, or shared with other ops.
-        for inp in dict.fromkeys(tensors):
-            source = inp.meta[QPARAM_KEY]
-            if (
-                source.dtype != destination.dtype
-                or source.scale != destination.scale
-                or source.zero_point != destination.zero_point
-            ):
-                _insert_quantize_op_before(node, inp)
-                logger.debug(
-                    f"quantize_per_tensor.default is inserted before {node.name}."
-                )
         return
 
-    if in_dtype == qparam_dtype(node):
-        return
+    if any(
+        qparam.dtype not in ("uint8", "int16")
+        or qparam.quantized_dimension is not None
+        or len(qparam.scale) != 1
+        or len(qparam.zero_point) != 1
+        for qparam in qparams
+    ):
+        raise NotYetSupportedError(
+            f"Unsupported distinct-domain concat {node.name}: "
+            f"inputs={[qparam_dtype(x) for x in tensors]}, "
+            f"output={destination.dtype}. "
+            "Only per-tensor affine uint8/int16 qparams are supported."
+        )
 
-    if in_dtype == "int16" and qparam_dtype(node) == "uint8":
+    first = sources[0]
+    if all(_same_domain(source, first) for source in sources[1:]):
+        # Every input already shares one grid. Concatenate in that grid and
+        # requantize the whole result once at the output boundary.
         quantize = _insert_quantize_op_after(node)
-
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(destination)
+        node.meta[QPARAM_KEY] = copy.deepcopy(first)
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
-    else:
-        raise NotYetSupportedError("Unsupported dtype")
+        return
+
+    # Normalize to the intended output grid. Convert only this consumer's
+    # connections: producers may be graph inputs, graph outputs, or shared
+    # with other operators. ``replace_input_with`` rewires every occurrence of
+    # a repeated operand to the same Quantize.
+    for inp in dict.fromkeys(tensors):
+        if not _same_domain(inp.meta[QPARAM_KEY], destination):
+            _insert_quantize_op_before(node, inp)
+            logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
 
 
 def _bmm_handler(node, logger):
@@ -488,6 +504,11 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
     Comparing 1) and 2), the difference is that Reshape operation is conducted in uint8 or int16.
     We go with 1), which does Reshape in uint8, for faster execution. Note that Reshape Op does not
     change the value, so its dytpe does not affect accuracy.
+
+    For ``aten.cat`` the same mechanism legalizes every quantization-domain
+    mismatch, not only dtype changes: a Circle CONCATENATION must use one
+    scale, zero point and dtype on all of its inputs and its output. See
+    ``_cat_handler`` for the input-connection and output-boundary rules.
     """
 
     def __init__(self):

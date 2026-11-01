@@ -134,6 +134,17 @@ The quantization policies are:
 | PReLU slope | per-channel asymmetric | per-channel symmetric |
 | Convolution bias | INT32 | INT64 |
 
+The two head `CONCATENATION` operators join independently calibrated branch
+outputs (`allow_distinct_input_qparams=True` keeps each branch in its own
+observer domain during calibration). The exported Circle still uses one
+scale and zero point on every concat input and output: conversion inserts an
+explicit `QUANTIZE` on each branch whose domain differs. For INT16 this
+compiles to the same NPU program as the earlier implicit rescale. The triv24
+compiler currently rejects a `UINT8 -> UINT8` `QUANTIZE`
+(`HLIncompatible: circle_ifm->dtype() == S16`), so the structural verifier
+reports that transition as unsupported and the UINT8 export cannot be
+compiled for that backend until the compiler accepts it.
+
 ### NPU-friendly resize lowering
 
 `--resize-tconv` replaces both 2x half-pixel `RESIZE_BILINEAR` operators with

@@ -337,7 +337,7 @@ This phase legalizes and completes a graph that has already been prepared as qua
 It is not a replacement for model calibration or the public quantization workflow.
 
 Affine backward propagation may retarget an explicit per-tensor Quantize to a
-non-width Concat's domain, including through reshape/permute nodes, when the
+Concat's domain, including through reshape/permute nodes, when the
 quantized dtype matches, the Quantize's sole user is the propagating node, and
 its input has no established quantization domain. A proven requantization retains
 its original boundary even when private.
@@ -586,14 +586,36 @@ cleanup, and dtype-bridge insertion.
 These graph passes do not perform calibration and do not select a quantization
 algorithm.
 
-For affine `uint8`/`int16` concatenations with distinct input domains (including
-same-dtype inputs with different scales or zero points), legalization inserts
-per-tensor requantization on each input connection whose dtype, scale, or zero-point
-differs from the concat's intended output domain. It preserves that output domain
-and the original producers' qparams and other uses. Fully annotated distinct-input
-domains outside this scope are rejected explicitly; uniform-input concatenations
-retain their existing legalization behavior. The documented width-direction TICO
-Concat contract continues to permit independent same-dtype input grids.
+A Circle `CONCATENATION` copies integer codes, so the exported operator uses one
+quantization domain (dtype, scale, zero point) on every input and its output. This
+rule applies to every concat axis and to every module origin, including
+width-direction `tico.ops.Concat`; there is no per-axis exception. For affine
+`uint8`/`int16` per-tensor domains, legalization makes each required domain change
+explicit with a `QUANTIZE`:
+
+- Identical input and output domains need no conversion. Observer `min`/`max`
+  metadata is not part of the domain; scales compare exactly.
+- When every input shares one domain `A` and the output requests `B`, the concat
+  runs in `A` and one `QUANTIZE` converts the joined result to `B`. An already
+  folded `concat[A] -> QUANTIZE[B]` boundary is kept as is.
+- When input domains differ, each input connection whose domain differs from the
+  output domain gets a `QUANTIZE` into that domain. Producers keep their own qparams
+  and their other uses (graph inputs, graph outputs, other consumers), and a repeated
+  operand reuses one conversion.
+- An input that is itself a requantization keeps that earlier rounding and saturation
+  step; the concat conversion is chained after it, never merged into it.
+
+Fully annotated domains outside this scope (per-channel or non-`uint8`/`int16`
+affine grids) are rejected explicitly, and incompletely annotated or MX concats keep
+their existing contracts. Running the legalization again does not add operators.
+
+The NPU compiler previously realized mismatched concat inputs with implicit
+rescales; the explicit `QUANTIZE` describes the same source-to-destination domain
+change in the Circle itself, so structural verification and the reference runtime
+can check it. The `tico.ops.Concat` flag `allow_distinct_input_qparams` is a WrapQ
+calibration policy: it decides whether `QuantConcat` observes and fake-quantizes
+every input in the shared output domain or lets each branch keep its producer's
+domain. It does not change the export contract above.
 
 Wrapper fake-quantization calls mark tensor quantization domains and calibration
 points. After decomposition, their Q-DQ pairs are an intermediate representation

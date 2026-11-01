@@ -266,7 +266,7 @@ class MXPropagationPassTest(unittest.TestCase):
         PropagateQParamBackward().call(ep)
         self.assertNotIn(QPARAM_KEY, source.meta)
 
-    def test_width_concat_affine_exception_does_not_skip_mx_domains(self):
+    def test_tico_width_concat_propagates_mx_domains(self):
         for backward in (False, True):
             with self.subTest(backward=backward):
                 ep = torch.export.export(

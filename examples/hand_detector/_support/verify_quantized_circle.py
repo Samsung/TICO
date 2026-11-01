@@ -291,33 +291,13 @@ def _normalize_axis(axis: int, rank: int, *, context: str) -> int:
     return normalized
 
 
-def _is_width_concatenation(
-    reader: FlatBufferReader,
-    tensors: list[CircleTensorInfo],
-    operator: CircleOperatorInfo,
-    *,
-    context: str,
-) -> bool:
-    """Return whether one channels-last Concat joins width."""
-    if operator.options_table is None:
-        raise RuntimeError(f"{context} has no builtin options.")
-    if not operator.outputs:
-        raise RuntimeError(f"{context} has no output tensor.")
-    output = tensors[operator.outputs[0]]
-    rank = len(output.shape)
-    if rank < 2:
-        raise RuntimeError(f"{context} output rank {rank} has no width axis.")
-    axis = reader.scalar_i32(operator.options_table, 0, 0)
-    return _normalize_axis(axis, rank, context=context) == rank - 2
-
-
 def _require_supported_quantize_transition(
     input_tensor: CircleTensorInfo,
     output_tensor: CircleTensorInfo,
     *,
     context: str,
 ) -> tuple[int, int]:
-    """Require a backend-supported Q8/Q16 dtype transition."""
+    """Require a per-tensor Q8/Q16 QUANTIZE that changes the integer grid."""
     allowed_types = (TENSOR_UINT8, TENSOR_INT16)
     for tensor in (input_tensor, output_tensor):
         if tensor.tensor_type not in allowed_types:
@@ -335,15 +315,23 @@ def _require_supported_quantize_transition(
         input_tensor.tensor_type,
         output_tensor.tensor_type,
     )
-    allowed = {
-        (TENSOR_UINT8, TENSOR_INT16),
-        (TENSOR_INT16, TENSOR_UINT8),
-    }
-    if transition not in allowed:
+    if (
+        transition[0] == transition[1]
+        and input_tensor.quantization == output_tensor.quantization
+    ):
         raise RuntimeError(
-            f"{context} supports only Q8->Q16 and Q16->Q8, "
-            f"found {_type_name(transition[0])}->"
-            f"{_type_name(transition[1])}."
+            f"{context} is an identity requantization "
+            f"({_type_name(transition[0])} with unchanged scale and zero point)."
+        )
+    # The triv24 compiler lowers Q8<->Q16 and Q16->Q16 QUANTIZE to rescales
+    # but rejects a UINT8->UINT8 QUANTIZE (HLIncompatible: the input of a
+    # UINT8 QUANTIZE must be INT16), so a same-grid-dtype UINT8 requantization
+    # cannot be compiled for this backend profile.
+    if transition == (TENSOR_UINT8, TENSOR_UINT8):
+        raise RuntimeError(
+            f"{context} is a UINT8->UINT8 requantization, which the triv24 "
+            "compiler does not support; only Q8<->Q16 and Q16->Q16 QUANTIZE "
+            "transitions compile."
         )
     return transition
 
@@ -535,16 +523,12 @@ def verify_quantized_circle(
                 expected_type,
                 context="CONCATENATION tensor",
             )
-            if not _is_width_concatenation(
-                reader,
-                tensors,
-                operator,
+            # Every concat axis uses one domain; export converts differing
+            # branch domains with explicit QUANTIZE operators.
+            _require_same_qparams(
+                connected,
                 context=f"CONCATENATION@{operator_index}",
-            ):
-                _require_same_qparams(
-                    connected,
-                    context="CONCATENATION",
-                )
+            )
             continue
 
         if operator.builtin_code in _DATA_OPERATOR_REQUIRES_SHARED_QPARAMS:
