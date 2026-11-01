@@ -288,7 +288,13 @@ def _is_width_concat_operation(
     operations: Sequence[Mapping[str, Any]],
     position: int,
 ) -> bool:
-    """Return whether one channels-last Concat joins the width axis."""
+    """Return whether one channels-last Concat joins the width axis.
+
+    The two head concatenations join independently calibrated branch outputs.
+    They keep ``allow_distinct_input_qparams=True`` so WrapQ observes each
+    branch in its producer's domain; export inserts explicit QUANTIZE
+    operators so the Circle CONCATENATION itself uses one domain.
+    """
     operation = operations[position]
     if operation["name"] != "CONCATENATION":
         raise ValueError(f"Operation {position} is not CONCATENATION.")
