@@ -645,7 +645,36 @@ Qwen3-VL / Gemma4:
   hellaswag
   mmmu
   ppl
+
+Gemma4 only:
+  cached_nll
 ```
+
+`cached_nll` scores fixed held-out chunks through a real prefill and one
+cached decode step per target token, so the past-KV read path of a cached
+deployment is measured. The existing `ppl` targets score each window with one
+uncached forward. Chunks are contiguous, non-overlapping spans of the
+tokenized corpus; every variant under comparison therefore sees identical
+targets, and the per-chunk records allow paired differences.
+
+```yaml
+evaluation:
+  cached_nll:
+    enabled: true
+    dataset: wikitext2
+    split: test
+    mode: chat-prefix       # chat-prefix | raw
+    prefix_tokens: 512      # prefilled corpus tokens (scored separately as prefill-only)
+    target_tokens: 256      # teacher-forced cached targets per chunk
+    n_chunks: 16
+    start_offset: 0         # token offset of the first chunk
+    output_json: null       # optional file, created exclusively
+```
+
+`prefix_tokens + target_tokens` must not exceed `evaluation.max_seq_len`. The
+summary reports the mean NLL and `exp(mean NLL)` over the cached targets, the
+valid scored-token count, and a separate prefill-only score; prefix tokens are
+never counted as cached targets.
 
 `lm_eval` requires a non-empty `evaluation.lm_eval_tasks` value. `vqa`
 requires a non-empty `evaluation.vlm_tasks` value. `mmmu` requires an explicit

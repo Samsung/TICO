@@ -60,9 +60,38 @@ class QuantGemma4TextAttention(QuantModuleBase):
     ``attention_k_eq_v=True``, and shared-KV consumer layers. Dynamic runtime
     orchestration such as cache writes, shared-KV bookkeeping, mask generation,
     and sampling remains outside this module.
+
+    RoPE domain inheritance
+    -----------------------
+    With ``rope="pre_negated_sin"`` the half split, reorder, and concatenation
+    that precede the sine multiplication preserve the normalized Q/K values.
+    When the producing ``q_norm``/``k_norm`` output grid and the local
+    ``q_x1/q_x2/q_cat`` (``k_x1/k_x2/k_cat``) sites are all per-tensor affine
+    and none of those sites carries an explicit override, the branch inherits
+    the frozen norm output domain: calibration collects nothing at the local
+    sites and QUANT re-declares the frozen norm grid without deriving or
+    modifying any qparams. Q and K are decided independently and never share a
+    grid with each other or with another layer; shared-KV consumers only own
+    the Q branch. The ``hf`` convention, per-channel, MX, identity, and
+    explicitly overridden sites keep their independent observers. The decision
+    is fixed at construction and recorded in checkpoints; a checkpoint produced
+    under the other policy is rejected instead of being reinterpreted.
     """
 
     causal_mask_template: torch.Tensor
+
+    _ROPE_DOMAIN_VERSION = 1
+    _ROPE_DOMAIN_SITES: dict[str, tuple[str, ...]] = {
+        "q": ("q_x1", "q_x2", "q_cat"),
+        "k": ("k_x1", "k_x2", "k_cat"),
+    }
+    _ROPE_POLICY_CHECKPOINT = (
+        "Gemma4 checkpoint RoPE domain policy differs from this wrapper: "
+        "independent q/k half/concat grids and norm-inherited domains cannot be "
+        "converted into each other; reprepare and recalibrate with the current "
+        "configuration (explicit q_x1/q_x2/q_cat or k_x1/k_x2/k_cat overrides "
+        "keep independent grids)."
+    )
 
     def __init__(
         self,
@@ -190,8 +219,68 @@ class QuantGemma4TextAttention(QuantModuleBase):
         )
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
+        # Decided once from construction-time policy so that _rot(), the
+        # active-observer inventory, and the checkpoint record never disagree.
+        self._rope_domains = self._resolve_rope_domains()
 
     _DEFAULT_STATIC_MAX_SEQ = 2048
+
+    @staticmethod
+    def _per_tensor_affine(observer: Any) -> bool:
+        return (
+            isinstance(observer, AffineObserverBase)
+            and observer.channel_axis is None
+            and not observer.qscheme.is_per_channel()
+        )
+
+    def _rope_norm_wrapper(self, branch: str) -> Optional[QuantModuleBase]:
+        """Return the norm wrapper that produces this RoPE branch, if owned."""
+        if branch == "q":
+            return self.q_norm.wrapped
+        if branch == "k" and not self.is_kv_shared_layer:
+            return self.k_norm.wrapped
+        return None
+
+    def _rope_branch_inherits(self, branch: str) -> bool:
+        if self.attn_options.rope != "pre_negated_sin":
+            return False
+        norm = self._rope_norm_wrapper(branch)
+        if norm is None or not self._per_tensor_affine(
+            getattr(norm, "obs_act_out", None)
+        ):
+            return False
+        sites = self._ROPE_DOMAIN_SITES[branch]
+        if any(name in self.qcfg.overrides for name in sites):
+            # An explicit site policy is the user's decision; keep it intact.
+            return False
+        return all(
+            self._per_tensor_affine(getattr(self, "obs_" + name)) for name in sites
+        )
+
+    def _resolve_rope_domains(self) -> dict[str, bool]:
+        """Decide per branch whether split/reorder/concat inherit the norm grid."""
+        return {branch: self._rope_branch_inherits(branch) for branch in ("q", "k")}
+
+    def _rope_domain_state(self) -> dict[str, Any]:
+        return {
+            "version": self._ROPE_DOMAIN_VERSION,
+            "inherited": dict(self._rope_domains),
+        }
+
+    def _rope_canonical_observers(self) -> dict[str, ObserverBase]:
+        """Return borrowed norm output observers for inheriting branches."""
+        canonical: dict[str, ObserverBase] = {}
+        for branch, inherits in self._rope_domains.items():
+            if inherits:
+                norm = self._rope_norm_wrapper(branch)
+                assert norm is not None
+                canonical[branch] = cast(ObserverBase, norm.obs_act_out)
+        return canonical
+
+    def _rope_inherited_observer(self, branch: str) -> Optional[ObserverBase]:
+        # Dispatch on the branch key, not on observer identity: export tracing
+        # hands out fresh module attribute proxies on every access.
+        return self._rope_canonical_observers().get(branch)
 
     def _resolve_max_seq(self) -> int:
         """Resolve the export-mask capacity from configuration and model limits.
@@ -244,9 +333,20 @@ class QuantGemma4TextAttention(QuantModuleBase):
         obs_x2,
         obs_neg,
         obs_cat,
+        *,
+        branch: str,
     ) -> torch.Tensor:
         """Rotate halves using the convention of the supplied sine table."""
         x1, x2 = torch.chunk(tensor, 2, dim=-1)
+        canonical = self._rope_inherited_observer(branch)
+        if canonical is not None:
+            # Value-preserving split/reorder/concat inherit the frozen norm
+            # output grid. Never call _fq here: CALIB must not recollect the
+            # norm statistics and QUANT must not derive or modify any grid.
+            if self._mode is Mode.QUANT:
+                x1, x2 = canonical.fake_quant(x1), canonical.fake_quant(x2)
+                return canonical.fake_quant(torch.cat((x2, x1), dim=-1))
+            return torch.cat((x2, x1), dim=-1)
         x1 = self._fq(x1, obs_x1)
         x2 = self._fq(x2, obs_x2)
         if self.attn_options.rope == "hf":
@@ -265,11 +365,13 @@ class QuantGemma4TextAttention(QuantModuleBase):
         obs_cos,
         obs_sin,
         obs_rot,
+        *,
+        branch: str,
     ) -> torch.Tensor:
         """Apply rotary position embedding before head transposition."""
         cos = self._expand_rope_table(cos)
         sin = self._expand_rope_table(sin)
-        half = self._rot(tensor, obs_x1, obs_x2, obs_neg, obs_cat)
+        half = self._rot(tensor, obs_x1, obs_x2, obs_neg, obs_cat, branch=branch)
         cos_part = self._fq(tensor * cos, obs_cos)
         sin_part = self._fq(half * sin, obs_sin)
         return self._fq(cos_part + sin_part, obs_rot)
@@ -466,6 +568,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
             self.obs_k_cos,
             self.obs_k_sin,
             self.obs_k_rot,
+            branch="k",
         )
         key_states = key_states.transpose(1, 2)
 
@@ -542,6 +645,14 @@ class QuantGemma4TextAttention(QuantModuleBase):
         ):
             raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
         super().__setstate__(state)
+        if "_rope_domains" not in state:
+            # A wrapper pickled before RoPE domain inheritance calibrated
+            # independent half/concat grids. Only a configuration that still
+            # resolves to independent grids preserves its original semantics.
+            resolved = self._resolve_rope_domains()
+            if any(resolved.values()):
+                raise RuntimeError(self._ROPE_POLICY_CHECKPOINT)
+            self._rope_domains = resolved
 
     def _validate_cache_observers(self) -> None:
         """Reject old pickled wrappers instead of inventing missing statistics."""
@@ -549,6 +660,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
             name in self._modules for name in ("obs_past_key", "obs_past_value")
         ):
             raise RuntimeError(self._OBSOLETE_CACHE_CHECKPOINT)
+        if not isinstance(getattr(self, "_rope_domains", None), dict):
+            raise RuntimeError(self._ROPE_POLICY_CHECKPOINT)
 
     def cache_storage_observers(self) -> tuple[ObserverBase, ObserverBase]:
         """Return the actual producer-owned storage boundaries."""
@@ -627,14 +740,26 @@ class QuantGemma4TextAttention(QuantModuleBase):
         }
 
     def _freeze_dependencies(self) -> tuple[ObserverBase, ...]:
+        borrowed: tuple[ObserverBase, ...] = ()
         if self.is_kv_shared_layer:
-            return self.cache_storage_observers()
-        return ()
+            borrowed = self.cache_storage_observers()
+        return borrowed + tuple(self._rope_canonical_observers().values())
 
     def _validate_freeze(self, plan, available: set[str]) -> None:
         self._validate_cache_observers()
         if self.is_kv_shared_layer or "cache" in available:
             self._validate_cache_conversion()
+        for branch, canonical in self._rope_canonical_observers().items():
+            state = plan.get(canonical)
+            if state is None:
+                state = canonical.require_frozen()
+            if state.kind != "affine" or not state.fake_quant_enabled:
+                raise ValueError(
+                    f"Gemma4 {branch}_norm output must keep an affine fake-quantized "
+                    "grid while its RoPE split/concat inherits that domain; configure "
+                    f"{'/'.join(self._ROPE_DOMAIN_SITES[branch])} explicitly to keep "
+                    "independent grids instead of bypassing the norm output."
+                )
 
     @staticmethod
     def _source_fingerprint(observer: ObserverBase) -> tuple:
@@ -672,6 +797,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 else ()
             ),
         }
+        state["gemma_rope"] = self._rope_domain_state()
         return state
 
     def set_extra_state(self, state: dict[str, Any]) -> None:
@@ -680,6 +806,13 @@ class QuantGemma4TextAttention(QuantModuleBase):
             raise RuntimeError(
                 "Gemma4 legacy cache-only state cannot restore exact non-cache frozen grids; reprepare and recalibrate."
             )
+        rope = state.get("gemma_rope")
+        if rope is None:
+            # Saved before RoPE domain inheritance existed: independent grids.
+            if any(self._rope_domains.values()):
+                raise RuntimeError(self._ROPE_POLICY_CHECKPOINT)
+        elif rope != self._rope_domain_state():
+            raise RuntimeError(self._ROPE_POLICY_CHECKPOINT)
         if bool(binding.get("external_float_cache", False)) != bool(
             getattr(self, "_external_float_cache", False)
         ):
@@ -1198,6 +1331,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
             self.obs_q_cos,
             self.obs_q_sin,
             self.obs_q_rot,
+            branch="q",
         )
         query_states = query_states.transpose(1, 2)
 
@@ -1315,9 +1449,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
             self.obs_hidden,
             self.obs_cos,
             self.obs_sin,
-            self.obs_q_x1,
-            self.obs_q_x2,
-            self.obs_q_cat,
+        ]
+        if not self._rope_domains["q"]:
+            common.extend([self.obs_q_x1, self.obs_q_x2, self.obs_q_cat])
+        common += [
             self.obs_q_cos,
             self.obs_q_sin,
             self.obs_q_rot,
@@ -1337,11 +1472,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
         if self.scaling != 1.0:
             common.append(self.obs_scale)
         if not self.is_kv_shared_layer:
+            if not self._rope_domains["k"]:
+                common.extend([self.obs_k_x1, self.obs_k_x2, self.obs_k_cat])
             common.extend(
                 [
-                    self.obs_k_x1,
-                    self.obs_k_x2,
-                    self.obs_k_cat,
                     self.obs_k_cos,
                     self.obs_k_sin,
                     self.obs_k_rot,
