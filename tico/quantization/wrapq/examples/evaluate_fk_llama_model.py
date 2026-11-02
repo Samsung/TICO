@@ -17,6 +17,7 @@ from typing import List, Tuple
 
 import torch
 
+from datasets import load_dataset
 from lm_eval.utils import make_table
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -26,6 +27,7 @@ from tico.quantization.wrapq.examples.static_llama_layer_runtime import (
     _build_rope_templates_from_config,
     LayerCache,
 )
+from tico.quantization.wrapq.utils.metrics import perplexity
 
 
 def pad_input(input, pad_token, max_seq_len, pads_on_left=True):
@@ -111,6 +113,63 @@ DTYPE_MAP = {
     # "bfloat16": torch.bfloat16,
     # "float16": torch.float16,
 }
+
+# Hardcoded dataset settings (kept in sync with quantize_full_qmodel_with_gptq.py)
+DATASET_NAME = "wikitext"
+DATASET_CONFIG = "wikitext-2-raw-v1"
+TEST_SPLIT = "test"
+
+
+def load_eval_dataset(cache_dir=None):
+    """Load the fixed Wikitext-2 test split for perplexity evaluation."""
+    return load_dataset(
+        DATASET_NAME,
+        DATASET_CONFIG,
+        split=TEST_SPLIT,
+        cache_dir=cache_dir,
+    )
+
+
+def evaluate_ppl(model, tokenizer, args, label: str) -> float:
+    """Compute Wikitext-2 test perplexity.
+
+    Uses the same evaluation protocol as ``quantize_full_qmodel_with_gptq.py``:
+    a strided sliding-window pass over the tokenized Wikitext-2 test corpus via
+    ``tico.quantization.wrapq.utils.metrics.perplexity``.
+
+    Args:
+        model: Model (eval mode) to evaluate. Either a plain HF causal LM or a
+            fake-quantized wrapped model (``model.wrapped.config`` is consulted).
+        tokenizer: Tokenizer instance compatible with the model.
+        args: Namespace object containing command-line arguments (device,
+              cache_dir, etc.).
+        label: Label used in the result box (e.g. ``"FP32"`` or ``"int16"``).
+
+    Returns:
+        Corpus-level perplexity on the Wikitext-2 test split.
+    """
+    print(f"\nCalculating {label} perplexity …")
+    dataset_test = load_eval_dataset(args.cache_dir)
+    enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
+
+    model = model.to(args.device)
+    if hasattr(model, "wrapped"):
+        max_seq_len = model.wrapped.config.max_position_embeddings
+    else:
+        max_seq_len = model.config.max_position_embeddings
+
+    ppl = perplexity(
+        model,
+        enc,
+        args.device,
+        max_length=max_seq_len,
+        stride=max_seq_len,
+    )
+
+    print("\n┌── Wikitext-2 test perplexity ─────────────")
+    print(f"│ {label} : {ppl:8.2f}")
+    print("└───────────────────────────────────────────")
+    return ppl
 
 
 class GreedyDecoder:
@@ -444,9 +503,10 @@ class OriginalModelEvaluator:
 
         The method:
         1. Loads the model with the specified dtype.
-        2. If ``args.eval_tasks`` is provided, runs ``evaluate_llm_on_tasks``.
-        3. If a prompt is supplied, generates text using the model.
-        4. Cleans up GPU memory after execution.
+        2. If ``args.eval_ppl`` is set, computes Wikitext-2 test perplexity.
+        3. If ``args.eval_tasks`` is provided, runs ``evaluate_llm_on_tasks``.
+        4. If a prompt is supplied, generates text using the model.
+        5. Cleans up GPU memory after execution.
         """
         # Load FP model
         model = (
@@ -460,6 +520,9 @@ class OriginalModelEvaluator:
             .cpu()
             .eval()
         )
+
+        if self.args.eval_ppl:
+            evaluate_ppl(model, self.tokenizer, self.args, "FP32")
 
         if self.args.eval_tasks is not None:
             config = model.config
@@ -520,9 +583,10 @@ class QuantizedModelEvaluator:
 
         The method:
         1. Loads the quantized model from ``args.fk_model_path``.
-        2. If ``args.eval_tasks`` is provided, runs ``evaluate_llm_on_tasks``.
-        3. If a prompt is supplied, generates text using the model.
-        4. Cleans up GPU memory after execution.
+        2. If ``args.eval_ppl`` is set, computes Wikitext-2 test perplexity.
+        3. If ``args.eval_tasks`` is provided, runs ``evaluate_llm_on_tasks``.
+        4. If a prompt is supplied, generates text using the model.
+        5. Cleans up GPU memory after execution.
         """
         # Load fake‑quantized model
         fk_model = (
@@ -532,6 +596,9 @@ class QuantizedModelEvaluator:
         )
         config = fk_model.wrapped.config
         max_seq_len = config.max_position_embeddings
+
+        if self.args.eval_ppl:
+            evaluate_ppl(fk_model, self.tokenizer, self.args, "int16")
 
         if self.args.eval_tasks is not None:
             results = evaluate_llm_on_tasks(
@@ -617,6 +684,11 @@ def parse_args():
         type=str,
         default=None,
         help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
+    )
+    parser.add_argument(
+        "--eval_ppl",
+        action="store_true",
+        help="Evaluate Wikitext-2 test perplexity (same protocol as quantize_full_qmodel_with_gptq.py).",
     )
     parser.add_argument(
         "--skip_fp_eval",
