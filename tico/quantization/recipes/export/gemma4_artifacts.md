@@ -175,11 +175,7 @@ rejected with `strict=False` as well. Checkpoints calibrated before this
 policy existed load only into wrappers that still resolve to independent
 grids (for example `rope="hf"` or explicit site overrides); otherwise
 reprepare and recalibrate. No automatic conversion between the two policies
-is provided. The validation record for this policy (tiny R0K1/R1K1 matrix,
-saved-Circle checks, and the pretrained E2B cached-NLL comparison) is in
-[`gemma4_rope_domain_validation/2026-11-02/`](gemma4_rope_domain_validation/2026-11-02/README.md);
-the cached-NLL evaluator follow-up (chat-prefix context budget, dataset adapter)
-is in [`2026-11-02-cached-nll-followup/`](gemma4_rope_domain_validation/2026-11-02-cached-nll-followup/README.md).
+is provided.
 
 ## `circle_layers/`: vision pipeline
 
