@@ -28,6 +28,13 @@ would produce it:
 
 Every chunk is a contiguous, non-overlapping token span of the same corpus
 stream, so no token is scored twice and all variants see identical targets.
+
+Context budget: with ``H`` chat-prefix tokens (0 in raw mode), ``P`` prefix
+tokens and ``T`` targets, a chunk is accepted only when ``H + P + T <= M`` for
+the resolved evaluation context ``M``. The true peak input/cache length is
+``H + P + T - 1`` because the final target is never fed back, but the budget
+deliberately keeps the whole-chunk contract and merely adds the previously
+missing ``H``; the one-token slack is intentional.
 """
 
 from __future__ import annotations
@@ -201,7 +208,8 @@ def score_cached_chunk(
     }
 
 
-def _chat_prefix_ids(processor_or_tokenizer: Any, tokenizer: Any) -> torch.Tensor:
+def chat_prefix_ids(processor_or_tokenizer: Any, tokenizer: Any) -> torch.Tensor:
+    """Render and tokenize the chat prefix once; callers reuse the result."""
     from tico.quantization.wrapq.utils.metrics import _render_chat_prefix
 
     rendered = _render_chat_prefix(processor_or_tokenizer, tokenizer)
@@ -212,6 +220,30 @@ def _chat_prefix_ids(processor_or_tokenizer: Any, tokenizer: Any) -> torch.Tenso
     return ids[0].to(torch.long)
 
 
+def validate_context_budget(
+    context_tokens: int, protocol: CachedNLLProtocol, max_seq_len: Optional[int]
+) -> None:
+    """Reject a chunk whose whole length exceeds the evaluation context.
+
+    ``H + P + T <= M`` is enforced on the actual chat-prefix token count. The
+    peak cached length is ``H + P + T - 1`` (the last target is never fed), but
+    the pre-existing ``P + T`` whole-chunk contract is kept and only the missing
+    ``H`` is added; the one-token slack is intentional, not an oversight.
+    """
+    if max_seq_len is None:
+        return
+    limit = int(max_seq_len)
+    required = int(context_tokens) + protocol.span
+    if required > limit:
+        raise ValueError(
+            "cached NLL chunk exceeds the evaluation context: "
+            f"chat_prefix_tokens H={int(context_tokens)} + prefix_tokens P="
+            f"{protocol.prefix_tokens} + target_tokens T={protocol.target_tokens} "
+            f"= {required} > max_seq_len M={limit}. Reduce prefix_tokens or "
+            "target_tokens, or evaluate with a larger context."
+        )
+
+
 def evaluate_cached_nll(
     model: torch.nn.Module,
     token_stream: torch.Tensor,
@@ -219,9 +251,15 @@ def evaluate_cached_nll(
     *,
     device: torch.device | str | None = None,
     context_ids: Optional[torch.Tensor] = None,
+    max_seq_len: Optional[int] = None,
     show_progress: bool = True,
 ) -> dict[str, Any]:
-    """Score fixed chunks of ``token_stream`` (1-D) with real cached decode."""
+    """Score fixed chunks of ``token_stream`` (1-D) with real cached decode.
+
+    ``context_ids`` are the exact chat-prefix tokens used for every chunk; the
+    same tensor is checked against ``max_seq_len`` and fed to the model, so the
+    budget check and the scoring can never disagree.
+    """
     if token_stream.ndim != 1:
         raise ValueError("token_stream must be a 1-D token tensor.")
     if device is None:
@@ -233,6 +271,10 @@ def evaluate_cached_nll(
     context = (
         torch.zeros((0,), dtype=torch.long) if context_ids is None else context_ids
     )
+    if context.ndim != 1:
+        raise ValueError("context_ids must be a 1-D token tensor.")
+    # Both checks run before the first model forward.
+    validate_context_budget(int(context.numel()), protocol, max_seq_len)
     ranges = chunk_token_ranges(int(token_stream.numel()), protocol)
     model.eval()
     chunks = []
@@ -268,7 +310,9 @@ def evaluate_cached_nll(
     prefill_mean = prefill_nll_sum / prefill_tokens if prefill_tokens else None
     return {
         "protocol": asdict(protocol),
+        "max_seq_len": None if max_seq_len is None else int(max_seq_len),
         "context_tokens": int(context.numel()),
+        "context_token_ids": [int(value) for value in context],
         "corpus_tokens": int(token_stream.numel()),
         "scored_tokens": int(target_tokens),
         "mean_nll": float(mean_nll),
@@ -282,11 +326,51 @@ def evaluate_cached_nll(
     }
 
 
+def normalize_text_examples(dataset: Iterable[Any], adapter: Any) -> list[str]:
+    """Apply the registered dataset adapter once and collect the ``text`` fields.
+
+    The dataset is consumed in a single pass (streaming sources cannot be
+    re-iterated). Every normalized item must provide a string ``text``; a
+    missing or non-string field is a schema error, never an empty substitute.
+    """
+    if not callable(adapter):
+        raise TypeError(
+            "Cached NLL requires the registered dataset adapter returned by "
+            f"get_dataset(); got {type(adapter).__name__}."
+        )
+    texts: list[str] = []
+    for index, example in enumerate(dataset):
+        item = adapter(example)
+        if not isinstance(item, Mapping) or "text" not in item:
+            raise ValueError(
+                f"Dataset adapter output for example {index} lacks the 'text' "
+                f"field required by cached NLL (got {type(item).__name__})."
+            )
+        text = item["text"]
+        if not isinstance(text, str):
+            raise ValueError(
+                f"Dataset adapter output for example {index} must provide a string "
+                f"'text', got {type(text).__name__}."
+            )
+        texts.append(text)
+    return texts
+
+
 def tokenize_text_stream(tokenizer: Any, texts: Iterable[str]) -> torch.Tensor:
-    """Tokenize a corpus once into a 1-D stream, as the PPL helpers do."""
-    joined = "\n\n".join(str(text) for text in texts if text is not None)
-    if not joined:
-        raise ValueError("The dataset contains no text examples.")
+    """Tokenize a corpus once into a 1-D stream, as the PPL helpers do.
+
+    Rows are joined with ``"\\n\\n"`` exactly as given: empty WikiText rows and
+    surrounding whitespace are preserved so the token stream matches the
+    existing perplexity helpers. A corpus without any non-whitespace text is
+    rejected before the tokenizer or the model runs.
+    """
+    rows = [str(text) for text in texts]
+    if not any(row.strip() for row in rows):
+        raise ValueError(
+            "The dataset contains no non-whitespace text after adapter "
+            "normalization; refusing to score an empty corpus."
+        )
+    joined = "\n\n".join(rows)
     encoded = tokenizer(joined, return_tensors="pt", add_special_tokens=False)
     ids = encoded["input_ids"]
     if ids.ndim != 2 or ids.shape[0] != 1:
@@ -302,28 +386,39 @@ def evaluate_text_cached_nll(
     split: str,
     protocol: CachedNLLProtocol,
     device: torch.device | str,
+    max_seq_len: Optional[int] = None,
     show_progress: bool = True,
 ) -> dict[str, Any]:
-    """Load a registered evaluation text dataset and score it with cached decode."""
+    """Load a registered evaluation text dataset and score it with cached decode.
+
+    ``max_seq_len`` is the resolved evaluation context; the chat prefix is
+    rendered and tokenized once, and that tensor is used both for the
+    ``H + P + T <= M`` check and for scoring.
+    """
     from tico.quantization.evaluation.vlm_eval_utils import get_dataset
     from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
 
     tokenizer = getattr(processor_or_tokenizer, "tokenizer", processor_or_tokenizer)
-    dataset, _ = get_dataset(dataset_name, role=EVALUATION_ROLE, split=split, n=-1)
-    stream = tokenize_text_stream(
-        tokenizer, (example.get("text", "") for example in dataset)
-    )
     context = (
-        _chat_prefix_ids(processor_or_tokenizer, tokenizer)
+        chat_prefix_ids(processor_or_tokenizer, tokenizer)
         if protocol.chat_prefix
         else None
     )
+    # Fail on the budget before loading or tokenizing the corpus.
+    validate_context_budget(
+        0 if context is None else int(context.numel()), protocol, max_seq_len
+    )
+    dataset, adapter = get_dataset(
+        dataset_name, role=EVALUATION_ROLE, split=split, n=-1
+    )
+    stream = tokenize_text_stream(tokenizer, normalize_text_examples(dataset, adapter))
     results = evaluate_cached_nll(
         model,
         stream,
         protocol,
         device=device,
         context_ids=context,
+        max_seq_len=max_seq_len,
         show_progress=show_progress,
     )
     results["dataset"] = {"name": dataset_name, "split": split}

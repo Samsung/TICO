@@ -864,11 +864,8 @@ class Gemma4Adapter(ModelAdapter):
             start_offset=int(cfg.get("start_offset", 0)),
             chat_prefix=mode == "chat-prefix",
         )
-        if protocol.span > int(max_seq_len):
-            raise ValueError(
-                "cached_nll prefix_tokens + target_tokens exceeds the evaluation "
-                f"context: {protocol.span} > {max_seq_len}."
-            )
+        # The helper checks H + P + T <= max_seq_len with the actual chat-prefix
+        # token count before the first forward; no separate P + T check here.
         results = evaluate_text_cached_nll(
             model=ctx.model,
             processor_or_tokenizer=ctx.processor,
@@ -876,6 +873,7 @@ class Gemma4Adapter(ModelAdapter):
             split=str(cfg.get("split", "test")),
             protocol=protocol,
             device=str(ctx.device),
+            max_seq_len=int(max_seq_len),
             show_progress=bool(ctx.cfg.get("runtime", {}).get("show_progress", True)),
         )
         print_cached_nll_results(results)
