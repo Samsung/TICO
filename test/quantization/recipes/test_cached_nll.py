@@ -235,10 +235,13 @@ class TestCachedNLL(unittest.TestCase):
 
     # ------------------------------------------------ context budget contract
     def _run_text(self, tokenizer, dataset, protocol, *, adapter=_text_adapter, **kw):
-        with mock.patch(
-            "tico.quantization.evaluation.vlm_eval_utils.get_dataset",
-            return_value=(dataset, adapter),
-        ), mock.patch.object(self.fp, "forward", wraps=self.fp.forward) as forward:
+        with (
+            mock.patch(
+                "tico.quantization.evaluation.vlm_eval_utils.get_dataset",
+                return_value=(dataset, adapter),
+            ),
+            mock.patch.object(self.fp, "forward", wraps=self.fp.forward) as forward,
+        ):
             try:
                 result = evaluate_text_cached_nll(
                     model=self.fp,
@@ -450,10 +453,13 @@ class TestCachedNLL(unittest.TestCase):
         ctx = cast(RecipeContext, shell)
         adapter = Gemma4Adapter()
         dataset = [{"text": _words(self.stream[:40])}]
-        with mock.patch(
-            "tico.quantization.evaluation.vlm_eval_utils.get_dataset",
-            return_value=(dataset, _text_adapter),
-        ), mock.patch.object(self.fp, "forward", wraps=self.fp.forward) as forward:
+        with (
+            mock.patch(
+                "tico.quantization.evaluation.vlm_eval_utils.get_dataset",
+                return_value=(dataset, _text_adapter),
+            ),
+            mock.patch.object(self.fp, "forward", wraps=self.fp.forward) as forward,
+        ):
             # P + T == M passed the old adapter-level check; H + P + T = 19 > 16.
             with self.assertRaisesRegex(ValueError, "H=3 .* 19 > max_seq_len M=16"):
                 adapter._evaluate_cached_nll(ctx, max_seq_len=16)
