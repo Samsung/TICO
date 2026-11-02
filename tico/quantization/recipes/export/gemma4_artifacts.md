@@ -144,6 +144,39 @@ Static vision profiles own their generated pooling matrices and frozen constant
 grids. Exporting another profile, including a failed export, leaves the source
 pooler's snapshots and previously created profile adapters unchanged.
 
+## RoPE split/concat domains
+
+With the `npu_export` profile (`rope="pre_negated_sin"`), the half split,
+reorder, and concatenation between `q_norm`/`k_norm` and the sine
+multiplication preserve the normalized values. Each branch inherits the frozen
+norm output grid when the norm output and the branch's `q_x1/q_x2/q_cat`
+(`k_x1/k_x2/k_cat`) sites are all per-tensor affine and none of those sites
+has an explicit override:
+
+- Calibration collects nothing at the inherited sites; the norm output
+  observer is collected once per forward at its original location.
+- Quantized execution re-declares the frozen norm grid on the halves and the
+  reordered concat. No grid is derived, copied, or modified, and the ordinary
+  exporter folds the redundant markers, so the serialized norm output, halves,
+  and RoPE concat carry one identical domain with no Quantize between them.
+- Q and K are decided independently. Shared-KV consumers inherit only the Q
+  branch; the K branch belongs to the producer. Domains are never shared
+  between Q and K or across layers.
+- cos/sin inputs, `q_cos/q_sin/q_rot` (`k_*`), attention logits, softmax,
+  outputs, weights, and the S/C cache grids are unchanged.
+
+`rope="hf"`, per-channel or MX norm outputs or sites, float (`no_quant`) norm
+outputs, and explicitly overridden sites keep their independent observers.
+Disabling fake quantization on an inheriting norm output is rejected at freeze
+time instead of silently floating the branch. The decision is fixed at wrapper
+construction and persisted in the attention extra state (`gemma_rope`); a
+state dict or whole-module checkpoint produced under the other policy is
+rejected with `strict=False` as well. Checkpoints calibrated before this
+policy existed load only into wrappers that still resolve to independent
+grids (for example `rope="hf"` or explicit site overrides); otherwise
+reprepare and recalibrate. No automatic conversion between the two policies
+is provided.
+
 ## `circle_layers/`: vision pipeline
 
 `granularity: both` writes the monolithic graph and the split pipeline.

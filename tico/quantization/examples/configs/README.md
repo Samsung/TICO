@@ -645,7 +645,45 @@ Qwen3-VL / Gemma4:
   hellaswag
   mmmu
   ppl
+
+Gemma4 only:
+  cached_nll
 ```
+
+`cached_nll` scores fixed held-out chunks through a real prefill and one
+cached decode step per target token, so the past-KV read path of a cached
+deployment is measured. The existing `ppl` targets score each window with one
+uncached forward. Chunks are contiguous, non-overlapping spans of the
+tokenized corpus; every variant under comparison therefore sees identical
+targets, and the per-chunk records allow paired differences.
+
+```yaml
+evaluation:
+  cached_nll:
+    enabled: true
+    dataset: wikitext2
+    split: test
+    mode: chat-prefix       # chat-prefix | raw
+    prefix_tokens: 512      # prefilled corpus tokens (scored separately as prefill-only)
+    target_tokens: 256      # teacher-forced cached targets per chunk
+    n_chunks: 16
+    start_offset: 0         # token offset of the first chunk
+    output_json: null       # optional file, created exclusively
+```
+
+The context budget is checked on the actual chat-prefix token count `H`
+(0 in `raw` mode) before the first model forward:
+`H + prefix_tokens + target_tokens <= evaluation.max_seq_len`. The `T` targets
+are scored from the prefill's last logit plus `T - 1` cached decode steps, so
+the peak cached length is one token shorter than `H + P + T`; the whole-chunk
+budget is kept deliberately conservative rather than allowing that extra
+token. Corpus text comes from the registered dataset adapter (for example the
+MMLU adapter renders question and choices); rows are joined with `"\n\n"`
+exactly as the perplexity helpers do, empty WikiText rows included, and a
+corpus without any non-whitespace text is rejected before tokenization. The
+summary reports the mean NLL and `exp(mean NLL)` over the cached targets, the
+valid scored-token count, the chat-prefix token IDs, and a separate
+prefill-only score; prefix tokens are never counted as cached targets.
 
 `lm_eval` requires a non-empty `evaluation.lm_eval_tasks` value. `vqa`
 requires a non-empty `evaluation.vlm_tasks` value. `mmmu` requires an explicit

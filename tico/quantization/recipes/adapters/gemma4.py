@@ -27,6 +27,11 @@ from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.config import stage_name_matches
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
+from tico.quantization.recipes.evaluation.cached_nll import (
+    CachedNLLProtocol,
+    evaluate_text_cached_nll,
+    print_cached_nll_results,
+)
 from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
 from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
@@ -108,6 +113,7 @@ class Gemma4Adapter(ModelAdapter):
             "hellaswag",
             "mmmu",
             "ppl",
+            "cached_nll",
         }
     )
     evaluation_target_requirements = {"vqa": "vlm_tasks"}
@@ -838,6 +844,50 @@ class Gemma4Adapter(ModelAdapter):
                 f"\nPPL[{ppl_mode}]"
                 f"({ppl_cfg.get('dataset', 'wikitext2')}): {ppl_value:.2f}"
             )
+
+        if should_run_mapping_evaluation(eval_cfg, "cached_nll"):
+            self._evaluate_cached_nll(ctx, max_seq_len=max_seq_len)
+
+    def _evaluate_cached_nll(self, ctx: RecipeContext, *, max_seq_len: int) -> None:
+        """Score held-out chunks through real prefill and cached decode."""
+        eval_cfg = ctx.cfg.get("evaluation", {})
+        cfg = get_mapping_evaluation_config(eval_cfg, "cached_nll")
+        mode = str(cfg.get("mode", "chat-prefix")).lower()
+        if mode not in {"raw", "chat-prefix"}:
+            raise ValueError(
+                f"Unsupported cached_nll mode: {mode!r}. Must be 'raw' or 'chat-prefix'."
+            )
+        protocol = CachedNLLProtocol(
+            prefix_tokens=int(cfg.get("prefix_tokens", 512)),
+            target_tokens=int(cfg.get("target_tokens", 256)),
+            n_chunks=int(cfg.get("n_chunks", 16)),
+            start_offset=int(cfg.get("start_offset", 0)),
+            chat_prefix=mode == "chat-prefix",
+        )
+        # The helper checks H + P + T <= max_seq_len with the actual chat-prefix
+        # token count before the first forward; no separate P + T check here.
+        results = evaluate_text_cached_nll(
+            model=ctx.model,
+            processor_or_tokenizer=ctx.processor,
+            dataset_name=str(cfg.get("dataset", "wikitext2")),
+            split=str(cfg.get("split", "test")),
+            protocol=protocol,
+            device=str(ctx.device),
+            max_seq_len=int(max_seq_len),
+            show_progress=bool(ctx.cfg.get("runtime", {}).get("show_progress", True)),
+        )
+        print_cached_nll_results(results)
+        ctx.artifacts["cached_nll"] = results
+        output_json = cfg.get("output_json")
+        if output_json:
+            import json
+
+            path = Path(str(output_json))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Exclusive creation: FP and each quantized variant get their own file.
+            with path.open("x", encoding="utf-8") as handle:
+                json.dump(results, handle, indent=2, sort_keys=True)
+            print(f"Saved cached NLL results to {path.resolve()}")
 
     def export(self, ctx: RecipeContext) -> None:
         """Export configured Gemma4 E2B artifacts."""
