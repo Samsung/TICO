@@ -296,6 +296,10 @@ def _strided_slice(ctx: KernelContext) -> tuple[np.ndarray, ...]:
             stop = axis_size if stride > 0 else -1
         if stride > 0:
             index.append(slice(start, stop, stride))
+        elif start < 0:
+            # A normalized reverse start of -1 is before the input, so the
+            # selection is empty. NumPy would interpret it as the last element.
+            index.append(slice(0, 0, stride))
         else:
             index.append(slice(start, None if stop < 0 else stop, stride))
     return (np.array(value[tuple(index)], copy=True),)

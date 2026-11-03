@@ -303,6 +303,106 @@ class ConcatSplitSliceTest(unittest.TestCase):
             )
 
 
+class ReverseStridedSliceTest(unittest.TestCase):
+    def _assert_slice(self, value, begin, end, strides, expected, **options):
+        expected = np.asarray(expected, dtype=value.dtype)
+        builder = CircleModelBuilder()
+        x = builder.input("x", value.shape, dtype=value.dtype)
+        inputs = [x]
+        for name, indices in (("begin", begin), ("end", end), ("strides", strides)):
+            inputs.append(builder.const_i32(name, indices))
+        output = builder.activation("out", expected.shape, dtype=value.dtype)
+        builder.operator(
+            "STRIDED_SLICE",
+            inputs,
+            [output],
+            options=_options("StridedSliceOptions", **options),
+        )
+        builder.set_outputs(output)
+        document = CircleDocument.from_bytes(builder.build().to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        runtime = CircleReferenceRuntime(document)
+        self.assertEqual(runtime.output_tensors[0].shape, expected.shape)
+        self.assertEqual(runtime.output_tensors[0].dtype, value.dtype)
+        original = value.copy()
+        for _ in range(2):
+            result = runtime.run((value,)).outputs[0]
+            np.testing.assert_array_equal(result, expected)
+            self.assertEqual(result.shape, expected.shape)
+            self.assertEqual(result.dtype, value.dtype)
+            np.testing.assert_array_equal(value, original)
+
+    def test_reverse_begin_before_input_produces_empty_output(self):
+        for dtype in (np.float32, np.int64):
+            for begin, end, stride in ((-6, 0, -1), (-6, -6, -1), (-99, -99, -2)):
+                with self.subTest(dtype=dtype, begin=begin, end=end, stride=stride):
+                    self._assert_slice(
+                        np.arange(5, dtype=dtype), [begin], [end], [stride], []
+                    )
+
+    def test_reverse_clamped_and_negative_bounds(self):
+        for begin, end, stride, expected in (
+            (-5, -99, -1, [0]),
+            (-1, -99, -2, [4, 2, 0]),
+            (99, -99, -2, [4, 2, 0]),
+            (-1, -4, -1, [4, 3, 2]),
+            (4, 0, -2, [4, 2]),
+            (-2, -2, -1, []),
+            (0, 4, -1, []),
+        ):
+            with self.subTest(begin=begin, end=end, stride=stride):
+                self._assert_slice(
+                    np.arange(5, dtype=np.float32), [begin], [end], [stride], expected
+                )
+
+    def test_reverse_masks_override_explicit_bounds(self):
+        for begin_mask, end_mask, expected in (
+            (0, 0, []),
+            (1, 0, [4, 3, 2, 1]),
+            (0, 1, []),
+            (1, 1, [4, 3, 2, 1, 0]),
+        ):
+            with self.subTest(begin_mask=begin_mask, end_mask=end_mask):
+                self._assert_slice(
+                    np.arange(5, dtype=np.int32),
+                    [-99],
+                    [0],
+                    [-1],
+                    expected,
+                    beginMask=begin_mask,
+                    endMask=end_mask,
+                )
+
+    def test_reverse_empty_dimension(self):
+        for mask in (0, 1):
+            with self.subTest(mask=mask):
+                self._assert_slice(
+                    np.empty(0, dtype=np.float32),
+                    [-99],
+                    [0],
+                    [-1],
+                    [],
+                    beginMask=mask,
+                    endMask=mask,
+                )
+
+    def test_reverse_empty_selection_preserves_other_dimensions(self):
+        value = np.arange(12, dtype=np.int32).reshape(3, 4)
+        self._assert_slice(
+            value, [-99, -1], [0, -99], [-1, -2], np.empty((0, 2), dtype=np.int32)
+        )
+        self._assert_slice(
+            value, [-1, -99], [-99, 0], [-1, -1], np.empty((3, 0), dtype=np.int32)
+        )
+
+    def test_reverse_slice_with_shrunk_axis(self):
+        value = np.arange(12, dtype=np.float32).reshape(3, 4)
+        self._assert_slice(
+            value, [-1, -1], [0, -99], [1, -1], [11, 10, 9, 8], shrinkAxisMask=1
+        )
+        self._assert_slice(value, [-1, -99], [0, 0], [1, -1], [], shrinkAxisMask=1)
+
+
 class GatherTest(unittest.TestCase):
     def test_gather_on_axis_with_int64_indices(self):
         fixture = _Fixture(np.arange(12, dtype=np.float32).reshape(3, 4))
