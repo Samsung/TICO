@@ -264,6 +264,12 @@ not automatically schedule it. It must be inserted into this explicit pipeline.
 needed before either reusing it for equal shapes or expanding it to the destination
 shape. The cast does not change other users of the source tensor.
 
+`LowerPow2ToMul` squares in the original power's exported result dtype. If scalar
+promotion changes the base dtype, it casts before multiplying: integer `x.pow(2.0)`
+and boolean `x.pow(2)` retain their floating and integer result types respectively.
+Integer `x.pow(2)` retains its original dtype and overflow semantics. This rule
+uses the exported dtype rather than the process default at pass execution time.
+
 `LowerSelectCopyToSlice` retains relative negative slice bounds and uses an open
 end for `index=-1`. This preserves one-element selection without specializing a
 symbolic input axis length.
