@@ -86,7 +86,7 @@ def capture_supporting_operators(
 def operator_is_live(graph: CircleGraph, operator_index: int) -> bool:
     """Return whether an operator contributes to a serialized graph output."""
 
-    return int(operator_index) in graph.backward_operators(graph.outputs)
+    return int(operator_index) in graph.live_operators()
 
 
 def operator_matches(

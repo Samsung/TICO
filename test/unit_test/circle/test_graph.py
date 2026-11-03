@@ -14,7 +14,9 @@
 
 import unittest
 
-from test.unit_test.circle.fixture import make_test_document
+from tico.circle.passes.optimization._pattern_utils import operator_is_live
+
+from test.unit_test.circle.fixture import FakeOperator, make_test_document
 
 
 class CircleGraphTest(unittest.TestCase):
@@ -67,3 +69,50 @@ class CircleGraphTest(unittest.TestCase):
         self.assertEqual(graph.forward_operators((0,)), {0, 1})
         self.assertEqual(graph.backward_operators((5,)), {0, 1})
         self.assertEqual(graph.forward_operators((3,)), {2})
+
+
+class CircleGraphCachingTest(unittest.TestCase):
+    def test_operator_inputs_and_outputs_are_memoized(self):
+        graph = make_test_document().graph(0)
+
+        inputs_first = graph.operator_inputs(1)
+        self.assertEqual(inputs_first, (2, 1))
+        self.assertIs(inputs_first, graph.operator_inputs(1))
+
+        outputs_first = graph.operator_outputs(1)
+        self.assertEqual(outputs_first, (5,))
+        self.assertIs(outputs_first, graph.operator_outputs(1))
+
+    def test_operator_snapshot_is_stable_after_construction(self):
+        document = make_test_document()
+        graph = document.graph(0)
+
+        count_before = graph.operator_count
+        first_operator = graph._operator(0)
+
+        # Mutating the underlying subgraph after construction must not leak
+        # into the revision-pinned snapshot held by this CircleGraph instance.
+        document.model.subgraphs[0].operators.append(
+            FakeOperator(opcodeIndex=0, inputs=[0], outputs=[4])
+        )
+
+        self.assertEqual(graph.operator_count, count_before)
+        self.assertIs(graph._operator(0), first_operator)
+
+    def test_live_operators_matches_backward_and_is_cached_immutable(self):
+        graph = make_test_document().graph(0)
+
+        live = graph.live_operators()
+        self.assertEqual(live, {0, 1})
+        self.assertEqual(live, graph.backward_operators(graph.outputs))
+        self.assertIsInstance(live, frozenset)
+        self.assertIs(live, graph.live_operators())
+        with self.assertRaises(AttributeError):
+            live.add(2)  # type: ignore[attr-defined]
+
+    def test_operator_is_live_reports_dead_branch(self):
+        graph = make_test_document().graph(0)
+
+        self.assertTrue(operator_is_live(graph, 0))
+        self.assertTrue(operator_is_live(graph, 1))
+        self.assertFalse(operator_is_live(graph, 2))

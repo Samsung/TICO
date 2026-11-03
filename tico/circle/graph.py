@@ -117,6 +117,14 @@ class CircleGraph:
                 f"0..{len(subgraphs) - 1}."
             )
         self.subgraph = subgraphs[subgraph_index]
+        # The session pins one CircleGraph per subgraph revision, so the
+        # underlying flatbuffer vectors are immutable for this instance's
+        # lifetime. Materialize them once instead of on every accessor call.
+        self._operators_list = as_list(self.subgraph.operators)
+        self._tensors_list = as_list(self.subgraph.tensors)
+        self._operator_inputs_cache: dict[int, tuple[int, ...]] = {}
+        self._operator_outputs_cache: dict[int, tuple[int, ...]] = {}
+        self._live_operators_cache: frozenset[int] | None = None
         self._producer: dict[int, int] = {}
         self._consumers: dict[int, list[int]] = {}
         self._build_index()
@@ -125,13 +133,13 @@ class CircleGraph:
     def tensor_count(self) -> int:
         """Return the number of tensors in the subgraph."""
 
-        return len(as_list(self.subgraph.tensors))
+        return len(self._tensors_list)
 
     @property
     def operator_count(self) -> int:
         """Return the number of operators in the subgraph."""
 
-        return len(as_list(self.subgraph.operators))
+        return len(self._operators_list)
 
     @property
     def inputs(self) -> tuple[int, ...]:
@@ -146,8 +154,7 @@ class CircleGraph:
         return tuple(as_indices(self.subgraph.outputs))
 
     def _build_index(self) -> None:
-        operators = as_list(self.subgraph.operators)
-        for operator_index, operator in enumerate(operators):
+        for operator_index, operator in enumerate(self._operators_list):
             for tensor_index in as_indices(getattr(operator, "outputs", None)):
                 if tensor_index == OPTIONAL_TENSOR_INDEX:
                     continue
@@ -176,17 +183,25 @@ class CircleGraph:
     def operator_inputs(self, operator_index: int) -> tuple[int, ...]:
         """Return input tensor indices for an operator."""
 
-        operator = self._operator(operator_index)
-        return tuple(as_indices(getattr(operator, "inputs", None)))
+        cached = self._operator_inputs_cache.get(operator_index)
+        if cached is None:
+            operator = self._operator(operator_index)
+            cached = tuple(as_indices(getattr(operator, "inputs", None)))
+            self._operator_inputs_cache[operator_index] = cached
+        return cached
 
     def operator_outputs(self, operator_index: int) -> tuple[int, ...]:
         """Return output tensor indices for an operator."""
 
-        operator = self._operator(operator_index)
-        return tuple(as_indices(getattr(operator, "outputs", None)))
+        cached = self._operator_outputs_cache.get(operator_index)
+        if cached is None:
+            operator = self._operator(operator_index)
+            cached = tuple(as_indices(getattr(operator, "outputs", None)))
+            self._operator_outputs_cache[operator_index] = cached
+        return cached
 
     def _operator(self, operator_index: int) -> Any:
-        operators = as_list(self.subgraph.operators)
+        operators = self._operators_list
         if operator_index < 0 or operator_index >= len(operators):
             raise IndexError(
                 f"Operator index {operator_index} is outside the valid range "
@@ -197,7 +212,7 @@ class CircleGraph:
     def tensor_name(self, tensor_index: int) -> str:
         """Return a decoded tensor name."""
 
-        tensors = as_list(self.subgraph.tensors)
+        tensors = self._tensors_list
         if tensor_index < 0 or tensor_index >= len(tensors):
             raise IndexError(
                 f"Tensor index {tensor_index} is outside the valid range "
@@ -277,6 +292,20 @@ class CircleGraph:
                     visited_tensors.add(input_index)
                     queue.append(input_index)
         return visited_operators
+
+    def live_operators(self) -> frozenset[int]:
+        """Return operators contributing to graph outputs, computed once.
+
+        The result is cached because instances are revision-pinned snapshots:
+        the liveness set cannot change during this instance's lifetime.
+        A frozenset is returned so callers cannot corrupt the shared cache.
+        """
+
+        if self._live_operators_cache is None:
+            self._live_operators_cache = frozenset(
+                self.backward_operators(self.outputs)
+            )
+        return self._live_operators_cache
 
     def region_boundary(self, operator_indices: Iterable[int]) -> GraphBoundary:
         """Compute graph inputs and outputs for an operator-induced region."""

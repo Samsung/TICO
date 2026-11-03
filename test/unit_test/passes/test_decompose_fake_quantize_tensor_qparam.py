@@ -15,9 +15,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Dict, Union
+from unittest import mock
 
 import numpy as np
 import tico
+import tico.passes.decompose_fake_quantize_tensor_qparams as fq_tqparams_module
 import torch
 from tico.circle import CircleDocument
 from tico.circle.runtime import CircleReferenceRuntime
@@ -25,6 +28,7 @@ from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.decompose_fake_quantize import DecomposeFakeQuantize
 from tico.passes.decompose_fake_quantize_tensor_qparams import (
     DecomposeFakeQuantizeTensorQParams,
+    get_constant_from_tensor,
 )
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
@@ -500,3 +504,39 @@ class DecomposeFakeQuantizeCacheMaskContractTest(unittest.TestCase):
                 self.assertEqual(len(public_outputs), len(indices))
                 for result, expected in zip(public_outputs, model(self.x)):
                     np.testing.assert_array_equal(result, expected.numpy())
+
+
+class GetConstantFromTensorMemoTest(PassTest):
+    def test_cached_wrapper_reuses_values_within_a_run(self):
+        self.setup(FakeQuantizeTensorQParamPerTensor())
+        ep = self.exported_program()
+        fq_node = next(
+            n
+            for n in ep.graph.nodes
+            if n.op == "call_function"
+            and n.target == torch.ops.aten.fake_quantize_per_tensor_affine.tensor_qparams
+        )
+        scale_arg = fq_node.args[1]
+
+        cache: Dict[Union[str, bool, int, float], Union[bool, int, float]] = {}
+        with mock.patch.object(
+            fq_tqparams_module,
+            "_get_constant_from_tensor_impl",
+            wraps=fq_tqparams_module._get_constant_from_tensor_impl,
+        ) as impl_spy:
+            cached_value = get_constant_from_tensor(scale_arg, ep, _cache=cache)
+            calls_after_first = impl_spy.call_count
+            cached_again = get_constant_from_tensor(scale_arg, ep, _cache=cache)
+
+        self.assertEqual(cached_again, cached_value)
+        self.assertEqual(impl_spy.call_count, calls_after_first)
+
+        with mock.patch.object(
+            fq_tqparams_module,
+            "_get_constant_from_tensor_impl",
+            wraps=fq_tqparams_module._get_constant_from_tensor_impl,
+        ) as impl_spy_uncached:
+            uncached_value = get_constant_from_tensor(scale_arg, ep)
+
+        self.assertEqual(uncached_value, cached_value)
+        self.assertGreaterEqual(impl_spy_uncached.call_count, 1)
