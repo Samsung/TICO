@@ -582,11 +582,13 @@ class AffineObserverBase(ObserverBase):
                 quant_max=self.dtype.qmax,
             )
         else:
+            # PyTorch's kernel requires a nonnegative axis. Keep the configured
+            # signed axis in frozen policy/checkpoints and normalize only this use.
             return torch.fake_quantize_per_channel_affine(
                 x,
                 scale=scale,
                 zero_point=zp,
-                axis=self.channel_axis,
+                axis=self.channel_axis % x.ndim,
                 quant_min=self.dtype.qmin,
                 quant_max=self.dtype.qmax,
             )
