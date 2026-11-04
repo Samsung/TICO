@@ -19,20 +19,24 @@ if TYPE_CHECKING:
 import torch
 from torch.export import ExportedProgram
 
+from tico.serialize.circle_mapping import extract_torch_dtype
 from tico.utils import logging
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import is_target_node
+from tico.utils.utils import is_target_node, set_new_meta_val
 from tico.utils.validate_args_kwargs import PowTensorScalarArgs
 
 
 @trace_graph_diff_on_pass
 class LowerPow2ToMul(PassBase):
     """
-    This pass lowers pow operator whose exponent is 2 to mul.
+    Lower scalar powers equal to two to multiplication in the result dtype.
 
-    E.g. `Pow(in_, 2)` -> `Mul(in_, in_)`
+    The original output metadata owns scalar promotion: integer bases with a
+    floating exponent and boolean bases may require conversion before squaring.
+    Casting after multiplication would preserve integer overflow incorrectly.
+    Other exponents and tensor-exponent overloads are unchanged.
     """
 
     def __init__(self):
@@ -54,16 +58,26 @@ class LowerPow2ToMul(PassBase):
             if exp != 2:
                 continue
 
-            lhs = rhs = in_
-            with graph.inserting_after(node):
+            result_dtype = extract_torch_dtype(node)
+            with graph.inserting_before(node):
+                if extract_torch_dtype(in_) != result_dtype:
+                    in_ = create_node(
+                        graph,
+                        torch.ops.aten._to_copy.default,
+                        args=(in_,),
+                        kwargs={"dtype": result_dtype},
+                        origin=node,
+                    )
+                    set_new_meta_val(in_)
                 new_mul = create_node(
                     graph,
                     torch.ops.aten.mul.Tensor,
-                    args=(lhs, rhs),
+                    args=(in_, in_),
                     kwargs={},
                 )
 
             node.replace_all_uses_with(new_mul, propagate_meta=True)
+            set_new_meta_val(new_mul)
 
             modified = True
             logger.debug(f"{node.name} is replaced with {new_mul.name}")

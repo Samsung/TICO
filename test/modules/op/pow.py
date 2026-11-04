@@ -42,8 +42,7 @@ class SimplePowIntTensorFloatScalar(TestModuleBase):
         return z
 
     def get_example_inputs(self):
-        torch.manual_seed(1234)
-        return (torch.randn(2, 2),), {}
+        return (torch.tensor([[-50000, -1], [1, 50000]], dtype=torch.int32),), {}
 
 
 class Int32TensorInt64Scalar(TestModuleBase):
