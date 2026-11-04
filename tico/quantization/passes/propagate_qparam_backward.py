@@ -23,7 +23,10 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
-from tico.quantization.passes.preserve_embedding_quantization import EXPLICIT_EMBEDDING
+from tico.quantization.passes.preserve_embedding_quantization import (
+    EXPLICIT_EMBEDDING,
+    FLOAT_EMBEDDING,
+)
 from tico.quantization.passes.remove_weight_dequant_op import infer_dtype
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
@@ -151,6 +154,9 @@ class PropagateQParamBackward(PassBase):
         graph: torch.fx.Graph = graph_module.graph
 
         def _propagate_qparam_if_possible(src: torch.fx.Node, dst: torch.fx.Node):
+            # A preserved CPU float tensor owns no integer quantization grid.
+            if src.meta.get(FLOAT_EMBEDDING) or dst.meta.get(FLOAT_EMBEDDING):
+                return
             if QPARAM_KEY not in src.meta:
                 return
 

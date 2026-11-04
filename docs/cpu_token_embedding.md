@@ -5,9 +5,10 @@ decoder. A vocabulary table is large, while each invocation usually selects only
 small subset of its rows. The implementation therefore separates the graph's
 quantization semantics from the CPU's memory and execution strategy.
 
-This document describes constant UINT8 tables with asymmetric per-row quantization
-(axis 0) and a per-tensor INT16 output boundary. Quantization settings remain part
-of the model's configuration and calibration contract. See the
+The supported lookup uses a constant UINT8 table with asymmetric per-row
+quantization (axis 0). Activation boundaries can be per-tensor UINT8 or INT16;
+post-processing can also expose a real FLOAT32 output. Quantization settings remain
+part of each model's configuration and calibration contract. See the
 [system design](design.md#10-quantization-integration) for the conversion pipeline
 and [reference execution modes](../tico/circle/README.md#quantized-models) for
 runtime arithmetic and backend support.
@@ -25,13 +26,15 @@ Wq: UINT8 [V, D], row scales and zero points
   -> GATHER(integer token IDs)
   -> Q_A -> DQ_A
   -> optional MUL(dequantized, fake-quantized scale)
-  -> Q_B: per-tensor INT16
+  -> Q_B: configured per-tensor UINT8 or INT16
 ```
 
 The MUL and its surrounding boundaries depend on the exported model. When no
 post-processing is needed, the embedding's activation Quantize is the output
 boundary. Qparams belong to integer tensors; the internal FLOAT32 tensors carry
-no qparams. Token IDs are unquantized indices.
+no qparams. Token IDs are unquantized INT32/INT64 indices, independently of the
+table and activation dtypes. Even UINT8-to-UINT8 needs an explicit conversion when
+the table has per-row qparams and the activation has a different per-tensor grid.
 
 Standard Circle operators make domain changes visible to optimizers, validators
 and other runtimes. They also let the CPU reuse the existing quantization and
@@ -62,7 +65,7 @@ qparams require O(V) metadata. The original UINT8 table remains the weight stora
 no full FLOAT32, INT16 or scaled-weight copy is needed for native embedding.
 
 FP32 row restoration reuses the reference arithmetic contract. Subsequent Q/DQ and
-MUL operations remain separate so their rounding and saturation are preserved;
+MUL and feature-transform operations remain separate so their rounding and saturation are preserved;
 a fixed-point or wider fusion would need to reproduce those same boundaries.
 
 ## Numerical and storage contracts
@@ -86,9 +89,11 @@ packaged artifacts. Embedding scaling is applied to selected activations, not to
 shared weight storage.
 
 The decoder boundary retains its configured dtype, shape/layout, scale, zero point
-and range. Internal CPU FLOAT32 buffers do not replace the INT16 interface.
-Producer and consumer calibration must already agree at a staged boundary;
-this execution optimization does not reconcile independently calibrated grids.
+and range. Producer and consumer domains must be compared before passing integer
+codes between stages. If they differ, the host must explicitly dequantize the
+producer result and quantize it into the consumer's frozen grid. Dtype equality
+alone is insufficient. The selected-row optimization does not align grids or
+automatically perform this handoff.
 
 ## Export-pass invariants
 
@@ -98,6 +103,22 @@ markers distinguish a preserved boundary (`EXPLICIT_EMBEDDING` on Quantize) from
 real float intermediate (`FLOAT_EMBEDDING`). Backward propagation must leave the
 preserved Quantize's arguments and qparam metadata intact, including through layout
 paths. Unprotected private quantizers retain their existing retarget policy.
+
+The float continuation includes reshape/permute/slice layouts, static scale MUL,
+and concat that joins float embedding branches or inserts a genuinely float side
+input. Without a float side input, a concat with an independent quantized branch
+keeps the ordinary integer concat policy; a float edge entering it receives an
+explicit Quantize. Mixed concats that also contain an independent Q/DQ side branch
+are diagnosed as unsupported. Membership in the region alone does not turn an
+integer Quantize output or integer layout into float. Forward and backward
+propagation respect marked float values instead of inventing qparams. Independent
+quantized consumers of a shared float side input retain their own explicit Q.
+
+A bias-free, constant square linear feature transform can continue the CPU region.
+Its weight DQ and input/output quantizers remain explicit, allowing the existing
+FLOAT32 FC kernel to execute a rotation. The embedding table itself is excluded
+from this rule, including a square tied LM-head table. This is a local continuation
+policy, not a change to general FC quantization or a test for matrix orthogonality.
 
 Circle QUANTIZE saturates to its storage range. The supported reduced INT16 lower
 bound of -32767 therefore requires a float clamp before Quantize, serialized as
@@ -134,11 +155,68 @@ static quantized scale operands. A fake-quantized dynamic MUL side operand is
 diagnosed as unsupported. `enable_rowwise_gather=False` permits
 ordinary full-DQ execution for small-model debugging and numerical oracles.
 
+Other table dtypes, per-tensor or non-row table quantization, nonconstant tables,
+and general linear/Conv continuations are outside this selected-row contract.
+
 The optimization is implemented in the built-in reference runtime's NATIVE mode.
 FAKE_QUANTIZE remains a semantic evaluation mode: another consumer such as FC may
 use its existing full-weight dequantization cache. External CPU runtimes need their
 own selected-row execution plan and support for the serialized DQ/Q/clamp sequence.
 Reference execution does not establish production-runtime or device support.
+
+## Model adapters and stage interfaces
+
+The small-config integration tests use the real model classes, WrapQ
+prepare/calibrate/convert, production export adapters, Circle files, and fresh
+reference runtime instances. They require a compatible Transformers installation,
+but no checkpoint download or accelerator.
+
+| Path | Matching contract | Circle file export/reload | NATIVE embedding values | Stage connection | Full checkpoint / device |
+| --- | --- | --- | --- | --- | --- |
+| Llama token | UINT8 row-wise table; UINT8 or INT16 activation | Both activation dtypes | Exact integer oracle, decode and multiple tokens | INT16 producer/first-layer input grids agree; first layer executes in FAKE_QUANTIZE | Unverified |
+| Qwen3-VL token | UINT8 row-wise table; INT16 activation; rotation off/on | Both rotation settings | Exact integer oracle and selected rows | Explicit host conversion to independently frozen decode grid; first layer executes in FAKE_QUANTIZE | Unverified |
+| Qwen3-VL multimodal | Same text table; FLOAT32 image input; fixed contiguous insertion span | Rotation off/on, including a separately exported zero-visual-row profile | FLOAT32 without rotation; INT16 with rotation; explicit-boundary oracle | Vision output grid inspected and FAKE_QUANTIZE vision run; host DQ to image input; explicit conversion to prefill input and FAKE_QUANTIZE first layer | Unverified |
+| Gemma4 scaled word embedding | UINT8 row-wise table; INT16 activation and quantized static scale | Existing real scaled-wrapper export regression | Exact explicit Q/DQ/MUL/Q oracle | Full decoder connection not covered here | Unverified |
+
+Qwen rotation tests install a deterministic nonidentity orthogonal Hadamard R1
+through production SpinQuant before PTQ. They preserve text activation Q/DQ,
+rotation input Q/DQ, quantized rotation-weight DQ, and rotation output Q. Multimodal
+insertion occurs after text Q/DQ and before rotation, so the combined text/image
+tensor is rotated once. The unrotated multimodal adapter has no final Quantize:
+its FLOAT32 output is intentional. Llama rotation is not covered by these tests.
+
+The multimodal adapter takes `input_ids: INT64[1,S]` and
+`image_embeds: FLOAT32[V,D]`, replacing the contiguous span beginning at its static
+`visual_start_idx`. It consumes every supplied visual row in order. It has no
+valid-count or padding-mask input: sentinel rows within V are inserted too. Sequence
+padding outside that span retains the text embedding. A zero-image input requires
+a separately exported V=0 profile, rather than changing an existing artifact's
+shape. Disjoint image spans and masked visual capacity are not this adapter's ABI.
+The vision artifact's INT16 features require host dequantization before this
+FLOAT32 image input.
+
+The reference NATIVE API returns raw integer codes for quantized outputs, without
+automatic output DQ or input Q. Tests inspect serialized qparams and compare raw
+codes and their explicitly dequantized values against a frozen pre-export oracle.
+They also compare with full-table DQ execution on tiny fixtures. Circle reference
+quantization rounds halfway values away from zero; WrapQ fake quantization uses
+ties-to-even. These contracts are compared separately; halfway differences are
+not hidden by a wider tolerance. Rotation uses the same FP32 operation order as
+the reference FC contract.
+
+Quantized decoder and vision arithmetic is not generally implemented in NATIVE
+mode. First-layer/vision FAKE_QUANTIZE execution establishes the tested handoff
+and shape contract, not native integer decoder support or full-model parity.
+The Llama bundle loader also rejects quantized stages in NATIVE mode, and the Qwen
+debug host runtime uses eager wrappers rather than executing these Circle files.
+Production host integration and ONERT/TV selected-row support remain separate work.
+
+Tied source parameters and frozen observer state are checked before and after
+export/execution; Llama also checks a separately exported LM head. Existing shared
+table/LM-head tests cover consumers within one graph. Qwen token and multimodal
+Circle files each contain their own UINT8 table; their independent runtimes load
+that storage separately. Selected-row execution avoids restored table copies
+within an artifact, not duplicated packaging across files.
 
 ## Regression coverage
 
@@ -151,5 +229,33 @@ execution. Relevant coverage includes:
   Concat/layout consumers and the unprotected retarget control.
 - [Reduced-range preservation](../test/quantization/passes/test_explicit_embedding_reduced_range.py):
   float DQ/clamp edges, saturation, pass idempotence and traversal-order independence.
+- [Float continuation legality](../test/quantization/passes/test_embedding_float_continuation.py):
+  insertion/layout/feature-transform execution, shared inputs, integer continuations,
+  idempotence, and nearby unsupported or ordinary quantized patterns.
 - [Selected-row execution](../test/unit_test/circle/runtime/test_rowwise_gather.py):
   row qparams, index bounds, sharing and loading/execution allocation checks.
+- Real [Llama](../test/quantization/recipes/test_llama_explicit_embedding_integration.py),
+  [Qwen token](../test/quantization/recipes/test_qwen_token_embedding_integration.py),
+  and [Qwen multimodal](../test/quantization/recipes/test_qwen_multimodal_embedding_integration.py)
+  adapter exports: frozen-grid oracles, rotation, insertion, stage handoff, and
+  loading/execution hooks that reject full embedding-table DQ/cache creation.
+
+Run the focused CPU coverage in an installed test environment:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest \
+  test.quantization.recipes.test_llama_explicit_embedding_integration \
+  test.quantization.recipes.test_qwen_token_embedding_integration \
+  test.quantization.recipes.test_qwen_multimodal_embedding_integration \
+  test.quantization.passes.test_explicit_embedding_export \
+  test.quantization.passes.test_explicit_embedding_retarget \
+  test.quantization.passes.test_explicit_embedding_reduced_range \
+  test.quantization.passes.test_embedding_float_continuation \
+  test.quantization.passes.test_preserve_embedding_quantization \
+  test.unit_test.circle.runtime.test_rowwise_gather
+```
+
+Allocation checks observe DQ kernel shapes, serialized constants, the selected-row
+plan and runtime caches; they do not measure every NumPy allocation or device RSS.
+The small oracle deliberately permits full-table DQ. Restoring a separate D-by-D
+rotation matrix is also distinct from restoring the V-by-D vocabulary table.

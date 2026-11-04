@@ -24,6 +24,7 @@ from typing import Any
 import torch
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.preserve_embedding_quantization import FLOAT_EMBEDDING
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
@@ -282,6 +283,14 @@ def _cat_handler(node, logger):
     """
     cat_args = CatArgs(*node.args, **node.kwargs)
     tensors = cat_args.tensors
+
+    # A CPU float layout may leave the embedding island at an integer concat.
+    # Convert that edge rather than assigning an integer grid to the float value.
+    if QPARAM_KEY in node.meta:
+        for inp in dict.fromkeys(tensors):
+            if inp.meta.get(FLOAT_EMBEDDING) and QPARAM_KEY not in inp.meta:
+                _insert_quantize_op_before(node, inp)
+        tensors = CatArgs(*node.args, **node.kwargs).tensors
 
     if any(QPARAM_KEY not in x.meta for x in tensors):
         return

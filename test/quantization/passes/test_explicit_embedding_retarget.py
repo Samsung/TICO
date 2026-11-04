@@ -164,10 +164,26 @@ class ExplicitEmbeddingRetargetTest(unittest.TestCase):
                 second_source = program.tensor(second.inputs[0]).quantization
                 second_grid = program.tensor(second.outputs[0]).quantization
                 assert first_grid is not None
-                assert second_source is not None
                 assert second_grid is not None
                 self.assertEqual(first_grid.scale, (0.25,))
-                self.assertEqual(second_source.scale, (0.25,))
+                if path == "direct":
+                    assert second_source is not None
+                    self.assertEqual(second_source.scale, (0.25,))
+                else:
+                    # Layouts in the CPU continuation remain real float.
+                    # Q_B consumes DQ_A through that layout, retaining Q_A's
+                    # rounding just as integer-domain requantization does.
+                    self.assertIsNone(second_source)
+                    producers = {
+                        index: op for op in program.operators for index in op.outputs
+                    }
+                    layout = producers[second.inputs[0]]
+                    self.assertEqual(
+                        layout.name, "RESHAPE" if path == "reshape" else "TRANSPOSE"
+                    )
+                    dequantize = producers[layout.inputs[0]]
+                    self.assertEqual(dequantize.name, "DEQUANTIZE")
+                    self.assertEqual(dequantize.inputs, first.outputs)
                 self.assertEqual(second_grid.scale, (float(np.float32(0.3)),))
                 self.assertTrue(runtime.rowwise_gather_plans)
 
