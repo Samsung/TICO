@@ -197,6 +197,15 @@ DecomposeFakeQuantizeTensorQParams
 This exposes quantization behavior in forms that later decomposition, qparam
 propagation, and Circle serialization understand.
 
+The tensor-qparams cachemask variant requires a compile-time constant
+`fake_quant_enabled` flag. The decomposition applies the flag's integer semantics:
+zero bypasses quantization, retaining floating tensor values and an all-true boolean
+mask; nonzero emits Q/DQ. Disabled sites do not require constant scale/zero-point
+values and do not assign a quantization domain to their inputs or outputs. Tuple
+projections are resolved by index, preserving output order and count. Runtime enable
+flags and live masks from enabled sites are rejected explicitly; export never drops
+a requested mask output. This contract is shared by all model families.
+
 ### 5.3 PyTorch decomposition
 
 TICO then calls `ExportedProgram.run_decompositions()` through a version-adapted helper.

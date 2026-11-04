@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import operator
 from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
@@ -39,65 +40,69 @@ from tico.utils.validate_args_kwargs import FakeQuantizePerTensorTQParamArgs
 
 
 def get_constant_from_tensor(
-    node: Union[torch.fx.Node, float], ep: ExportedProgram
-) -> Union[torch.fx.Node, float]:
-    """
-    There are some nodes that can do constant folding.
-      Case 1. With constant tensors
-      Case 2. With `torch.ones.` or `torch.zeros`
+    node: Union[torch.fx.Node, bool, int, float], ep: ExportedProgram
+) -> Union[bool, int, float]:
+    """Evaluate supported singleton constant expressions, then extract a scalar.
 
-    Please refer to the below `DecomposeFakeQuantizeTensorQParams` docs for the detailed explanations.
+    Keep tensor dtype and rank through multiplication, views and casts: converting
+    operands to Python scalars first loses integer overflow and scalar promotion.
+    Only the existing small expression vocabulary is supported. Evaluation uses
+    CPU singleton tensors rather than allocating on an exported device target.
     """
-    if isinstance(node, float):
-        return node
-    if is_buffer(ep, node):
-        buf = get_buffer(ep, node)
-        assert isinstance(buf, torch.Tensor)
-        return buf.item()
-    elif is_lifted_tensor_constant(ep, node):
-        lifted = get_lifted_tensor_constant(ep, node)
-        assert isinstance(lifted, torch.Tensor)
-        return lifted.item()
-    assert isinstance(node.target, torch._ops.OpOverload)
-    if node.target.__name__ == "mul.Tensor":
-        assert len(node.args) == 2
-        x = get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
-        y = get_constant_from_tensor(node.args[1], ep)  # type: ignore[arg-type]
-        return x * y  # type: ignore[operator]
-    if node.target.__name__ == "zeros.default":
-        assert len(node.args) == 1
-        assert node.args[0] == [1]
-        return 0
-    if node.target.__name__ == "ones.default":
-        assert len(node.args) == 1
-        assert node.args[0] == [1]
-        return 1
-    if node.target.__name__ == "view.default":
-        assert len(node.args) == 2
-        tensor, shape = node.args
-        assert shape == [-1]
-        return get_constant_from_tensor(tensor, ep)  # type: ignore[arg-type]
-    if node.target.__name__ == "_to_copy.default":
-        assert len(node.args) == 1
-        return get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
-    if node.target.__name__ == "to.dtype_layout":
-        return get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
-    if node.target.__name__ == "to.device":
-        return get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
-    if node.target.__name__ == "lift_fresh_copy.default":
-        assert len(node.args) == 1
-        assert isinstance(node.args[0], torch.fx.Node)
-        lifted_tensor: torch.fx.Node = node.args[0]
-        lifted_tensor_constants = ep.graph_signature.inputs_to_lifted_tensor_constants
-        assert lifted_tensor.name in lifted_tensor_constants
-        tensor_name = lifted_tensor_constants[lifted_tensor.name]
-        value = ep.constants[tensor_name].item()
-        return value
-    if node.target.__name__ in ["detach.default", "detach_.default"]:
-        assert len(node.args) == 1
-        return get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
 
-    raise RuntimeError(f"Not supported node {node.target.__name__}")
+    def resolve(value):
+        if isinstance(value, (bool, int, float)):
+            return value
+        assert isinstance(value, torch.fx.Node)
+        if is_buffer(ep, value):
+            tensor = get_buffer(ep, value)
+        elif is_lifted_tensor_constant(ep, value):
+            tensor = get_lifted_tensor_constant(ep, value)
+        else:
+            tensor = None
+        if tensor is not None:
+            assert isinstance(tensor, torch.Tensor)
+            if tensor.numel() != 1:
+                raise RuntimeError("Expected a singleton constant tensor.")
+            return tensor.detach().cpu()
+
+        assert isinstance(value.target, torch._ops.OpOverload)
+        target_name = value.target.__name__
+        if target_name == "mul.Tensor":
+            assert len(value.args) == 2
+            return value.target(resolve(value.args[0]), resolve(value.args[1]))
+        if target_name in ("zeros.default", "ones.default"):
+            assert len(value.args) == 1
+            shape = value.args[0]
+            assert shape in ([1], [])
+            return value.target(shape, dtype=value.meta["val"].dtype, device="cpu")
+        if target_name == "view.default":
+            assert len(value.args) == 2
+            source, shape = value.args
+            assert shape == [-1]
+            return resolve(source).view(shape)
+        if target_name in (
+            "_to_copy.default",
+            "to.dtype",
+            "to.dtype_layout",
+            "to.device",
+        ):
+            return resolve(value.args[0]).to(dtype=value.meta["val"].dtype)
+        if target_name == "lift_fresh_copy.default":
+            assert len(value.args) == 1
+            return resolve(value.args[0]).clone()
+        if target_name in ("detach.default", "detach_.default"):
+            assert len(value.args) == 1
+            return resolve(value.args[0]).detach()
+
+        raise RuntimeError(f"Not supported node {target_name}")
+
+    result = resolve(node)
+    if isinstance(result, torch.Tensor):
+        result = result.item()
+    if not isinstance(result, (bool, int, float)):
+        raise RuntimeError("Expected a real scalar constant.")
+    return result
 
 
 @trace_const_diff_on_pass
@@ -107,8 +112,13 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
     Decompose fake quantize with tensor QParams operator to quant/dequant operators.
     Otherwise, it can't be converted to the edge IR because fake quantize operator is not Aten Canonical.
 
-    As of now, we don't support the (de)quantize op that has scale/zp whose dtypes are tensors. They should be scalars.
-    But, fake quantize with tensor QParams can be decomposed only when those tensors can be removed by constant foldings.
+    Enabled fake quantization requires scale/zp tensors that can be constant-folded
+    to the scalar qparams accepted by the Q/DQ operators. Disabled cachemask sites
+    bypass Q/DQ without inspecting scale/zp.
+
+    Cachemask fake quantization also requires a constant enable flag. When disabled,
+    it clones the input and produces an all-true mask without applying Q/DQ.
+    Enabled mask outputs are unsupported and rejected rather than discarded.
 
     We consider below cases for now.
 
@@ -128,18 +138,15 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
         lift_fresh_copy_1 = torch.ops.aten.lift_fresh_copy.default(c_lifted_tensor_1);  c_lifted_tensor_1 = None
         lift_fresh_copy_2 = torch.ops.aten.lift_fresh_copy.default(c_lifted_tensor_2);  c_lifted_tensor_2 = None
         _fake_quantize_per_tensor_affine_cachemask_tensor_qparams = torch.ops.aten._fake_quantize_per_tensor_affine_cachemask_tensor_qparams.default(x, lift_fresh_copy, lift_fresh_copy_1, lift_fresh_copy_2, quant_min, quant_max);  x = lift_fresh_copy = lift_fresh_copy_1 = lift_fresh_copy_2 = None
-        getitem = _fake_quantize_per_tensor_affine_cachemask_tensor_qparams[0]
-        getitem_1 = _fake_quantize_per_tensor_affine_cachemask_tensor_qparams[1];  _fake_quantize_per_tensor_affine_cachemask_tensor_qparams = None
-        return (getitem, getitem_1)
+        getitem = _fake_quantize_per_tensor_affine_cachemask_tensor_qparams[0];  _fake_quantize_per_tensor_affine_cachemask_tensor_qparams = None
+        return (getitem,)
 
     [After pass]
 
     def forward(self, c_lifted_tensor_0, c_lifted_tensor_1, c_lifted_tensor_2, x):
-        lift_fresh_copy = torch.ops.aten.lift_fresh_copy.default(c_lifted_tensor_0);  c_lifted_tensor_0 = None
-        lift_fresh_copy_1 = torch.ops.aten.lift_fresh_copy.default(c_lifted_tensor_1);  c_lifted_tensor_1 = None
-        quantize_per_tensor_tensor = torch.ops.quantized_decomposed.quantize_per_tensor.tensor(x, lift_fresh_copy, lift_fresh_copy_1, quant_min, quant_max, dtype = ${torch.dtype});  x = None
-        dequantize_per_tensor_tensor = torch.ops.quantized_decomposed.dequantize_per_tensor.tensor(quantize_per_tensor_tensor, lift_fresh_copy, lift_fresh_copy_1, quant_min, quant_max, dtype = ${torch.dtype});  quantize_per_tensor_tensor = lift_fresh_copy = lift_fresh_copy_1 = None
-        return (dequantize_per_tensor_tensor,)
+        quantize_per_tensor_default = torch.ops.quantized_decomposed.quantize_per_tensor.default(x, 0.1, 0, 0, 255, dtype=torch.uint8)
+        dequantize_per_tensor_default = torch.ops.quantized_decomposed.dequantize_per_tensor.default(quantize_per_tensor_default, 0.1, 0, 0, 255, dtype=torch.uint8)
+        return (dequantize_per_tensor_default,)
 
     `s` and `zp` are tensors but they can be removed after constant foldings. When they are transformed to fx graph, they are
     lifted as a placeholder and become an argument of the `aten.lift_fresh_copy`.
@@ -191,6 +198,77 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
         gm = exported_program.graph_module
         g = gm.graph
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
+
+        # Validate live tuple uses before rewriting any cachemask operation.
+        # Dead masks and their dead consumers do not restrict inference export.
+        g.lint()
+        live_nodes: set[torch.fx.Node] = set()
+        for node in reversed(g.nodes):
+            if node.is_impure() or any(user in live_nodes for user in node.users):
+                live_nodes.add(node)
+
+        cachemask_outputs: dict[
+            torch.fx.Node,
+            tuple[bool, list[torch.fx.Node], list[torch.fx.Node]],
+        ] = {}
+        for node in g.nodes:
+            if (
+                node not in live_nodes
+                or node.op != "call_function"
+                or node.target
+                != torch.ops.aten._fake_quantize_per_tensor_affine_cachemask_tensor_qparams.default
+            ):
+                continue
+            assert len(node.args) == 6
+            try:
+                enabled = get_constant_from_tensor(node.args[3], exported_program)
+            except (AssertionError, AttributeError, RuntimeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"{node.target}: fake_quant_enabled must be a compile-time "
+                    "constant; runtime enable flags are not supported."
+                ) from exc
+            if not isinstance(enabled, (bool, int, float)):
+                raise RuntimeError(
+                    f"{node.target}: fake_quant_enabled must be a scalar "
+                    "compile-time constant."
+                )
+            try:
+                enabled = bool(int(enabled))
+            except (OverflowError, ValueError) as exc:
+                raise RuntimeError(
+                    f"{node.target}: fake_quant_enabled must be a finite "
+                    "scalar compile-time constant."
+                ) from exc
+
+            values: list[torch.fx.Node] = []
+            masks: list[torch.fx.Node] = []
+            for user in node.users:
+                if user not in live_nodes:
+                    continue
+                if not (
+                    user.op == "call_function"
+                    and user.target == operator.getitem
+                    and len(user.args) == 2
+                    and user.args[0] is node
+                    and isinstance(user.args[1], int)
+                    and user.args[1] in (0, 1, -2, -1)
+                    and not user.kwargs
+                ):
+                    raise RuntimeError(
+                        f"{node.target}: only tensor and mask getitem outputs "
+                        "are supported; direct tuple uses are not supported."
+                    )
+                if user.args[1] in (0, -2):
+                    values.append(user)
+                else:
+                    masks.append(user)
+            if enabled and masks:
+                raise RuntimeError(
+                    f"{node.target}: enabled fake-quantization mask output is "
+                    "not supported; export only the tensor output (index 0 or -2)."
+                )
+            cachemask_outputs[node] = (bool(enabled), values, masks)
+
         for node in gm.graph.nodes:
             if node.op != "call_function":
                 continue
@@ -198,19 +276,40 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                 node.target
                 == torch.ops.aten._fake_quantize_per_tensor_affine_cachemask_tensor_qparams.default
             ):
-                # tensor, scale, zero_p, fake_quant_enabled, quant_min, quant_max
-                # TODO Support `fake_quant_enabled`
-                assert len(node.args) == 6
+                if node not in cachemask_outputs:
+                    continue
+                enabled, values, masks = cachemask_outputs[node]
                 tensor, s, zp, _, quant_min, quant_max = node.args
+                if not enabled:
+                    if values:
+                        with g.inserting_before(node):
+                            cloned = create_node(
+                                g,
+                                torch.ops.aten.clone.default,
+                                args=(tensor,),
+                                origin=node,
+                            )
+                        cloned.meta.update(values[0].meta)
+                        for value in values:
+                            value.replace_all_uses_with(cloned)
+                    if masks:
+                        with g.inserting_before(node):
+                            mask = create_node(
+                                g,
+                                torch.ops.aten.full_like.default,
+                                args=(tensor, True),
+                                kwargs={"dtype": torch.bool},
+                                origin=node,
+                            )
+                        mask.meta.update(masks[0].meta)
+                        for mask_output in masks:
+                            mask_output.replace_all_uses_with(mask)
+                    modified = True
+                    continue
                 # Get constant tensors
                 ep = exported_program
                 s_value = get_constant_from_tensor(s, ep)
-                zp_value = get_constant_from_tensor(zp, ep)
-                # This op has one user: `getitem` for the output.
-                # TODO Investigate why the op is generated like this.
-                # node.users = {getitem: None}
-                get_item, *mask = node.users.keys()
-                # assert len(mask) == 0, "Not supported yet."
+                zp_value = int(get_constant_from_tensor(zp, ep))
                 quant_kwargs = {
                     **node.kwargs,
                     **{"dtype": get_quant_type(quant_min, quant_max)},
@@ -229,16 +328,9 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                         args=(quant, *quant.args[1:]),
                         kwargs=quant.kwargs,
                     )
-                    get_item.replace_all_uses_with(dequant, propagate_meta=True)
-                    # If `mask` can be graph output, which prevents `eliminate_dead_code()` from eliminating `mask`.
-                    # So, let's remove `mask` from the output.args first.
-                    # mask_user(output).args == (dequantize_per_tensor.tensor, mask)
-                    if mask:
-                        assert len(mask) == 1
-                        if len(mask[0].users) > 0:
-                            mask_user = list(mask[0].users.keys())[0]
-                            assert len(mask_user.args) == 1
-                            mask_user.args = ((mask_user.args[0][0],),)
+                    dequant.meta.update(values[0].meta)
+                    for value in values:
+                        value.replace_all_uses_with(dequant)
                 modified = True
             if (
                 node.target
@@ -254,7 +346,7 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                 # Get constant tensors
                 ep = exported_program
                 s_value = get_constant_from_tensor(s, ep)
-                zp_value = get_constant_from_tensor(zp, ep)
+                zp_value = int(get_constant_from_tensor(zp, ep))
                 quant_kwargs = {
                     **node.kwargs,
                     **{"dtype": get_quant_type(quant_min, quant_max)},
@@ -276,7 +368,7 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                     node.replace_all_uses_with(dequant, propagate_meta=True)
                 modified = True
 
-        gm.graph.eliminate_dead_code()
+        modified |= gm.graph.eliminate_dead_code()
         gm.graph.lint()
         gm.recompile()
 
