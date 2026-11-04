@@ -737,6 +737,12 @@ element-wise condition with the same shape, or a rank-1 condition selecting slic
 along the first dimension. Mixed scalar representations with one element in every
 input and output retain the declared output shape. `SELECT_V2` uses broadcasting.
 
+`STRIDED_SLICE` normalizes negative indices and clamps out-of-range bounds in the
+selected direction. With a negative stride, a begin before the first element
+selects an empty slice; an end before the first element permits the slice to include
+element zero. Begin/end masks override the explicit bounds, including those outside
+the input, with the first/last bound in the selected direction.
+
 | Group | Builtin operators |
 |---|---|
 | Arithmetic | `ADD`, `SUB`, `MUL`, `DIV`, `POW`, `MAXIMUM`, `MINIMUM` (broadcasting, fused activation) |
