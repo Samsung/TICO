@@ -334,7 +334,7 @@ class TestLlamaRoPEConsistency(unittest.TestCase):
             "attention_mask": prepared.mask(8, 8, 0, device="cpu"),
             "position_embeddings": (prepared.cos, prepared.sin),
         }
-        adapter = layer.as_export_module("prefill", return_kv=True)
+        adapter = layer.as_export_module("prefill")
         program = torch.export.export(adapter, (hidden,), kwargs=kwargs, strict=False)
         targets = [
             str(node.target)
@@ -347,8 +347,10 @@ class TestLlamaRoPEConsistency(unittest.TestCase):
                 target,
             )
         with torch.no_grad():
+            expected_outputs = adapter(hidden, **kwargs)
+            self.assertEqual(len(expected_outputs), 3)
             for actual, expected in zip(
-                program.module()(hidden, **kwargs), adapter(hidden, **kwargs)
+                program.module()(hidden, **kwargs), expected_outputs, strict=True
             ):
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
