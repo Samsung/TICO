@@ -84,59 +84,79 @@ class PreserveEmbeddingQuantization(PassBase):
                 continue
             seen.add(node)
             for user in node.users:
-                if user.op == "call_function" and _schema_name(user) in allowed:
+                if user.op == "call_function" and (
+                    _schema_name(user) in allowed
+                    or (
+                        _schema_name(user) == "aten::clamp"
+                        and user.meta.get("_embedding_range_clamp_")
+                    )
+                ):
                     user.meta[EXPLICIT_EMBEDDING] = True
                     pending.append(user)
 
-        for node in seen:
+        # Complete graph mutations first. A reduced-range Q inserts a float
+        # clamp between its input DQ and itself; classification must see this
+        # updated edge rather than depend on the order of membership-set visits.
+        for node in graph.nodes:
+            if node not in seen or _schema_name(node) != (
+                "quantized_decomposed::quantize_per_tensor"
+            ):
+                continue
+            args = parse_node_args(QuantizePerTensorArgs, node)
+            # Circle QUANTIZE expresses storage-range saturation. A reduced
+            # range needs a separate clamp, rather than silently widening it.
+            supported_range = (
+                args.dtype == torch.uint8
+                and (args.quant_min, args.quant_max) == (0, 255)
+            ) or (
+                args.dtype == torch.int16
+                and args.quant_min in (-32768, -32767)
+                and args.quant_max == 32767
+            )
+            if not supported_range:
+                raise RuntimeError(
+                    "Unsupported explicit embedding Quantize storage range"
+                )
+            if args.quant_min == -32767 and not args.tensor.meta.get(
+                "_embedding_range_clamp_"
+            ):
+                lower = float(
+                    np.float32(args.quant_min - args.zero_p) * np.float32(args.scale)
+                )
+                with graph.inserting_before(node):
+                    clamp = create_node(
+                        graph,
+                        torch.ops.aten.clamp.default,
+                        args=(args.tensor, lower, None),
+                        origin=node,
+                    )
+                clamp.meta["val"] = torch.empty_like(
+                    args.tensor.meta["val"], dtype=torch.float32
+                )
+                clamp.meta[EXPLICIT_EMBEDDING] = True
+                clamp.meta[FLOAT_EMBEDDING] = True
+                clamp.meta["_embedding_range_clamp_"] = True
+                clamp.meta.pop(QPARAM_KEY, None)
+                seen.add(clamp)
+                node.replace_input_with(args.tensor, clamp)
+            node.meta[QPARAM_KEY] = QuantParam(
+                scale=[args.scale],
+                zero_point=[args.zero_p],
+                dtype=str(args.dtype).removeprefix("torch."),
+            )
+
+        # Every generated clamp is now a member of the CPU island. Determine
+        # internal versus terminal DQs only after those new consumers exist.
+        for node in graph.nodes:
+            if node not in seen:
+                continue
             name = _schema_name(node)
             if name == "quantized_decomposed::quantize_per_tensor":
-                args = parse_node_args(QuantizePerTensorArgs, node)
-                # Circle QUANTIZE expresses storage-range saturation. A reduced
-                # range needs a separate clamp, rather than silently widening it.
-                supported_range = (
-                    args.dtype == torch.uint8
-                    and (args.quant_min, args.quant_max) == (0, 255)
-                ) or (
-                    args.dtype == torch.int16
-                    and args.quant_min in (-32768, -32767)
-                    and args.quant_max == 32767
-                )
-                if not supported_range:
-                    raise RuntimeError(
-                        "Unsupported explicit embedding Quantize storage range"
-                    )
-                if args.quant_min == -32767 and not args.tensor.meta.get(
-                    "_embedding_range_clamp_"
-                ):
-                    lower = float(
-                        np.float32(args.quant_min - args.zero_p)
-                        * np.float32(args.scale)
-                    )
-                    with graph.inserting_before(node):
-                        clamp = create_node(
-                            graph,
-                            torch.ops.aten.clamp.default,
-                            args=(args.tensor, lower, None),
-                            origin=node,
-                        )
-                    clamp.meta["val"] = torch.empty_like(
-                        args.tensor.meta["val"], dtype=torch.float32
-                    )
-                    clamp.meta[EXPLICIT_EMBEDDING] = True
-                    clamp.meta[FLOAT_EMBEDDING] = True
-                    clamp.meta["_embedding_range_clamp_"] = True
-                    node.replace_input_with(args.tensor, clamp)
-                node.meta[QPARAM_KEY] = QuantParam(
-                    scale=[args.scale],
-                    zero_point=[args.zero_p],
-                    dtype=str(args.dtype).removeprefix("torch."),
-                )
+                continue
             elif name == "quantized_decomposed::dequantize_per_tensor":
                 # Only DQs used inside the island are retained. Boundary DQs
                 # expose their Quantize's integer tensor to downstream NPU ops.
-                if any(user in seen for user in node.users):
-                    node.meta[FLOAT_EMBEDDING] = True
+                node.meta[FLOAT_EMBEDDING] = any(user in seen for user in node.users)
             else:
                 node.meta[FLOAT_EMBEDDING] = True
             if name == "aten::mul":

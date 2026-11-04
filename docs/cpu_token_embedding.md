@@ -152,6 +152,31 @@ retarget control:
 python -m unittest test.quantization.passes.test_explicit_embedding_retarget -v
 ```
 
+Reduced-range clamps are inserted in a separate graph-mutation phase before
+internal/terminal DQs are classified on the updated graph. Generated clamps join
+the CPU island immediately; subsequent discovery traverses only these owned
+`_embedding_range_clamp_` nodes. Their input/output remain FLOAT32 without
+qparams, so ordinary quantized-clamp legalization does not move them to Q_A's
+grid. Terminal DQ cleanup and general quantized-clamp legalization remain enabled.
+Repeated preservation must not add clamps or lose an internal DQ.
+
+```text
+Q_A -> DQ_A -> Clamp(float, reduced B range) -> Q_B
+```
+
+With INT16/zp=0, A scale=1, B scale=0.01/min=-32767, x=-1000 must produce
+code -32767. Losing DQ_A lets clamp legalization round the lower bound near
+-327.67 to integer -328 on A's grid. In the original real pipeline NATIVE rejected
+that quantized MAXIMUM; fake-quant evaluation exposed an implied B code -32768.
+The fixed file-roundtrip NATIVE path produces -32767 exactly. The regression also
+checks positive saturation, unclipped values, MUL, repeated pass execution and an
+adversarial membership-set iteration order. Only scheduling is controlled in that
+stress case; the production pass, legalization, serializer and kernels still run.
+
+```bash
+python -m unittest test.quantization.passes.test_explicit_embedding_reduced_range -v
+```
+
 ## Reproduction and evidence
 
 Use the installed CPU environment (measured with Python 3.12.14, Torch 2.13.0+cpu,
