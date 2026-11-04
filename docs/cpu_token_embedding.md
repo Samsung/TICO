@@ -195,10 +195,13 @@ existing dynamic-shape restrictions. Full Gemma4 checkpoint export, actual stage
 decoder calibration compatibility, large-file packaging, TV CPU/NPU execution and
 performance were not validated by these small CPU tests.
 
-Completed focused checks (all commands run with the repository CPU environment):
+## Validation results
+
+Completed checks (all commands run with the repository CPU environment):
 
 | Check | Result |
 |---|---|
+| `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./ccex test` at `934c059` | PASS: 4,849 run, 4,691 passed, 158 skipped, 0 failures/errors; exit 0; 1,202.159 s |
 | `python -m unittest test.quantization.passes.test_explicit_embedding_export test.unit_test.circle.runtime.test_rowwise_gather -q` | PASS, 15 tests |
 | `python -m unittest test.quantization.passes.test_preserve_embedding_quantization -q` | PASS, 4 tests |
 | `python -m unittest discover -s test/unit_test/circle/runtime -v` | PASS, 175 tests, no skips |
@@ -224,16 +227,16 @@ A direct benchmark-only mypy invocation reported four existing imported MX utili
 errors; the configured repository lint commands above passed.
 
 
-After the final structural-test updates, the full rerun
-`OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex test` was **INTERRUPTED** by the execution
-environment transition after 2,762 tests had started, with no failure logged. Its
-process exited without a unittest completion summary; it is not a passing full run.
-A completely green full-suite run after the last test-only update was not obtained.
-The completed broad run and the focused reruns above must be read separately.
-After reconnecting, the runtime suite passed again (175 tests), and the combined
-embedding, tied-weight, Gemma4 conditional, Llama saved-artifact, runtime-independence
-and HEAVY-folding regressions passed again (77 tests, no skips). The entire
-quantization-pass directory was also rerun:
-`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest discover -s test/quantization/passes -q`
-passed 181 tests with 2 existing skips. Together these recovery checks ran 433 tests:
-431 PASS, 2 SKIP, 0 FAIL. The newly added native embedding cases were not skipped.
+An earlier `OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex test` attempt was interrupted
+by an execution-environment transition after 2,762 tests had started. It was not
+counted as a pass. Recovery checks separately ran 433 tests (431 PASS, 2 SKIP,
+0 FAIL), including 175 runtime tests, 181 quantization-pass tests and 77 regressions.
+
+On 2026-11-04, the complete suite was rerun at implementation commit
+`934c05984115938839c5c2a50a7781c70cffd3ac` using the first command in the table.
+It completed normally with `Ran 4849 tests in 1202.159s`, `OK (skipped=158)` and
+exit code 0: **4,691 PASS, 158 SKIP, 0 FAIL/ERROR**. The skips include existing
+internal-only tests, unsupported-feature cases and opt-in large-artifact tests;
+they are not counted as passes. The newly added native embedding cases ran without
+skips. This completed full-suite result supersedes the earlier interruption and
+the previous statement that a clean full-suite pass had not been obtained.
