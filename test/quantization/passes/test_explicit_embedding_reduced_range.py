@@ -15,9 +15,9 @@
 """Reduced INT16 range keeps a float DQ/clamp edge throughout real export."""
 
 import importlib
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 from unittest.mock import patch
 
 import numpy as np

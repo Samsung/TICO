@@ -288,3 +288,41 @@ internal-only tests, unsupported-feature cases and opt-in large-artifact tests;
 they are not counted as passes. The newly added native embedding cases ran without
 skips. This completed full-suite result supersedes the earlier interruption and
 the previous statement that a clean full-suite pass had not been obtained.
+
+## Quantization-boundary follow-up validation
+
+This follow-up started from `605c260fb209cbfab911de9fe508c19d4f133ded` on
+`cpu-explicit-embedding`, with remote `https://github.com/mhs4670go/TICO.git`.
+The fetched remote branch matched that SHA; there were no uncommitted changes or
+additional post-review commits. Fix A is commit `8cbfe45`; fix B is `dd91abc`.
+Only backward propagation and embedding-preservation policy changed; the selected-row
+runtime, general Conv/FC/Concat policies and quantized-clamp legalization are unchanged.
+
+These are new executions for this follow-up, not reused earlier results:
+
+| Command/check | Result |
+|---|---|
+| New retarget regression before fix A | FAIL: 2 of 3 tests; direct native x=0.14 produced code 0 instead of 1 |
+| New reduced-range adverse-iteration case before fix B | FAIL: native quantized MAXIMUM rejected; fake-quant result implied B code -32768 |
+| Retarget regression plus existing backward/serializer controls | PASS, 21 tests |
+| Reduced-range regression plus existing explicit-embedding export/preservation | PASS, 13 tests |
+| `python -m unittest discover -s test/quantization/passes -q` | PASS: 190 run, 188 passed, 2 existing skips |
+| `python -m unittest discover -s test/unit_test/circle/runtime -q` | PASS, 175 tests |
+| Embedding/tied-weight/Gemma4/Llama saved-artifact/runtime-independence/HEAVY regressions | PASS, 77 tests |
+| `lintrunner -r 605c260 --output oneline` | PASS, UFMT/Pylint/mypy after correcting test import order |
+| `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./ccex test` at implementation commit `dd91abc45771fc3bf032d20a671f9da58a926941` | PASS: 4,858 run, 4,700 passed, 158 skipped, 0 failures/errors; exit 0; 1,198.780 s |
+
+The post-fix native numerical counterexamples produce code 1 for
+x=0.14/A=.25/B=.3, and code -32767 for x=-1000/A=1/B=.01/min=-32767.
+File round trips compare final integers exactly; positive saturation, unclipped
+values, layout paths, MUL, idempotence and adverse visitation ordering are covered.
+Existing selected-row loading/execution allocation hooks, index bounds, shared weight
+and LM-head-domain checks ran again. UINT8 row storage/qparams, real FLOAT32 internal
+DQ/clamp tensors and the final INT16 output contract remain intact.
+
+The final follow-up commit records these results and only normalizes test import
+order beyond the tested implementation commits. The 158 full-suite skips include
+internal-only and unsupported-feature cases and are not counted as passes. Newly
+added regression tests were not skipped. This is TICO reference CPU validation;
+onert is not installed and TV production runtime/device execution was not tested.
+No new performance benchmark or large-checkpoint/device download was required or run.
