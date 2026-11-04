@@ -23,6 +23,7 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
+from tico.quantization.passes.preserve_embedding_quantization import EXPLICIT_EMBEDDING
 from tico.quantization.passes.remove_weight_dequant_op import infer_dtype
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
@@ -43,6 +44,11 @@ def _retarget_affine_per_tensor_quantize(
 ) -> None:
     """Retarget a private Quantize boundary without changing its source domain."""
     if len(dst.users) != 1 or src not in dst.users:
+        return
+    # The CPU embedding island deliberately keeps a real float source. Its
+    # preserved Quantize nevertheless owns a calibrated rounding/clipping grid;
+    # a later consumer needs a separate conversion to change that grid.
+    if dst.meta.get(EXPLICIT_EMBEDDING):
         return
     # Folding has already proven this to be a genuine requantization when
     # its tensor input has a domain. Retargeting it would remove an earlier

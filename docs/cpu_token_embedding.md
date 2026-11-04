@@ -129,6 +129,29 @@ CPU float intermediates are never the NPU boundary output. Original shared codes
 row qparams and LM-head layout/domain are unchanged. There is no added table copy
 for embedding; existing package/file ownership is unchanged.
 
+## Preserved boundaries through later passes
+
+A Quantize marked `EXPLICIT_EMBEDDING` is an immutable numerical boundary,
+even though its CPU source is FLOAT32 and intentionally has no qparams.
+`PropagateQParamBackward` must not retarget its arguments or qparam metadata
+from a downstream Concat, Reshape or Permute. Generic unprotected private
+quantizers retain the existing retarget optimization. A differing consumer grid
+uses the existing legalization to insert a separate requantization:
+
+```text
+GATHER(float) -> Q_A -> [optional layout] -> Quantize(A -> B) -> Concat[B]
+```
+
+For example, x=0.14, INT16/zp=0, A scale=0.25 and B scale=0.3 gives code 1
+through both boundaries, but code 0 if Q_A is replaced by Q_B. The regression
+uses actual production passes, default O1 serialization, a Circle file round trip
+and NATIVE CPU execution, including reshape/permute paths and a non-embedding
+retarget control:
+
+```bash
+python -m unittest test.quantization.passes.test_explicit_embedding_retarget -v
+```
+
 ## Reproduction and evidence
 
 Use the installed CPU environment (measured with Python 3.12.14, Torch 2.13.0+cpu,
