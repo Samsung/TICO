@@ -14,6 +14,8 @@
 
 """Keep row-wise embedding domain conversions explicit during quant folding."""
 
+import copy
+
 import numpy as np
 import torch
 from torch.export import ExportedProgram
@@ -22,6 +24,7 @@ from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.validate_args_kwargs import (
+    DequantizePerTensorArgs,
     LinearArgs,
     parse_node_args,
     QuantizePerTensorArgs,
@@ -78,6 +81,83 @@ def _is_local_square_linear(node, user_inputs, tables):
         and shape[0] == shape[1]
         and shape[1] == args.input.meta["val"].shape[-1]
     )
+
+
+def _restore_integer_fc_layouts(
+    graph: torch.fx.Graph, region: set[torch.fx.Node]
+) -> None:
+    """Commute per-tensor DQ past layouts on ordinary FC input edges only."""
+    integer_layouts: dict[torch.fx.Node, torch.fx.Node] = {}
+
+    def integer_source(node: torch.fx.Node) -> torch.fx.Node | None:
+        if node in integer_layouts:
+            return integer_layouts[node]
+        if _schema_name(node) == "quantized_decomposed::dequantize_per_tensor":
+            dq = parse_node_args(DequantizePerTensorArgs, node)
+            quantize = dq.input
+            if _schema_name(
+                quantize
+            ) != "quantized_decomposed::quantize_per_tensor" or not quantize.meta.get(
+                EXPLICIT_EMBEDDING
+            ):
+                return None
+            q = parse_node_args(QuantizePerTensorArgs, quantize)
+            if (dq.scale, dq.zero_point, dq.quant_min, dq.quant_max, dq.dtype) != (
+                q.scale,
+                q.zero_p,
+                q.quant_min,
+                q.quant_max,
+                q.dtype,
+            ):
+                return None
+            return quantize
+        if node not in region or _schema_name(node) not in _FLOAT_LAYOUTS:
+            return None
+        source = node.args[0]
+        assert isinstance(source, torch.fx.Node)
+        integer_input = integer_source(source)
+        if integer_input is None:
+            return None
+        with graph.inserting_before(node):
+            layout = graph.node_copy(
+                node, lambda argument: integer_input if argument is source else argument
+            )
+        layout.meta.pop(EXPLICIT_EMBEDDING, None)
+        layout.meta.pop(FLOAT_EMBEDDING, None)
+        layout.meta[QPARAM_KEY] = copy.deepcopy(integer_input.meta[QPARAM_KEY])
+        layout.meta["val"] = torch.empty_like(
+            node.meta["val"], dtype=getattr(torch, layout.meta[QPARAM_KEY].dtype)
+        )
+        integer_layouts[node] = layout
+        return layout
+
+    for consumer in list(graph.nodes):
+        if _schema_name(consumer) != "aten::linear" or consumer in region:
+            continue
+        args = parse_node_args(LinearArgs, consumer)
+        if args.input not in region or _schema_name(args.input) not in _FLOAT_LAYOUTS:
+            continue
+        # A genuine float FC also lies outside the bounded feature-transform
+        # region. Only an existing weight and output quantization contract
+        # identifies the ordinary quantized consumer whose input we restore.
+        if _schema_name(args.weight) not in {
+            "quantized_decomposed::dequantize_per_tensor",
+            "quantized_decomposed::dequantize_per_channel",
+        } or not (
+            QPARAM_KEY in consumer.meta
+            or any(
+                _schema_name(user) == "quantized_decomposed::quantize_per_tensor"
+                for user in consumer.users
+            )
+        ):
+            continue
+        restored = integer_source(args.input)
+        if restored is None:
+            raise RuntimeError(
+                "Cannot recover the ordinary FC input domain through an embedding "
+                "float layout; an explicit input Quantize boundary is required."
+            )
+        consumer.replace_input_with(args.input, restored)
 
 
 class PreserveEmbeddingQuantization(PassBase):
@@ -219,12 +299,33 @@ class PreserveEmbeddingQuantization(PassBase):
                 else:
                     preserve_float_operand(weight)
 
-        # A genuine float side input can also feed an independent quantized
-        # consumer. Keep that consumer's Q as a terminal boundary instead of
-        # letting folding assign its grid to the shared float producer.
-        for node in graph.nodes:
-            if node in seen or not node.meta.get(FLOAT_EMBEDDING):
-                continue
+        # Complete the layout-only closure of genuine float side inputs before
+        # collecting their independent quantizers. Sibling creation order must
+        # not decide whether a later layout absorbs a Q/DQ's integer grid.
+        float_sides = {
+            node
+            for node in graph.nodes
+            if node not in seen and node.meta.get(FLOAT_EMBEDDING)
+        }
+        pending = list(float_sides)
+        while pending:
+            node = pending.pop()
+            for user in node.users:
+                value = user.meta.get("val")
+                if (
+                    _schema_name(user) in _FLOAT_LAYOUTS
+                    and isinstance(value, torch.Tensor)
+                    and value.is_floating_point()
+                    and user not in float_sides
+                ):
+                    user.meta[EXPLICIT_EMBEDDING] = True
+                    user.meta[FLOAT_EMBEDDING] = True
+                    float_sides.add(user)
+                    pending.append(user)
+
+        # Keep each branch's original Q as a boundary instead of assigning its
+        # grid to the shared float producer or any intervening float layout.
+        for node in float_sides:
             for user in node.users:
                 if _schema_name(user) != "quantized_decomposed::quantize_per_tensor":
                     continue
@@ -323,6 +424,7 @@ class PreserveEmbeddingQuantization(PassBase):
                             )
                         operand.meta[EXPLICIT_EMBEDDING] = True
                         operand.meta[FLOAT_EMBEDDING] = True
+        _restore_integer_fc_layouts(graph, seen)
         graph.lint()
         exported_program.graph_module.recompile()
         return PassResult(False)

@@ -113,6 +113,21 @@ are diagnosed as unsupported. Membership in the region alone does not turn an
 integer Quantize output or integer layout into float. Forward and backward
 propagation respect marked float values instead of inventing qparams. Independent
 quantized consumers of a shared float side input retain their own explicit Q.
+This includes separate branches that reach Q through a chain of float layouts.
+The side-input layout closure is classified before those terminal quantizers are
+collected, preserving each branch's original grid independently of traversal or
+consumer creation order.
+
+When an embedding float layout feeds an ordinary quantized FC outside the CPU
+region, its input must retain the earlier activation domain A. The rewrite requires
+the FC's existing weight DQ and output quantization contract; genuine float FC
+consumers retain their float inputs. For a layout-only
+path from `DQ_A(Q_A)`, the FC edge uses the same layouts applied to Q_A's integer
+codes. A shared float consumer keeps the original DQ/layout path. This commuting
+rewrite adds no rounding or clipping and leaves the FC weight and output domain B
+intact; B is not an input-domain fallback. The integer layout copies have genuine
+integer inputs and A qparams, while the original float layouts remain qparam-free.
+The rewrite does not infer an input domain through arithmetic or mixed concat.
 
 A bias-free, constant square linear feature transform can continue the CPU region.
 Its weight DQ and input/output quantizers remain explicit, allowing the existing
@@ -232,6 +247,11 @@ execution. Relevant coverage includes:
 - [Float continuation legality](../test/quantization/passes/test_embedding_float_continuation.py):
   insertion/layout/feature-transform execution, shared inputs, integer continuations,
   idempotence, and nearby unsupported or ordinary quantized patterns.
+- [Ordinary FC boundaries](../test/quantization/passes/test_embedding_layout_consumer_boundary.py)
+  and [shared float layout branches](../test/quantization/passes/test_embedding_shared_float_layout.py):
+  serialized input domains, shared consumers, layout chains, independent Q grids,
+  and repeated preservation/folding. Ordinary quantized FC values use
+  FAKE_QUANTIZE; its existing NATIVE unsupported diagnostic remains in force.
 - [Selected-row execution](../test/unit_test/circle/runtime/test_rowwise_gather.py):
   row qparams, index bounds, sharing and loading/execution allocation checks.
 - Real [Llama](../test/quantization/recipes/test_llama_explicit_embedding_integration.py),
@@ -251,6 +271,8 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest \
   test.quantization.passes.test_explicit_embedding_retarget \
   test.quantization.passes.test_explicit_embedding_reduced_range \
   test.quantization.passes.test_embedding_float_continuation \
+  test.quantization.passes.test_embedding_layout_consumer_boundary \
+  test.quantization.passes.test_embedding_shared_float_layout \
   test.quantization.passes.test_preserve_embedding_quantization \
   test.unit_test.circle.runtime.test_rowwise_gather
 ```
