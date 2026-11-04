@@ -69,7 +69,7 @@ class _SharedLayoutProjection(_ProjectionAfterLayout):
         super().__init__(kind, "chain")
         self.fc_first = fc_first
 
-    def project(self, value):
+    def linear(self, value):
         if self.kind == "shared":
             weight = self.weight()
         else:
@@ -82,9 +82,12 @@ class _SharedLayoutProjection(_ProjectionAfterLayout):
                 255,
                 torch.uint8,
             )
-        projected = torch.ops.aten.linear.default(
+        return torch.ops.aten.linear.default(
             value, weight, self.bias if self.kind == "biased" else None
         )
+
+    def project(self, value):
+        projected = self.linear(value)
         return torch.fake_quantize_per_tensor_affine(projected, 0.125, 0, -32768, 32767)
 
     def float_branch(self, value):
@@ -100,6 +103,50 @@ class _SharedLayoutProjection(_ProjectionAfterLayout):
             combined = self.float_branch(value)
             projected = self.project(value)
         return projected, combined
+
+
+class _OutputLayoutProjection(_SharedLayoutProjection):
+    def __init__(
+        self, output_path="permute", shared=False, fc_first=False, reduced_range=False
+    ):
+        super().__init__("nonsquare", fc_first)
+        self.path = "reshape"
+        self.output_path = output_path
+        self.shared = shared
+        self.reduced_range = reduced_range
+        if reduced_range:
+            self.scale[2] = 2048
+
+    def lookup(self, ids):
+        if not self.reduced_range:
+            return super().lookup(ids)
+        value = torch.nn.functional.embedding(ids, self.weight())
+        return torch.fake_quantize_per_tensor_affine(
+            value, 0.25, 0, -32767, 32767
+        ).reshape(-1, 4)
+
+    def project(self, value):
+        projected = self.linear(value)
+        if self.output_path == "permute":
+            projected = projected.permute(1, 0)
+        elif self.output_path == "reshape":
+            projected = projected.reshape(3, -1)
+        elif self.output_path == "chain":
+            projected = projected.permute(1, 0).reshape(1, 3, -1)
+        return torch.fake_quantize_per_tensor_affine(projected, 0.125, 0, -32768, 32767)
+
+    def forward(self, ids):
+        if self.shared:
+            return super().forward(ids)
+        return self.project(self.lookup(ids))
+
+
+class _OutputArithmeticProjection(_OutputLayoutProjection):
+    def project(self, value):
+        projected = self.linear(value).permute(1, 0)
+        return torch.fake_quantize_per_tensor_affine(
+            projected * 2.0, 0.125, 0, -32768, 32767
+        )
 
 
 class _ReducedRangeProjection(_ProjectionAfterLayout):
@@ -155,12 +202,24 @@ def _policy_signature(exported):
 def _selected_after_layout(module, ids):
     # Retain the original embedding Q_A/DQ_A before applying any layout.
     value = _lookup_float(module, ids)
+    if getattr(module, "reduced_range", False):
+        value = np.maximum(value, np.float32(-32767 * 0.25))
     if module.path == "reshape":
         return value.reshape(-1, 4)
     if module.path == "permute":
         return value.transpose(1, 0, 2)
     if module.path == "chain":
         return value.transpose(1, 0, 2).reshape(-1, 4)
+    return value
+
+
+def _output_layout(value, path):
+    if path == "permute":
+        return value.transpose(1, 0)
+    if path == "reshape":
+        return value.reshape(3, -1)
+    if path == "chain":
+        return value.transpose(1, 0).reshape(1, 3, -1)
     return value
 
 
@@ -179,6 +238,7 @@ def _projection_oracle(module, ids):
     result = np.sum(value[..., None, :] * weight, axis=-1, dtype=np.float32)
     if module.kind == "biased":
         result += module.bias.numpy()
+    result = _output_layout(result, getattr(module, "output_path", "direct"))
     return _q(result, 0.125).astype(np.float32) * np.float32(0.125)
 
 
@@ -243,12 +303,176 @@ class EmbeddingLayoutConsumerBoundaryTest(unittest.TestCase):
         self.assertTrue(runtime.rowwise_gather_plans)
         return fake
 
+    def _native_selected_output(self, runtime, ids, selected_output):
+        partial = extract_by_tensor_indices(
+            runtime.program.document, to_tensors=(selected_output,)
+        )
+        branch = CircleReferenceRuntime(
+            CircleDocument.from_bytes(partial.document.to_bytes())
+        )
+        position = partial.source_boundary.outputs.index(selected_output)
+        return branch.run((ids.numpy(),), mode=ExecutionMode.NATIVE).outputs[position]
+
+    def _assert_output_layout_contract(self, runtime, module, ids):
+        self._assert_projection_contract(runtime, module)
+        fc = next(
+            op for op in runtime.program.operators if op.name == "FULLY_CONNECTED"
+        )
+        producers = {
+            index: op for op in runtime.program.operators for index in op.outputs
+        }
+        current = runtime.program.outputs[0]
+        while current != fc.outputs[0]:
+            layout = producers[current]
+            self.assertIn(layout.name, ("RESHAPE", "TRANSPOSE"))
+            for index in (layout.inputs[0], *layout.outputs):
+                tensor = runtime.program.tensor(index)
+                self.assertEqual(tensor.dtype, np.int16)
+                assert tensor.quantization is not None
+                self.assertEqual(tensor.quantization.scale, (0.125,))
+                self.assertEqual(tensor.quantization.zero_point, (0,))
+            current = layout.inputs[0]
+        self.assertEqual(runtime.program.tensor(fc.inputs[0]).shape, (ids.numel(), 4))
+        self.assertEqual(runtime.program.tensor(fc.outputs[0]).shape, (ids.numel(), 3))
+        expected_float = _projection_oracle(module, ids.numpy())
+        self.assertEqual(runtime.output_tensors[0].shape, expected_float.shape)
+        expected_input = (
+            _selected_after_layout(module, ids.numpy()) / np.float32(0.25)
+        ).astype(np.int16)
+        actual_input = self._native_selected_output(runtime, ids, fc.inputs[0])
+        np.testing.assert_array_equal(actual_input, expected_input)
+        self.assertEqual(actual_input.dtype, np.int16)
+        if module.reduced_range:
+            self.assertIn(-32767, expected_input)
+            self.assertEqual(
+                sum(op.name == "MAXIMUM" for op in runtime.program.operators), 1
+            )
+
+    def _assert_policy_idempotent(self, module, ids):
+        exported = torch.export.export(module.eval(), (ids,))
+        DecomposeFakeQuantize().call(exported)
+        FillMetaVal().call(exported)
+        policy = PreserveEmbeddingQuantization()
+        policy.call(exported)
+        original = _policy_signature(exported)
+        policy.call(exported)
+        self.assertEqual(_policy_signature(exported), original)
+        FoldQuantOps().call(exported)
+        folded = _policy_signature(exported)
+        policy.call(exported)
+        self.assertEqual(_policy_signature(exported), folded)
+
     def test_reshape_nonsquare_projection_keeps_original_integer_input_grid(self):
         module = _ProjectionAfterLayout("nonsquare").eval()
         ids = torch.tensor([[3, 0]])
         runtime = self._runtime(module, (ids,))
         self._assert_projection_contract(runtime, module)
         self._assert_numerical_contract(runtime, module, ids)
+
+    def test_output_permute_quantize_preserves_ordinary_fc_input_grid(self):
+        cases = [
+            (path, False, False, False)
+            for path in ("direct", "permute", "reshape", "chain")
+        ] + [
+            ("permute", True, False, False),
+            ("permute", True, True, False),
+            ("permute", False, False, True),
+        ]
+        shared_results = []
+        for path, shared, fc_first, reduced in cases:
+            with self.subTest(
+                path=path, shared=shared, fc_first=fc_first, reduced=reduced
+            ):
+                module = _OutputLayoutProjection(path, shared, fc_first, reduced).eval()
+                ids = torch.tensor([[2 if reduced else 3, 0]])
+                original = {
+                    name: value.clone() for name, value in module.named_buffers()
+                }
+                runtime = self._runtime(module, (ids,))
+                self._assert_output_layout_contract(runtime, module, ids)
+                fake = self._assert_numerical_contract(runtime, module, ids)
+                if shared:
+                    selected = _selected_after_layout(module, ids.numpy())
+                    expected = _q(np.concatenate((selected, selected), axis=-1), 0.125)
+                    np.testing.assert_array_equal(
+                        fake.outputs[1], expected.astype(np.float32) * np.float32(0.125)
+                    )
+                    concat = next(
+                        op
+                        for op in runtime.program.operators
+                        if op.name == "CONCATENATION"
+                    )
+                    for index in (*concat.inputs, *concat.outputs):
+                        tensor = runtime.program.tensor(index)
+                        self.assertEqual(tensor.dtype, np.float32)
+                        self.assertIsNone(tensor.quantization)
+                    np.testing.assert_array_equal(
+                        self._native_selected_output(
+                            runtime, ids, runtime.program.outputs[1]
+                        ),
+                        expected,
+                    )
+                    shared_results.append(fake.outputs)
+                for name, value in module.named_buffers():
+                    self.assertTrue(torch.equal(value, original[name]))
+                self._assert_policy_idempotent(module, ids)
+        self.assertEqual(len(shared_results), 2)
+        for first, second in zip(shared_results[0], shared_results[1]):
+            np.testing.assert_array_equal(first, second)
+
+    def test_output_quantize_search_stops_at_arithmetic(self):
+        exported = torch.export.export(
+            _OutputArithmeticProjection().eval(), (torch.tensor([[3, 0]]),)
+        )
+        DecomposeFakeQuantize().call(exported)
+        FillMetaVal().call(exported)
+        linear = next(
+            node
+            for node in exported.graph.nodes
+            if node.target == torch.ops.aten.linear.default
+        )
+        original_input = linear.args[0]
+        original_graph = str(exported.graph)
+        policy = PreserveEmbeddingQuantization()
+        policy.call(exported)
+        # A Q after arithmetic does not define the earlier FC's output grid.
+        self.assertIs(linear.args[0], original_input)
+        self.assertEqual(linear.args[0].meta["val"].dtype, torch.float32)
+        self.assertNotIn(QPARAM_KEY, linear.args[0].meta)
+        self.assertNotIn(QPARAM_KEY, linear.meta)
+        self.assertEqual(str(exported.graph), original_graph)
+        first = _policy_signature(exported)
+        policy.call(exported)
+        self.assertEqual(_policy_signature(exported), first)
+
+        module = _OutputArithmeticProjection().eval()
+        ids = torch.tensor([[3, 0]])
+        runtime = self._runtime(module, (ids,))
+        fc = next(
+            op for op in runtime.program.operators if op.name == "FULLY_CONNECTED"
+        )
+        for index in (fc.inputs[0], fc.outputs[0]):
+            tensor = runtime.program.tensor(index)
+            self.assertEqual(tensor.dtype, np.float32)
+            self.assertIsNone(tensor.quantization)
+        self.assertEqual(runtime.program.tensor(fc.inputs[1]).dtype, np.uint8)
+        selected = _selected_after_layout(module, ids.numpy())
+        weight = module.projection.numpy().astype(np.float32)
+        weight -= module.projection_zero.numpy()[:, None].astype(np.float32)
+        weight *= module.projection_scale.numpy()[:, None]
+        projected = np.sum(selected[..., None, :] * weight, axis=-1, dtype=np.float32)
+        expected = _q(projected.T * np.float32(2), 0.125)
+        np.testing.assert_array_equal(
+            runtime.run((ids.numpy(),), mode=ExecutionMode.FAKE_QUANTIZE).outputs[0],
+            expected.astype(np.float32) * np.float32(0.125),
+        )
+        # This legacy mixed FC/MUL graph has a fake-quantize reference; it
+        # does not gain native quantized FC arithmetic from the layout fix.
+        with self.assertRaisesRegex(
+            UnsupportedCircleOperatorError, "backend-defined integer arithmetic"
+        ) as raised:
+            runtime.run((ids.numpy(),), mode=ExecutionMode.NATIVE)
+        self.assertIn("FULLY_CONNECTED", str(raised.exception))
 
     def test_genuine_float_nonsquare_projection_keeps_native_float_contract(self):
         module = _FloatProjectionAfterLayout().eval()
@@ -362,20 +586,9 @@ class EmbeddingLayoutConsumerBoundaryTest(unittest.TestCase):
         for kind in ("nonsquare", "biased", "shared"):
             for fc_first in (False, True):
                 with self.subTest(kind=kind, fc_first=fc_first):
-                    exported = torch.export.export(
-                        _SharedLayoutProjection(kind, fc_first).eval(), (ids,)
+                    self._assert_policy_idempotent(
+                        _SharedLayoutProjection(kind, fc_first), ids
                     )
-                    DecomposeFakeQuantize().call(exported)
-                    FillMetaVal().call(exported)
-                    policy = PreserveEmbeddingQuantization()
-                    policy.call(exported)
-                    original = _policy_signature(exported)
-                    policy.call(exported)
-                    self.assertEqual(_policy_signature(exported), original)
-                    FoldQuantOps().call(exported)
-                    folded = _policy_signature(exported)
-                    policy.call(exported)
-                    self.assertEqual(_policy_signature(exported), folded)
 
     def test_reduced_range_clamp_is_not_duplicated_or_lost_on_integer_layout(self):
         module = _ReducedRangeProjection().eval()

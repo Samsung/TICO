@@ -121,9 +121,15 @@ consumer creation order.
 When an embedding float layout feeds an ordinary quantized FC outside the CPU
 region, its input must retain the earlier activation domain A. The rewrite requires
 the FC's existing weight DQ and output quantization contract; genuine float FC
-consumers retain their float inputs. For a layout-only
-path from `DQ_A(Q_A)`, the FC edge uses the same layouts applied to Q_A's integer
-codes. A shared float consumer keeps the original DQ/layout path. This commuting
+consumers retain their float inputs. The output contract can be a per-tensor Q
+after a reshape/permute chain: these layouts already propagate B back to the FC
+in the existing pipeline. The search follows only their data-input edges and
+stops at arithmetic, concat, DQ and other operations. Output slice/slice_copy are
+excluded because backward domain propagation does not support them yet, even
+though they remain supported CPU input/side layouts. This detection establishes
+that an output contract exists; it never supplies the input domain A. For a
+layout-only path from `DQ_A(Q_A)`, the FC edge uses the same layouts applied to
+Q_A's integer codes. A shared float consumer keeps the original DQ/layout path. This commuting
 rewrite adds no rounding or clipping and leaves the FC weight and output domain B
 intact; B is not an input-domain fallback. The integer layout copies have genuine
 integer inputs and A qparams, while the original float layouts remain qparam-free.
@@ -250,7 +256,8 @@ execution. Relevant coverage includes:
 - [Ordinary FC boundaries](../test/quantization/passes/test_embedding_layout_consumer_boundary.py)
   and [shared float layout branches](../test/quantization/passes/test_embedding_shared_float_layout.py):
   serialized input domains, shared consumers, layout chains, independent Q grids,
-  and repeated preservation/folding. Ordinary quantized FC values use
+  FC output quantization through nonidentity permute/reshape, and repeated
+  preservation/folding. Ordinary quantized FC values use
   FAKE_QUANTIZE; its existing NATIVE unsupported diagnostic remains in force.
 - [Selected-row execution](../test/unit_test/circle/runtime/test_rowwise_gather.py):
   row qparams, index bounds, sharing and loading/execution allocation checks.

@@ -83,6 +83,43 @@ def _is_local_square_linear(node, user_inputs, tables):
     )
 
 
+def _has_fc_output_quantization(node: torch.fx.Node) -> bool:
+    """Find a per-tensor output contract through supported unary layouts.
+
+    Backward propagation carries output domains through reshape and permute.
+    Slice/slice_copy are CPU continuations, but do not support that backward
+    propagation yet. Arithmetic and multi-input operations end this search.
+    """
+    if QPARAM_KEY in node.meta:
+        return True
+    pending = [node]
+    visited = set()
+    while pending:
+        producer = pending.pop()
+        if producer in visited:
+            continue
+        visited.add(producer)
+        for user in producer.users:
+            name = _schema_name(user)
+            if name not in {
+                "aten::reshape",
+                "aten::permute",
+                "quantized_decomposed::quantize_per_tensor",
+            }:
+                continue
+            source = (
+                user.args[0]
+                if user.args
+                else user.kwargs.get(getattr(user.target, "_schema").arguments[0].name)
+            )
+            if source is not producer:
+                continue
+            if name == "quantized_decomposed::quantize_per_tensor":
+                return True
+            pending.append(user)
+    return False
+
+
 def _restore_integer_fc_layouts(
     graph: torch.fx.Graph, region: set[torch.fx.Node]
 ) -> None:
@@ -143,13 +180,7 @@ def _restore_integer_fc_layouts(
         if _schema_name(args.weight) not in {
             "quantized_decomposed::dequantize_per_tensor",
             "quantized_decomposed::dequantize_per_channel",
-        } or not (
-            QPARAM_KEY in consumer.meta
-            or any(
-                _schema_name(user) == "quantized_decomposed::quantize_per_tensor"
-                for user in consumer.users
-            )
-        ):
+        } or not _has_fc_output_quantization(consumer):
             continue
         restored = integer_source(args.input)
         if restored is None:
