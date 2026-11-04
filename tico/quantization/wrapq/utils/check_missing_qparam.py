@@ -17,6 +17,11 @@ from typing import Optional, Set
 import torch
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.preserve_embedding_quantization import (
+    EXPLICIT_EMBEDDING,
+    FLOAT_EMBEDDING,
+)
+
 from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
 
@@ -100,6 +105,19 @@ def check_missing_qparam(
     ignore_targets = ignore_targets or set()
     graph = exported_program.graph_module.graph
 
+    # Explicit CPU operators carry semantic indices and qparam operands, which
+    # are data about the quantized table rather than quantized activations.
+    semantic_operands: set[torch.fx.Node] = set()
+    for node in graph.nodes:
+        if node.op != "call_function":
+            continue
+        schema = getattr(getattr(node.target, "_schema", None), "name", "")
+        if node.meta.get(EXPLICIT_EMBEDDING):
+            if schema == "aten::embedding":
+                semantic_operands.add(node.args[1])
+            elif schema == "quantized_decomposed::dequantize_per_channel":
+                semantic_operands.update(node.args[1:3])
+
     missing: list[torch.fx.Node] = []
     quantized_nodes = 0
     fp_nodes = 0
@@ -109,6 +127,8 @@ def check_missing_qparam(
             if node.op == "call_function" and node.target in ignore_targets:
                 continue
 
+            if node in semantic_operands or node.meta.get(FLOAT_EMBEDDING):
+                continue
             if _is_qparam_buffer_node(node):
                 continue
 

@@ -145,15 +145,20 @@ class FoldQuantOpsEmbeddingTest(unittest.TestCase):
         self.assertNotIn(QPARAM_KEY, embedding.meta)
         self.assertNotIn(QPARAM_KEY, quantizer.meta)
 
-    def _assert_quantized_embedding_circle(self, converted):
+    def _assert_quantized_embedding_circle(self, converted, *, explicit=False):
         document = CircleDocument.from_bytes(converted.circle_binary)
         self.assertTrue(document.verify().ok)
         program = CircleReferenceRuntime(document).program
-        self.assertEqual([operator.name for operator in program.operators], ["GATHER"])
-        gather = program.operators[0]
-        weight = program.tensor(gather.inputs[0])
+        self.assertEqual(
+            [operator.name for operator in program.operators],
+            ["DEQUANTIZE", "GATHER", "QUANTIZE"] if explicit else ["GATHER"],
+        )
+        gather = program.operators[1 if explicit else 0]
+        weight = program.tensor(
+            program.operators[0].inputs[0] if explicit else gather.inputs[0]
+        )
         indices = program.tensor(gather.inputs[1])
-        output = program.tensor(gather.outputs[0])
+        output = program.tensor(program.outputs[0] if explicit else gather.outputs[0])
         self.assertEqual(indices.tensor_type, circle.TensorType.TensorType.INT64)
         self.assertFalse(indices.is_quantized)
         self.assertFalse(indices.is_constant)
@@ -165,6 +170,9 @@ class FoldQuantOpsEmbeddingTest(unittest.TestCase):
         # the quantized data tensors are integer tensors too.
         for tensor in program.tensors:
             if tensor.index == indices.index:
+                continue
+            if explicit and tensor.tensor_type == circle.TensorType.TensorType.FLOAT32:
+                self.assertFalse(tensor.is_quantized)
                 continue
             with self.subTest(tensor=tensor.name):
                 self.assertTrue(tensor.is_quantized_integer, tensor.describe())
@@ -216,7 +224,7 @@ class FoldQuantOpsEmbeddingTest(unittest.TestCase):
         weight_scale, weight_zero = quantized.wrapped.weight_obs.compute_qparams()
         act_scale, act_zero = quantized.wrapped.act_out_obs.compute_qparams()
         weight, output = self._assert_quantized_embedding_circle(
-            tico.convert(quantized, (tokens,))
+            tico.convert(quantized, (tokens,)), explicit=True
         )
         self.assertEqual(weight.tensor_type, circle.TensorType.TensorType.UINT8)
         self.assertEqual(output.tensor_type, circle.TensorType.TensorType.UINT8)

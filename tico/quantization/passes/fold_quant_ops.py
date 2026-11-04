@@ -24,6 +24,10 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
+from tico.quantization.passes.preserve_embedding_quantization import (
+    EXPLICIT_EMBEDDING,
+    FLOAT_EMBEDDING,
+)
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.mx.dtypes import (
@@ -263,8 +267,8 @@ class FoldQuantOps(PassBase):
        Any Quantize that became orphaned because *all* its DQs were folded
        is deleted automatically.
 
-    The first Q-DQ annotates a tensor domain, including embedding outputs and
-    shared producers. FX value dtypes are intermediate metadata, not the final
+    Outside explicitly preserved CPU embedding islands, the first Q-DQ annotates
+    a tensor domain, including non-target embedding outputs and shared producers. FX value dtypes are intermediate metadata, not the final
     quantized Circle ABI; no float input bridges are needed for these folds.
 
     Discover an existing source domain through slices, views, and same-domain
@@ -306,6 +310,14 @@ class FoldQuantOps(PassBase):
             if q_args.zero_p != dq_args.zero_point:
                 continue
             if q_args.dtype != dq_args.dtype:
+                continue
+
+            if dq.meta.get(EXPLICIT_EMBEDDING):
+                for user in list(dq.users):
+                    if not dq.meta.get(FLOAT_EMBEDDING) or not user.meta.get(
+                        EXPLICIT_EMBEDDING
+                    ):
+                        user.replace_input_with(dq, q)
                 continue
 
             _inherit_qparam_from_view_chain(op)

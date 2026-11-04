@@ -798,6 +798,14 @@ execution mode instead of by guessing backend arithmetic:
   operators it listed and rejected the others; the runtime classifies every supported
   operator as either value-preserving or requantizing.
 
+For explicit constant UINT8 row-wise (axis 0) `DEQUANTIZE -> GATHER` lookups,
+the CPU runtime prepares a selected-row plan once. It restores only requested
+rows, leaving subsequent Q/DQ/MUL boundaries intact and the full-table DQ virtual
+(even in traces). Unsafe target sharing or unsupported row contracts are diagnosed;
+`enable_rowwise_gather=False` is an explicit small-model oracle option. See
+[CPU token embedding](../../docs/cpu_token_embedding.md) for legality, memory evidence,
+and external-runtime limitations.
+
 `tico.quantization.evaluation.evaluate(..., BACKEND.CIRCLE)` uses the fake-quantize
 mode through `CircleExecutor`.
 
@@ -811,8 +819,9 @@ dynamic sizes.
 
 ### Debugging
 
-- `CircleReferenceRuntime(...).run(inputs, trace=True)` keeps every tensor value in
-  `tensor_values`, keyed by tensor index; combine it with
+- `CircleReferenceRuntime(...).run(inputs, trace=True)` keeps every materialized tensor
+  value in `tensor_values`, keyed by tensor index (virtual full-table DQ is omitted);
+  combine it with
   `tico-circle inspect --tensors` to map indices to names.
 - Error messages include the operator index, builtin name and code, operator version,
   and every operand's index, name, dtype, shape, and constant/activation role.

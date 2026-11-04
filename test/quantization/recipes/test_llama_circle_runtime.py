@@ -463,11 +463,19 @@ class TestFakeQuantizedLlamaCircleRuntime(unittest.TestCase):
         document = CircleDocument.load(embedding_path)
         self.assertTrue(document.verify().ok)
         program = CircleReferenceRuntime(document).program
-        self.assertEqual([operator.name for operator in program.operators], ["GATHER"])
-        gather = program.operators[0]
-        weight = program.tensor(gather.inputs[0])
+        self.assertEqual(
+            [operator.name for operator in program.operators],
+            ["DEQUANTIZE", "GATHER", "QUANTIZE"],
+        )
+        dequantize, gather, quantize = program.operators
+        weight = program.tensor(dequantize.inputs[0])
         indices = program.tensor(gather.inputs[1])
-        output = program.tensor(gather.outputs[0])
+        selected = program.tensor(gather.outputs[0])
+        self.assertEqual(gather.inputs[0], dequantize.outputs[0])
+        self.assertEqual(quantize.inputs[0], selected.index)
+        self.assertEqual(selected.dtype, np.dtype(np.float32))
+        self.assertFalse(selected.is_quantized)
+        output = program.tensor(quantize.outputs[0])
         self.assertTrue(weight.is_constant)
         self.assertTrue(weight.is_quantized_integer)
         self.assertTrue(output.is_quantized_integer)
@@ -509,9 +517,8 @@ class TestFakeQuantizedLlamaCircleRuntime(unittest.TestCase):
         self.assertEqual(runtime.execution_mode, "fake_quantize")
         tokens = self.prompt.copy()
         actual = runtime.prefill(tokens)
-        # The reference GATHER passes dequantized table values through. Its
-        # serialized activation domain is validated above; literal PyTorch
-        # fake-quant parity is not the NPU artifact contract.
+        # Explicit DQ/GATHER/Q preserves the calibrated embedding grid.
+        # Compare cached decoding against independently recomputed full prefixes.
         for token in (7, 9):
             self.assertEqual(actual.dtype, np.float32)
             self.assertEqual(actual.shape, (1, 32))

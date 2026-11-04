@@ -278,10 +278,16 @@ class TestGemma4ConditionalCapabilities(unittest.TestCase):
                 self.assertEqual(
                     output_tensor.quantization.zero_point, (int(snapshot.zero_point),)
                 )
-                self.assertFalse(
+                self.assertTrue(
                     {"QUANTIZE", "DEQUANTIZE"}
-                    & {op.name for op in runtime.program.operators}
+                    <= {op.name for op in runtime.program.operators}
                 )
+                self.assertTrue(runtime.rowwise_gather_plans)
+                for op in runtime.program.operators:
+                    if op.name == "GATHER":
+                        selected = runtime.program.tensor(op.outputs[0])
+                        self.assertEqual(selected.dtype, np.dtype(np.float32))
+                        self.assertIsNone(selected.quantization)
                 actual = runtime.run(
                     [self.ids.numpy()], mode=ExecutionMode.FAKE_QUANTIZE
                 ).outputs[0]

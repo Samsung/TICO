@@ -73,6 +73,9 @@ from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
 )
 from tico.quantization.passes.legalize_quantized_clamp import LegalizeQuantizedClamp
+from tico.quantization.passes.preserve_embedding_quantization import (
+    PreserveEmbeddingQuantization,
+)
 from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBackward
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropPass
@@ -328,6 +331,7 @@ def _prepare_exported_program(
     if enable_quantization:
         quantize_graph = PassManager(
             passes=[
+                PreserveEmbeddingQuantization(),
                 FoldQuantOps(),
                 RemoveWeightDequantOp(),
                 PropagateQParamForward(),

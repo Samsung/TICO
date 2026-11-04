@@ -46,6 +46,14 @@ class DequantizePerTensorDefaultVisitor(NodeVisitor):
         input_tensor: circle.Tensor.TensorT = self.graph.get_tensor(input)
 
         assert input_tensor.quantization
+        quantization = input_tensor.quantization
+        if list(quantization.scale) != [args.scale] or list(quantization.zeroPoint) != [
+            args.zero_point
+        ]:
+            raise RuntimeError("DEQUANTIZE arguments disagree with input qparams")
+        assert (
+            self.graph.get_tensor(node).quantization is None
+        ), "DEQUANTIZE output must be float"
 
         inputs = [input]
         outputs = [node]

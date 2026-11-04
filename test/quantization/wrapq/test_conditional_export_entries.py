@@ -115,8 +115,7 @@ class TestLlamaConditionalExportEntry(unittest.TestCase):
         tokens = torch.tensor([[1, 2, 3]])
         model(input_ids=tokens, use_cache=False, return_dict=False)
         embedding = model.model.wrapped.embed_tokens.wrapped
-        # Matching explicit imported domains make GATHER's reference semantics
-        # directly comparable with eager lookup without changing export policy.
+        # Imported grids survive state restoration and explicit DQ/GATHER/Q export.
         embedding.weight_obs.load_qparams(
             torch.full((16,), 0.125), torch.full((16,), 113, dtype=torch.int32)
         )
@@ -132,9 +131,17 @@ class TestLlamaConditionalExportEntry(unittest.TestCase):
             document = CircleDocument.from_bytes(exported.circle_binary)
             self.assertTrue(document.verify().ok)
             runtime = CircleReferenceRuntime(document)
-            self.assertEqual([op.name for op in runtime.program.operators], ["GATHER"])
-            gather = runtime.program.operators[0]
-            weight = runtime.program.tensor(gather.inputs[0])
+            self.assertEqual(
+                [op.name for op in runtime.program.operators],
+                ["DEQUANTIZE", "GATHER", "QUANTIZE"],
+            )
+            dequantize, gather, quantize = runtime.program.operators
+            self.assertEqual(gather.inputs[0], dequantize.outputs[0])
+            self.assertEqual(quantize.inputs[0], gather.outputs[0])
+            selected = runtime.program.tensor(gather.outputs[0])
+            self.assertEqual(selected.dtype, np.dtype("float32"))
+            self.assertIsNone(selected.quantization)
+            weight = runtime.program.tensor(dequantize.inputs[0])
             self.assertTrue(weight.is_constant)
             assert weight.quantization is not None
             self.assertEqual((weight.dtype, weight.shape), (np.dtype("uint8"), (16, 8)))

@@ -620,7 +620,8 @@ domain. It does not change the export contract above.
 Wrapper fake-quantization calls mark tensor quantization domains and calibration
 points. After decomposition, their Q-DQ pairs are an intermediate representation
 of those domains; they do not require physical Circle `QUANTIZE` and `DEQUANTIZE`
-operators at every marked point. For a producer with no existing qparams,
+operators at every marked point. Outside explicitly preserved CPU embedding islands,
+for a producer with no existing qparams,
 `FoldQuantOps` converts its first quantization point into tensor metadata:
 
 ```text
@@ -655,46 +656,40 @@ observable even when storage dtypes match.
 MX propagation also checks axis remapping and shared-exponent block membership;
 layouts that regroup blocks are not interchangeable domains.
 
-For NPU-targeted quantized Circle export, every runtime data tensor belonging to
-the quantized graph must carry valid qparams. Semantic index, shape, and control
-values, such as token IDs and gather indices, are excluded. Accidental FLOAT32
-activation or weight islands violate this contract. Multiple consumers alone do
-not justify preserving a producer as float: annotate the producer's quantization
-domain and retain explicit requantization where a downstream domain differs. This
-is an export contract, not a general rejection policy for mixed-precision models.
+For NPU-targeted quantized tensors, valid qparams remain required. Semantic index,
+shape, and control values are excluded. An intentional CPU float island instead
+uses real FLOAT32 tensors without qparams, with explicit conversion operators at
+its integer boundaries; it must not use fabricated qparams to satisfy NPU checks.
 
-For example, embedding table and activation qparams describe independent tensor
-domains. Interpreting fake quantization as the following physical topology is
-incorrect for this contract:
+For constant UINT8 rank-two row-wise embedding tables (axis 0),
+`PreserveEmbeddingQuantization` runs before folding and retains this canonical
+Circle representation:
 
 ```text
-weight -> DQ -> FLOAT GATHER -> Q
+Wq [row qparams] -> DEQUANTIZE -> GATHER(float, integer IDs) -> Q_A
+  -> DQ_A -> MUL(float, fake-quantized scale) -> Q_B [original integer ABI]
 ```
 
-The intended representation is:
+The optional MUL continuation keeps each intermediate Q/DQ boundary. The shared
+weight is not scaled or modified, and FC consumers keep its original integer
+codes and qparams. GATHER remains a selection operation, with no implicit
+weight-to-activation domain conversion. Explicitly marked float tensors and
+semantic operands are checked separately from quantized NPU data tensors.
 
-```text
-quantized embedding table [W-qparam]    integer token/index tensor
-                  |                              |
-                  +------------ GATHER ----------+
-                                  |
-                quantized embedding output [A-qparam]
-```
+The built-in reference CPU runtime prepares the serialized constant-DQ/GATHER
+pattern once, gathering integer rows and corresponding row qparams before restoring
+only the selected FP32 values. The full-table DQ is virtual at execution, including
+tracing. Existing Q/DQ/MUL kernels still execute on selected tensors and preserve
+rounding/clipping. Default O1 and explicit HEAVY constant folding keep this dynamic
+lookup table compressed. Unsupported target plans receive a diagnostic rather
+than a hidden full-table restoration.
 
-The table owns W-qparam and the GATHER output directly owns A-qparam. Neither
-weight dequantization nor output quantization should remain merely to preserve a
-FLOAT32 lookup.
-
-The Circle reference runtime treats `GATHER` as value-preserving. Its native
-mode copies table codes and cannot execute independent table/output dtypes, such
-as an INT8 table with UINT8 output, because output dtype validation rejects the
-copied INT8 result. Fake-quantize mode forwards dequantized table values without
-rounding to the output activation grid, so it need not reproduce PyTorch's
-explicit output fake quantization. Structural Circle verification does not
-establish target execution support; these independent embedding domains require
-target-backend validation. Reference parity is separate from the NPU Circle ABI
-and must not be restored by introducing a float island. See the
-[reference execution modes](../tico/circle/README.md#quantized-models).
+Other quantized export policies are unchanged. In particular, legacy non-target
+embedding artifacts with distinct integer input/output domains are not proof of
+native reference support: GATHER does not requantize codes. Structural verification,
+native reference execution, fake-quant evaluation, and external backend validation
+remain separate checks. See [CPU embedding contracts and reproduction](cpu_token_embedding.md)
+and [reference execution modes](../tico/circle/README.md#quantized-models).
 
 ### 10.3 Recipe architecture
 

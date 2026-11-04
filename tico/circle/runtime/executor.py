@@ -53,6 +53,7 @@ from tico.circle.runtime.program import (
     tensor_type_name,
 )
 from tico.circle.runtime.quantization import dequantize_array, fake_quantize_array
+from tico.circle.runtime.rowwise_gather import plan_rowwise_gathers
 
 
 @dataclass(frozen=True)
@@ -78,8 +79,14 @@ class CircleReferenceRuntime:
         subgraph_index: int = 0,
         registry: KernelRegistry | None = None,
         verify: bool = True,
+        enable_rowwise_gather: bool = True,
     ) -> None:
-        """Parse and prepare a Circle model for execution."""
+        """Parse and prepare a Circle model for execution.
+
+        ``enable_rowwise_gather=False`` is a diagnostic oracle option: explicit
+        table DQ executes normally and may allocate the full float table. The
+        default prepares selected-row plans once from the serialized contracts.
+        """
 
         if isinstance(circle, CircleProgram):
             program = circle
@@ -97,6 +104,16 @@ class CircleReferenceRuntime:
         self._dequantized_constants: dict[int, np.ndarray] = {}
         self._last_use = self._compute_last_use()
         self.prepare()
+        self.rowwise_gather_plans, self._virtual_dequantizes = (
+            plan_rowwise_gathers(program) if enable_rowwise_gather else ({}, set())
+        )
+        self._rowwise_only_constants = {
+            plan.weight_index for plan in self.rowwise_gather_plans.values()
+        }
+        for operator in program.operators:
+            if operator.index not in self._virtual_dequantizes:
+                self._rowwise_only_constants.difference_update(operator.inputs)
+        self._rowwise_only_constants.difference_update(program.outputs)
 
     # ------------------------------------------------------------------ setup
     def prepare(self) -> None:
@@ -214,7 +231,9 @@ class CircleReferenceRuntime:
         have the serialized dtype (FLOAT32 for quantized inputs in fake-quantize
         mode). ``trace=True`` additionally keeps every intermediate tensor value
         in ``tensor_values``; by default values are released once their last
-        consumer has executed.
+        consumer has executed. The virtual full-table DEQUANTIZE of a selected-row
+        plan is never materialized, including in trace mode, and is absent from
+        ``tensor_values``.
         """
 
         program = self.program
@@ -240,10 +259,16 @@ class CircleReferenceRuntime:
         for tensor in program.tensors:
             if tensor.constant is None:
                 continue
-            values[tensor.index] = self._constant_value(tensor, mode)
+            values[tensor.index] = (
+                tensor.constant
+                if tensor.index in self._rowwise_only_constants
+                else self._constant_value(tensor, mode)
+            )
 
         output_set = set(program.outputs)
         for operator in program.operators:
+            if operator.index in self._virtual_dequantizes:
+                continue
             self._execute_operator(operator, values, mode)
             if trace:
                 continue
@@ -294,12 +319,17 @@ class CircleReferenceRuntime:
                 f"No reference kernel is registered for builtin operator "
                 f"{operator.name}.\n  at {program.describe_operator(operator)}"
             )
+        plan = self.rowwise_gather_plans.get(operator.index)
         operands: list[np.ndarray | None] = []
         for position, tensor_index in enumerate(operator.inputs):
             if tensor_index == OPTIONAL_INDEX:
                 operands.append(None)
                 continue
-            value = values.get(tensor_index)
+            value = (
+                program.tensor(plan.weight_index).constant
+                if plan is not None and position == 0
+                else values.get(tensor_index)
+            )
             if value is None:
                 raise CircleRuntimeValidationError(
                     f"Operator {operator.index} ({operator.name}) input {position} "
@@ -326,7 +356,7 @@ class CircleReferenceRuntime:
         )
         try:
             with np.errstate(all="ignore"):
-                results = kernel(context)
+                results = plan.execute(context) if plan is not None else kernel(context)
         except CircleRuntimeError:
             raise
         except (
