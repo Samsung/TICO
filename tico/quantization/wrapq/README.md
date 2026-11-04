@@ -119,6 +119,12 @@ policies do not inherit this per-channel restriction. `fake_quant(x)` always kee
 the lower-level check using `x.device`, including after a model move or direct
 observer call. Passing a compatibility check is not proof of CUDA/NPU support.
 
+Per-channel affine observers accept channel axes in `[-rank, rank)` consistently
+through calibration, frozen execution and export. The affine observer normalizes
+negative axes for the native fake-quantization call; the configured signed axis
+remains part of the frozen policy and checkpoint schema. Invalid axes and mismatched
+channel extents still reject before execution.
+
 ---
 
 ## 3. Wrapper Design
