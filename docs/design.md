@@ -688,7 +688,7 @@ Other quantized export policies are unchanged. In particular, legacy non-target
 embedding artifacts with distinct integer input/output domains are not proof of
 native reference support: GATHER does not requantize codes. Structural verification,
 native reference execution, fake-quant evaluation, and external backend validation
-remain separate checks. See [CPU embedding contracts and reproduction](cpu_token_embedding.md)
+remain separate checks. See [CPU embedding design and contracts](cpu_token_embedding.md)
 and [reference execution modes](../tico/circle/README.md#quantized-models).
 
 ### 10.3 Recipe architecture

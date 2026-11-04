@@ -1,328 +1,155 @@
-# Explicit quantization for CPU token embedding
+# CPU token embedding with explicit quantization
 
-This implementation connects PyTorch export to serialized Circle and the built-in
-CPU **reference runtime in NATIVE mode**. It does not implement an ONERT/TV kernel.
-See [design](design.md), [runtime contracts](../tico/circle/README.md), and
-[large-buffer ownership](large_circle_export.md) for the existing architecture.
+Token embedding can execute on the CPU before passing quantized activations to a
+decoder. A vocabulary table is large, while each invocation usually selects only a
+small subset of its rows. The implementation therefore separates the graph's
+quantization semantics from the CPU's memory and execution strategy.
 
-## Baselines and observed contracts
+This document describes constant UINT8 tables with asymmetric per-row quantization
+(axis 0) and a per-tensor INT16 output boundary. Quantization settings remain part
+of the model's configuration and calibration contract. See the
+[system design](design.md#10-quantization-integration) for the conversion pipeline
+and [reference execution modes](../tico/circle/README.md#quantized-models) for
+runtime arithmetic and backend support.
 
-Work started at `f8e9b036cbd91cc030ae5e8e712d6a9702cf2e87`, clean branch `work`;
-implementation branch: `cpu-explicit-embedding`. There was no local `main`.
-The configured origin is the `mhs4670go/TICO` fork, with stale `origin/main`
-`376800445abeee2004a6fd761daf9077c17b4df2`. Live Samsung/TICO main was queried
-separately: `42779caf9229ac176b47bfa6e341de84b07e8622`. The checkout is an ancestor of live main, which is four commits ahead. A fetched
-`upstream-review/main` comparison found the relevant embedding wrappers, passes,
-serializers, executor and heavy folding unchanged. Main adds unrelated fixes for
-reverse STRIDED_SLICE bounds, scalar pow promotion, negative affine channel axes
-and fake-quant enable flags (axis-0 enabled embedding is unaffected). No merge/reset
-was performed.
+## Why the graph contains explicit conversions
 
-Code inspected, rather than assuming all configuration defaults:
-
-* `wrapq/wrappers/gemma4/quant_text_scaled_word_embedding.py` explicitly sets
-  weight PER_CHANNEL_ASYMM, axis 0. `obs_embedding`, `obs_embed_scale`, and
-  `obs_act_out` are per-tensor. Its QUANT forward is weight FQ → embedding →
-  embedding FQ → MUL(fake-quantized scale) → output FQ. IDs remain integer indices.
-  Generic `wrappers/nn/quant_embedding.py` similarly forces row-wise weight observation.
-* The `gemma4_quantize.yaml` preset selects UINT8 embedding/LM head and INT16
-  activation; the bare Gemma4 builder defaults to INT16 weights. UINT8 is therefore
-  a configuration contract, not an unconditional model-family property.
-  Affine snapshots use 1D row scales and INT32 zero points; imported explicit
-  graphs can also supply INT64 zero points. Circle stores FP32 scales/INT64 zps.
-* `gemma4/embedding_scale_fusion.py` operates before quantization, only on fresh
-  FP PLE `embed_tokens_per_layer`, and rejects shared storage. The ordinary tied
-  token table is not modified by that transform or by this change.
-* Before this change, `FoldQuantOps` folded Q/DQ into the embedding output's
-  qparams, then `RemoveWeightDequantOp` removed the table DQ. Thus the serializer
-  emitted UINT8 GATHER with independent activation-domain output, hiding conversion.
-* `ConstPropPass` already skips weight DQ and caches constant quantization by
-  storage identity plus qparams. `circle_serializer.py` preserves compatible aliases
-  within an artifact using storage identity, layout and qparams. Separate staged
-  token-embedding and LM-head files already have separate physical buffers.
-  Logical tying does not imply cross-file sharing or a common observer.
-* Staged token embedding has IDs `[1,S]`, output `[1,S,H]`; decoder input has its
-  own frozen `obs_act_in` contract. This change preserves existing exported output
-  qparams. It does not assert that independently calibrated stage boundaries agree.
-
-## Export and execution
-
-A detached baseline worktree also reproduced actual serialized INT16-activation
-behavior: `GATHER(UINT8,INT64)->INT16; MUL(INT16,INT16)->INT16`. NATIVE execution
-failed at GATHER with a UINT8-result/INT16-contract dtype error. A UINT8 Q_A to
-INT16 Q_B scaled fixture failed baseline export itself in dtype-mismatch legalization.
-Neither invalid baseline was used as the benchmark oracle. The changed fixture
-serialized `DEQUANTIZE,GATHER,QUANTIZE,DEQUANTIZE,DEQUANTIZE(scale),MUL,QUANTIZE`
-and prepared one selected-row plan.
-
-The narrow structural export policy matches constant UINT8 rank-2 per-channel
-axis-0 DQ feeding `aten.embedding` (range 0..255). Other Conv/FC/Concat and legacy
-non-target embedding policies are unchanged.
+GATHER selects values; it does not convert between quantization domains. Copying
+integer codes from a row-quantized table into an activation tensor with different
+qparams would change their meaning. Weight dequantization and activation
+quantization must therefore appear as separate Circle operations:
 
 ```text
-Before (implicit domains):
-  Wq[UINT8,row qparams] -> GATHER[activation qparams] -> quantized MUL -> INT16
-
-After (ordinary standard Circle operators):
-  Wq -> DEQUANTIZE -> GATHER(float) -> Q_A -> DQ_A
-       -> MUL(float, DQ(quantized scale constant)) -> Q_B[INT16]
-
-CPU prepared plan:
-  Gather integer rows + corresponding row scale/zp
-       -> selected FP32 rows -> Q_A -> DQ_A -> float MUL -> Q_B
+Wq: UINT8 [V, D], row scales and zero points
+  -> DEQUANTIZE
+  -> GATHER(integer token IDs)
+  -> Q_A -> DQ_A
+  -> optional MUL(dequantized, fake-quantized scale)
+  -> Q_B: per-tensor INT16
 ```
 
-`PreserveEmbeddingQuantization` runs before Q/DQ folding. It marks only the
-structurally identified CPU island, keeps its internal rounding/clipping boundaries,
-and leaves the terminal Q as the existing integer ABI. The marker is export policy,
-not runtime metadata. A shared table's FC connection still uses original integer
-codes and qparams. `check_missing_qparam` recognizes these real float tensors and
-semantic index/qparam operands; it does not invent float qparams or disable NPU
-checks globally. The per-channel DQ serializer now attaches qparams to the integer
-**input**, decodes zp storage correctly, and leaves the output truly float.
-Default Circle O1 BASIC does not fold DQ; an additional HEAVY-folding guard protects
-the row-wise DQ feeding dynamic GATHER from becoming a full-table float constant.
+The MUL and its surrounding boundaries depend on the exported model. When no
+post-processing is needed, the embedding's activation Quantize is the output
+boundary. Qparams belong to integer tensors; the internal FLOAT32 tensors carry
+no qparams. Token IDs are unquantized indices.
 
-The runtime builds its plan once from loaded Circle tensors, operator options,
-constants and qparams, independent of wrapper names/model family. It skips the
-virtual full-table DQ and executes `(float32(Wq[ids]) - zp[ids]) * scale[ids]`.
-Existing Q, DQ, MUL and bounds validation are reused. Q/MUL are not algebraically
-folded into the weight or fused across quantization boundaries.
+Standard Circle operators make domain changes visible to optimizers, validators
+and other runtimes. They also let the CPU reuse the existing quantization and
+arithmetic kernels without defining a special embedding opcode or extending
+GATHER's semantics.
 
-Supported optimized runtime pattern:
+## Why the CPU restores selected rows
 
-* constant UINT8 rank-2 table, static shape, row-wise finite positive FP32 scales
-  and UINT8-range zero points, axis 0 and exactly V entries;
-* GATHER axis 0 (or equivalent -2), `batchDims=0`, unquantized INT32/INT64 IDs of
-  any rank (including empty/dynamic sequence dimensions), FLOAT32 output;
-* DQ has only compatible GATHER consumers, and its full result is not a graph
-  output. Multiple GATHERs can share that virtual DQ. Other consumers of the raw
-  integer weight remain valid and are untouched.
-
-Unsupported target qparams, batch dimensions, shared full-DQ outputs or non-GATHER
-DQ consumers produce an explicit unsupported diagnostic; no hidden full-table
-fallback occurs. Export diagnoses a fake-quantized dynamic MUL side operand explicitly (static
-scale is required for this island). Generic per-tensor/non-UINT8/non-target graphs retain their normal
-execution. `enable_rowwise_gather=False` is an explicit diagnostic/oracle option for
-small models, not an automatic fallback. Trace mode omits the virtual full DQ.
-
-Loading keeps UINT8 storage plus O(V) qparam arrays. Execution allocates selected
-integer/FP32 rows and O(number of IDs) selected qparams, not full FP32/INT16/scaled
-copies of W. The native path never uses the fake-quant constant cache. In fake mode
-an exclusive selected-row table also avoids that cache; other consumers such as FC
-can still require the existing full-weight fake-quant cache. That mode is not the
-native embedding memory claim.
-
-## Arithmetic and ABI
-
-Reference Q uses FP32 division, half-away-from-zero rounding and storage-range
-saturation. WrapQ PyTorch fake quant uses ties-to-even. Exact ties can therefore
-legitimately differ between those two arithmetic contracts; no tolerance hides this.
-Optimized versus full-DQ **native** execution is exact, including ties and saturation.
-The deterministic Gemma4 WrapQ sample avoids ties and matches dequantized native
-output exactly. The default INT16 range is `[-32768,32767]`. For explicitly supplied
-`quant_min=-32767`, export adds a standard float MAXIMUM before Q to preserve that
-restricted lower bound; it does not misuse Circle min/max calibration metadata.
-
-The original output shape/layout, scale/zp, dtype and clipping range are retained.
-CPU float intermediates are never the NPU boundary output. Original shared codes,
-row qparams and LM-head layout/domain are unchanged. There is no added table copy
-for embedding; existing package/file ownership is unchanged.
-
-## Preserved boundaries through later passes
-
-A Quantize marked `EXPLICIT_EMBEDDING` is an immutable numerical boundary,
-even though its CPU source is FLOAT32 and intentionally has no qparams.
-`PropagateQParamBackward` must not retarget its arguments or qparam metadata
-from a downstream Concat, Reshape or Permute. Generic unprotected private
-quantizers retain the existing retarget optimization. A differing consumer grid
-uses the existing legalization to insert a separate requantization:
+The full-table DEQUANTIZE describes the graph's values, but need not materialize
+its complete result. At preparation time the reference runtime recognizes
+`DEQUANTIZE(constant table) -> GATHER` from serialized tensors, qparams and operator
+options. Each invocation then executes:
 
 ```text
-GATHER(float) -> Q_A -> [optional layout] -> Quantize(A -> B) -> Concat[B]
+row_q = Wq[token_ids]
+row_fp32 = (float32(row_q) - zero_point[token_ids]) * scale[token_ids]
 ```
 
-For example, x=0.14, INT16/zp=0, A scale=0.25 and B scale=0.3 gives code 1
-through both boundaries, but code 0 if Q_A is replaced by Q_B. The regression
-uses actual production passes, default O1 serialization, a Circle file round trip
-and NATIVE CPU execution, including reshape/permute paths and a non-embedding
-retarget control:
+The row parameters broadcast over the embedding width. Gathering codes and their
+parameters before dequantization is equivalent to selecting from the dequantized
+table, because each element depends only on its row's code, scale and zero point.
+Existing bounds checks still apply.
 
-```bash
-python -m unittest test.quantization.passes.test_explicit_embedding_retarget -v
-```
+The plan is built once and does not depend on model names, tensor names or Python
+export metadata. The full FLOAT32 table remains virtual, including in trace mode.
+For N selected tokens, temporary row storage scales with O(ND), while cached row
+qparams require O(V) metadata. The original UINT8 table remains the weight storage;
+no full FLOAT32, INT16 or scaled-weight copy is needed for native embedding.
 
-Reduced-range clamps are inserted in a separate graph-mutation phase before
-internal/terminal DQs are classified on the updated graph. Generated clamps join
-the CPU island immediately; subsequent discovery traverses only these owned
-`_embedding_range_clamp_` nodes. Their input/output remain FLOAT32 without
-qparams, so ordinary quantized-clamp legalization does not move them to Q_A's
-grid. Terminal DQ cleanup and general quantized-clamp legalization remain enabled.
-Repeated preservation must not add clamps or lose an internal DQ.
+FP32 row restoration reuses the reference arithmetic contract. Subsequent Q/DQ and
+MUL operations remain separate so their rounding and saturation are preserved;
+a fixed-point or wider fusion would need to reproduce those same boundaries.
+
+## Numerical and storage contracts
+
+Intermediate quantization is observable. In general,
+`Q_B(DQ_A(Q_A(x)))` differs from `Q_B(x)` because Q_A rounds and clips. A downstream
+domain change must retain Q_A and add a conversion rather than retarget it:
 
 ```text
-Q_A -> DQ_A -> Clamp(float, reduced B range) -> Q_B
+GATHER(float) -> Q_A -> optional layout -> Quantize(A -> B) -> Concat[B]
 ```
 
-With INT16/zp=0, A scale=1, B scale=0.01/min=-32767, x=-1000 must produce
-code -32767. Losing DQ_A lets clamp legalization round the lower bound near
--327.67 to integer -328 on A's grid. In the original real pipeline NATIVE rejected
-that quantized MAXIMUM; fake-quant evaluation exposed an implied B code -32768.
-The fixed file-roundtrip NATIVE path produces -32767 exactly. The regression also
-checks positive saturation, unclipped values, MUL, repeated pass execution and an
-adversarial membership-set iteration order. Only scheduling is controlled in that
-stress case; the production pass, legalization, serializer and kernels still run.
+The same rule applies around scale multiplication. If the multiplier is
+fake-quantized, its quantized value must be used. Folding the raw scale into the
+weight or moving Q_A across MUL can alter rounding and clipping.
 
-```bash
-python -m unittest test.quantization.passes.test_explicit_embedding_reduced_range -v
-```
+A token table may also serve an LM head. Keeping the original codes, row qparams
+and layout immutable preserves that consumer's meaning and allows existing buffer
+sharing. Logical weight tying does not imply physical sharing between separately
+packaged artifacts. Embedding scaling is applied to selected activations, not to
+shared weight storage.
 
-## Reproduction and evidence
+The decoder boundary retains its configured dtype, shape/layout, scale, zero point
+and range. Internal CPU FLOAT32 buffers do not replace the INT16 interface.
+Producer and consumer calibration must already agree at a staged boundary;
+this execution optimization does not reconcile independently calibrated grids.
 
-Use the installed CPU environment (measured with Python 3.12.14, Torch 2.13.0+cpu,
-NumPy 2.5.4). No model/data download, accelerator or external runtime is needed.
-The tiny optional Gemma4 wrapper test needs a transformers installation providing
-Gemma4 (measured with 5.18.0); generic export/runtime coverage has no such requirement.
+## Export-pass invariants
 
-```bash
-source .venv/bin/activate
-python -m unittest test.quantization.passes.test_explicit_embedding_export -v
-python -m unittest test.quantization.passes.test_preserve_embedding_quantization -v
-python -m unittest discover -s test/unit_test/circle/runtime -q
-python -m unittest test.unit_test.circle.passes.optimization.fold.test_heavy -q
-./ccex test
-./ccex format --no-apply-patches
-python -m test.performance.benchmark_rowwise_embedding --repeat 30 --warmup 5
-python -m test.performance.benchmark_rowwise_embedding --vocab 8192 --prefill 256 --repeat 10 --warmup 3
-```
+[PreserveEmbeddingQuantization](../tico/quantization/passes/preserve_embedding_quantization.py)
+identifies the supported embedding path before Q/DQ folding. Its export-only
+markers distinguish a preserved boundary (`EXPLICIT_EMBEDDING` on Quantize) from a
+real float intermediate (`FLOAT_EMBEDDING`). Backward propagation must leave the
+preserved Quantize's arguments and qparam metadata intact, including through layout
+paths. Unprotected private quantizers retain their existing retarget policy.
 
-Tests serialize actual Circle bytes, repack/reload, verify structure, and execute
-NATIVE integer output. They cover decode/prefill, unequal row grids, repeated and
-unsorted IDs, first/last rows, bounds errors, INT32/INT64 IDs, empty prefill,
-rounding/saturation, scale operand FQ, intermediate Q_A, shared integer weight,
-multiple DQ consumers and explicit rejection, and per-tensor fallback. A shared
-embedding/Linear export asserts one table constant, exact original codes/qparams,
-unchanged FC layout/domain and independent FC fake-quant reference semantics.
-FC native quantized arithmetic remains outside reference runtime support.
+Circle QUANTIZE saturates to its storage range. The supported reduced INT16 lower
+bound of -32767 therefore requires a float clamp before Quantize, serialized as
+MAXIMUM. Circle's min/max calibration metadata is not a substitute for that clamp.
+Clamp insertion completes before internal DQs are classified on the updated graph.
+Generated clamps belong to the CPU region and remain qparam-free; repeated pass
+execution recognizes those owned nodes without adding duplicate clamps or removing
+their input DQ. Ordinary quantized-clamp legalization remains applicable outside
+this region.
 
-Memory tests hook DQ kernels and selected integer-row gathers during **loading and
-execution**, forbid full-table DQ calls, inspect the fake cache, and compare selected
-shapes. HEAVY folding tests forbid the full DQ evaluator. This is stronger than
-output equality alone, but does not constitute OS/native allocator instrumentation.
+Weight-DQ removal keeps the embedding's float connection while other quantized
+consumers retain the original integer weight. Constant folding must also keep the
+row-wise table compressed when it feeds a dynamic lookup, including with the HEAVY
+profile. These policies are local to the embedding contract; they do not disable
+folding or quantized-tensor validation globally.
 
-Cloud benchmark: Intel Xeon Platinum 8573C VM, 5 visible CPUs, Torch 1 thread,
-W `[4096,128]`, warmup 5, 30 repeats, median excluding loading; memory sampled
-separately without trace. No CPU affinity pinning or exclusive VM reservation was used. Both paths implement the same explicit graph and compare
-final INT16 exactly before timing.
+## Supported execution pattern
 
-| Input | Full-DQ oracle | Selected rows | tracked run peak, full / selected |
-|---|---:|---:|---:|
-| decode `[1,1]` | 1.0664 ms | 0.1855 ms | 4,262,800 / 9,340 B |
-| prefill `[1,128]` | 1.2165 ms | 0.3878 ms | 4,262,800 / 396,806 B |
+The [selected-row planner](../tico/circle/runtime/rowwise_gather.py) requires:
 
-With V=8192, selected decode peak remains 9,340 B, while full peak grows to
-8,489,872 B. T=256 raises selected peak to 790,022 B. Selected FP32 row payload is
-512 B/decode or 65,536 B/T128; full-table payload would be 2,097,152 B. Instrumented
-restoration shapes were `[1,1,128]` / `[1,T,128]` plus small scalar DQ, never `[V,D]`.
-Tracked loading peak grows about 3.05 MB → 6.04 MB with doubled V, consistent with
-integer storage and O(V) metadata, with no DQ evaluation during loading.
-`tracemalloc` counts tracked Python/NumPy allocations, not process RSS, allocator
-caches, or untracked native memory. Timings are reference-runtime VM measurements,
-not estimates for TV CPU or NPU.
+- A constant, static rank-2 UINT8 table with axis-0 qparams: one finite positive
+  scale and one UINT8-range zero point per vocabulary row.
+- GATHER axis 0 (or equivalent -2), `batchDims=0`, unquantized INT32/INT64 indices
+  of any rank, and an unquantized FLOAT32 result. Actual input and output shapes
+  must satisfy the serialized tensor contracts.
+- Only compatible GATHER consumers of the table DQ, with no graph output exposing
+  the full dequantized table. Multiple GATHERs can share that virtual result;
+  other consumers of the raw integer weight remain independent.
 
-## External runtime and device work
+Unsupported target contracts produce a diagnostic instead of silently restoring
+an entire table. Generic non-target graphs keep their existing execution path.
+The export policy retains per-tensor UINT8/INT16 activation boundaries and supports
+static quantized scale operands. A fake-quantized dynamic MUL side operand is
+diagnosed as unsupported. `enable_rowwise_gather=False` permits
+ordinary full-DQ execution for small-model debugging and numerical oracles.
 
-The default interpreter dispatch remains reference; external adapters are explicit.
-No ONERT or circle-interpreter code was changed. Production runtimes need to accept
-standard per-axis UINT8 DQ and FLOAT32→INT16 Q, preserve Q_A/DQ_A and scale FQ,
-support any reduced-range clamp, and implement their own prepare-time selected-row
-plan without full-table constant folding. Their arithmetic must be compared on exact
-ties/saturation. The existing ONERT adapter only resizes FLOAT32 dynamic inputs;
-dynamic INT64 token IDs need separate adapter work. circle-interpreter has its
-existing dynamic-shape restrictions. Full Gemma4 checkpoint export, actual staged
-decoder calibration compatibility, large-file packaging, TV CPU/NPU execution and
-performance were not validated by these small CPU tests.
+The optimization is implemented in the built-in reference runtime's NATIVE mode.
+FAKE_QUANTIZE remains a semantic evaluation mode: another consumer such as FC may
+use its existing full-weight dequantization cache. External CPU runtimes need their
+own selected-row execution plan and support for the serialized DQ/Q/clamp sequence.
+Reference execution does not establish production-runtime or device support.
 
-## Validation results
+## Regression coverage
 
-Completed checks (all commands run with the repository CPU environment):
+The tests exercise the production export pipeline, Circle save/load and reference
+execution. Relevant coverage includes:
 
-| Check | Result |
-|---|---|
-| `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./ccex test` at `934c059` | PASS: 4,849 run, 4,691 passed, 158 skipped, 0 failures/errors; exit 0; 1,202.159 s |
-| `python -m unittest test.quantization.passes.test_explicit_embedding_export test.unit_test.circle.runtime.test_rowwise_gather -q` | PASS, 15 tests |
-| `python -m unittest test.quantization.passes.test_preserve_embedding_quantization -q` | PASS, 4 tests |
-| `python -m unittest discover -s test/unit_test/circle/runtime -v` | PASS, 175 tests, no skips |
-| `python -m unittest discover -s test/quantization/passes -p 'test_*quant*.py' -v` | PASS, 94 run, 2 existing Torch slice-related skips (before adding the dynamic-scale negative case) |
-| `python -m unittest test.unit_test.circle.passes.optimization.fold.test_heavy -q` | PASS, 18 tests, including unsupported batchDims protection |
-| `python -m unittest test.quantization.wrapq.wrappers.nn.test_quant_embedding test.quantization.wrapq.wrappers.nn.test_quantize_tied_embedding test.quantization.wrapq.wrappers.gemma4.test_quant_text_scaled_word_embedding test.quantization.wrapq.wrappers.gemma4.test_gemma4_ple_scale_fusion test.unit_test.utils.test_runtime_independence -q` | PASS, 41 tests |
-| `python -m unittest test.quantization.recipes.test_llama_circle_runtime.TestFakeQuantizedLlamaCircleRuntime -q` | PASS, 3 tests |
-| `python -m unittest test.quantization.wrapq.test_conditional_export_entries -q` | PASS, 6 tests |
-| `./ccex format --no-apply-patches` | PASS |
-| `lintrunner -r HEAD --output oneline` plus explicit paths for the last HEAVY/Llama/conditional-test edits | PASS (UFMT, Pylint, mypy) |
-| Both benchmark commands above | PASS, exact native INT16 equality |
-
-Some preliminary suite runs were interrupted to incorporate review fixes and replace
-obsolete single-GATHER structural assertions; those runs are not counted as passes.
-One complete preliminary run (`OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./ccex test`)
-ran 4,849 tests in 1,242 s: FAIL with one obsolete Gemma4 assertion forbidding Q/DQ,
-and 158 existing skips. The assertion now checks explicit Q/DQ, FLOAT32 GATHER,
-and a selected-row plan instead; its module rerun passed all 9 tests:
-`python -m unittest test.quantization.wrapq.wrappers.gemma4.test_conditional_capabilities -q`.
-Its configured UFMT/Pylint/mypy checks also passed.
-Test annotation/style errors found by the initial changed-file lint were corrected.
-A direct benchmark-only mypy invocation reported four existing imported MX utility
-errors; the configured repository lint commands above passed.
-
-
-An earlier `OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex test` attempt was interrupted
-by an execution-environment transition after 2,762 tests had started. It was not
-counted as a pass. Recovery checks separately ran 433 tests (431 PASS, 2 SKIP,
-0 FAIL), including 175 runtime tests, 181 quantization-pass tests and 77 regressions.
-
-On 2026-11-04, the complete suite was rerun at implementation commit
-`934c05984115938839c5c2a50a7781c70cffd3ac` using the first command in the table.
-It completed normally with `Ran 4849 tests in 1202.159s`, `OK (skipped=158)` and
-exit code 0: **4,691 PASS, 158 SKIP, 0 FAIL/ERROR**. The skips include existing
-internal-only tests, unsupported-feature cases and opt-in large-artifact tests;
-they are not counted as passes. The newly added native embedding cases ran without
-skips. This completed full-suite result supersedes the earlier interruption and
-the previous statement that a clean full-suite pass had not been obtained.
-
-## Quantization-boundary follow-up validation
-
-This follow-up started from `605c260fb209cbfab911de9fe508c19d4f133ded` on
-`cpu-explicit-embedding`, with remote `https://github.com/mhs4670go/TICO.git`.
-The fetched remote branch matched that SHA; there were no uncommitted changes or
-additional post-review commits. Fix A is commit `8cbfe45`; fix B is `dd91abc`.
-Only backward propagation and embedding-preservation policy changed; the selected-row
-runtime, general Conv/FC/Concat policies and quantized-clamp legalization are unchanged.
-
-These are new executions for this follow-up, not reused earlier results:
-
-| Command/check | Result |
-|---|---|
-| New retarget regression before fix A | FAIL: 2 of 3 tests; direct native x=0.14 produced code 0 instead of 1 |
-| New reduced-range adverse-iteration case before fix B | FAIL: native quantized MAXIMUM rejected; fake-quant result implied B code -32768 |
-| Retarget regression plus existing backward/serializer controls | PASS, 21 tests |
-| Reduced-range regression plus existing explicit-embedding export/preservation | PASS, 13 tests |
-| `python -m unittest discover -s test/quantization/passes -q` | PASS: 190 run, 188 passed, 2 existing skips |
-| `python -m unittest discover -s test/unit_test/circle/runtime -q` | PASS, 175 tests |
-| Embedding/tied-weight/Gemma4/Llama saved-artifact/runtime-independence/HEAVY regressions | PASS, 77 tests |
-| `lintrunner -r 605c260 --output oneline` | PASS, UFMT/Pylint/mypy after correcting test import order |
-| `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./ccex test` at implementation commit `dd91abc45771fc3bf032d20a671f9da58a926941` | PASS: 4,858 run, 4,700 passed, 158 skipped, 0 failures/errors; exit 0; 1,198.780 s |
-
-The post-fix native numerical counterexamples produce code 1 for
-x=0.14/A=.25/B=.3, and code -32767 for x=-1000/A=1/B=.01/min=-32767.
-File round trips compare final integers exactly; positive saturation, unclipped
-values, layout paths, MUL, idempotence and adverse visitation ordering are covered.
-Existing selected-row loading/execution allocation hooks, index bounds, shared weight
-and LM-head-domain checks ran again. UINT8 row storage/qparams, real FLOAT32 internal
-DQ/clamp tensors and the final INT16 output contract remain intact.
-
-The final follow-up commit records these results and only normalizes test import
-order beyond the tested implementation commits. The 158 full-suite skips include
-internal-only and unsupported-feature cases and are not counted as passes. Newly
-added regression tests were not skipped. This is TICO reference CPU validation;
-onert is not installed and TV production runtime/device execution was not tested.
-No new performance benchmark or large-checkpoint/device download was required or run.
+- [Explicit embedding export](../test/quantization/passes/test_explicit_embedding_export.py):
+  integer output contracts, intermediate quantization, scale operands and tied weights.
+- [Quantize boundary preservation](../test/quantization/passes/test_explicit_embedding_retarget.py):
+  Concat/layout consumers and the unprotected retarget control.
+- [Reduced-range preservation](../test/quantization/passes/test_explicit_embedding_reduced_range.py):
+  float DQ/clamp edges, saturation, pass idempotence and traversal-order independence.
+- [Selected-row execution](../test/unit_test/circle/runtime/test_rowwise_gather.py):
+  row qparams, index bounds, sharing and loading/execution allocation checks.

@@ -803,7 +803,7 @@ the CPU runtime prepares a selected-row plan once. It restores only requested
 rows, leaving subsequent Q/DQ/MUL boundaries intact and the full-table DQ virtual
 (even in traces). Unsafe target sharing or unsupported row contracts are diagnosed;
 `enable_rowwise_gather=False` is an explicit small-model oracle option. See
-[CPU token embedding](../../docs/cpu_token_embedding.md) for legality, memory evidence,
+[CPU token embedding](../../docs/cpu_token_embedding.md) for design rationale, memory behavior,
 and external-runtime limitations.
 
 `tico.quantization.evaluation.evaluate(..., BACKEND.CIRCLE)` uses the fake-quantize
