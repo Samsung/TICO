@@ -77,24 +77,37 @@ graph and runtime settings such as `enable_rowwise_gather`.
 
 GATHER selects values; it does not convert between quantization domains. Copying
 integer codes from a row-quantized table into an activation tensor with different
-qparams would change their meaning. Weight dequantization and activation
-quantization must therefore appear as separate Circle operations:
+qparams would change their meaning. In the supported explicit embedding path,
+weight dequantization and activation quantization are separate Circle operations.
+Without post-processing, the canonical graph is:
 
 ```text
-Wq: UINT8 [V, D], row scales and zero points
-  -> DEQUANTIZE
-  -> GATHER(integer token IDs)
+Wq: UINT8 [V, D], domain W (per-row scale/zero point)
+  -> DEQUANTIZE using W
+  -> GATHER(FLOAT32 values, integer token IDs)
+  -> QUANTIZE into domain A
+  -> activation: configured per-tensor UINT8 or INT16
+```
+
+Here Q_A denotes the activation Quantize into domain A and is the output boundary
+when no post-processing is needed. A scaled embedding may instead continue from
+GATHER as follows:
+
+```text
+GATHER(FLOAT32)
   -> Q_A -> DQ_A
-  -> optional MUL(dequantized, fake-quantized scale)
+  -> MUL(dequantized, fake-quantized scale)
   -> Q_B: configured per-tensor UINT8 or INT16
 ```
 
-The MUL and its surrounding boundaries depend on the exported model. When no
-post-processing is needed, the embedding's activation Quantize is the output
-boundary. Qparams belong to integer tensors; the internal FLOAT32 tensors carry
-no qparams. Token IDs are unquantized INT32/INT64 indices, independently of the
-table and activation dtypes. Even UINT8-to-UINT8 needs an explicit conversion when
-the table has per-row qparams and the activation has a different per-tensor grid.
+The MUL and its surrounding boundaries depend on the exported model; they are not
+required for every embedding. Existing intermediate Q/DQ boundaries are preserved.
+Other supported post-processing can expose a real FLOAT32 output, as described in
+[model adapters and stage interfaces](#model-adapters-and-stage-interfaces).
+Qparams belong to integer tensors; the internal FLOAT32 tensors carry no qparams.
+Token IDs are unquantized INT32/INT64 indices, independently of the table and
+activation dtypes. Even UINT8-to-UINT8 needs an explicit conversion when the table
+has per-row qparams and the activation has a different per-tensor grid.
 
 Standard Circle operators make domain changes visible to optimizers, validators
 and other runtimes. They also let the CPU reuse the existing quantization and
@@ -150,10 +163,12 @@ shared weight storage.
 
 The decoder boundary retains its configured dtype, shape/layout, scale, zero point
 and range. Producer and consumer domains must be compared before passing integer
-codes between stages. If they differ, the host must explicitly dequantize the
-producer result and quantize it into the consumer's frozen grid. Dtype equality
-alone is insufficient. The selected-row optimization does not align grids or
-automatically perform this handoff.
+codes between stages. When they differ, the host must perform an explicit domain
+conversion that preserves the required rounding and saturation. The current
+integration tests express this handoff as dequantization followed by quantization
+into the consumer's frozen grid; the contract does not require a materialized
+FLOAT32 intermediate. Dtype equality alone is insufficient. The selected-row
+optimization does not align grids or automatically perform this handoff.
 
 ## Export-pass invariants
 

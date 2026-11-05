@@ -343,6 +343,9 @@ Concat's domain, including through reshape/permute nodes, when the
 quantized dtype matches, the Quantize's sole user is the propagating node, and
 its input has no established quantization domain. A proven requantization retains
 its original boundary even when private.
+Explicit Quantize boundaries marked by `PreserveEmbeddingQuantization` are
+excluded from this retargeting, even when their float inputs have no qparams.
+See [embedding boundary invariants](cpu_token_embedding.md#export-pass-invariants).
 Retargeting updates its scale/zero-point arguments and output qparam metadata
 atomically and stops at its input boundary. Shared Quantize outputs, unsupported
 overloads, and non-affine or non-scalar domains remain unchanged. Serialization
@@ -467,7 +470,7 @@ The current serializer:
 `NodeVisitor` subclasses register one or more ATen overload targets with the
 `register_node_visitor` decorator. The registry provides both:
 
-- the target-to-visitor mapping used during serialization
+- the target-to-visitor mapping used by the serializer
 - the supported-target set used by pre-serialization validation
 
 A newly added visitor is not useful unless its module is imported by the serializer
