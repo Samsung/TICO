@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import operator
-from typing import TYPE_CHECKING, Dict, Union
+from typing import Dict, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     import torch._ops
@@ -43,7 +43,9 @@ def get_constant_from_tensor(
     node: Union[torch.fx.Node, bool, int, float],
     ep: ExportedProgram,
     *,
-    _cache: Union[Dict[Union[str, bool, int, float], Union[bool, int, float]], None] = None,
+    _cache: Union[
+        Dict[Union[str, bool, int, float], Union[bool, int, float]], None
+    ] = None,
 ) -> Union[bool, int, float]:
     """Memoizing wrapper around `_get_constant_from_tensor_impl`.
 
@@ -244,7 +246,9 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                 continue
             assert len(node.args) == 6
             try:
-                enabled = get_constant_from_tensor(node.args[3], exported_program, _cache=_const_cache)
+                enabled = get_constant_from_tensor(
+                    node.args[3], exported_program, _cache=_const_cache
+                )
             except (AssertionError, AttributeError, RuntimeError, ValueError) as exc:
                 raise RuntimeError(
                     f"{node.target}: fake_quant_enabled must be a compile-time "

@@ -514,7 +514,8 @@ class GetConstantFromTensorMemoTest(PassTest):
             n
             for n in ep.graph.nodes
             if n.op == "call_function"
-            and n.target == torch.ops.aten.fake_quantize_per_tensor_affine.tensor_qparams
+            and n.target
+            == torch.ops.aten.fake_quantize_per_tensor_affine.tensor_qparams
         )
         scale_arg = fq_node.args[1]
 
