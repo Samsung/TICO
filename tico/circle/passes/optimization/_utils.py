@@ -196,23 +196,13 @@ def operator_version(model: Any, operator: Any) -> int:
 def tensor_contract(graph: Any, tensor_index: int) -> TensorContract:
     """Capture the contract of one subgraph-local tensor."""
 
-    tensors = as_list(getattr(graph.subgraph, "tensors", None))
-    if tensor_index < 0 or tensor_index >= len(tensors):
-        raise IndexError(
-            f"Tensor index {tensor_index} is outside 0..{len(tensors) - 1}."
-        )
-    return TensorContract.from_tensor(tensors[tensor_index])
+    return TensorContract.from_tensor(graph.tensor(tensor_index))
 
 
 def tensor_object(graph: Any, tensor_index: int) -> Any:
     """Return one subgraph-local tensor with a bounds check."""
 
-    tensors = as_list(getattr(graph.subgraph, "tensors", None))
-    if tensor_index < 0 or tensor_index >= len(tensors):
-        raise IndexError(
-            f"Tensor index {tensor_index} is outside 0..{len(tensors) - 1}."
-        )
-    return tensors[tensor_index]
+    return graph.tensor(tensor_index)
 
 
 def contract_is_fully_static(contract: TensorContract) -> bool:

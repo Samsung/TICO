@@ -124,6 +124,8 @@ class CircleGraph:
         self._tensors_list = as_list(self.subgraph.tensors)
         self._operator_inputs_cache: dict[int, tuple[int, ...]] = {}
         self._operator_outputs_cache: dict[int, tuple[int, ...]] = {}
+        self._buffers_list = as_list(model.buffers)
+        self._produced_tensor_indices_cache: frozenset[int] | None = None
         self._live_operators_cache: frozenset[int] | None = None
         self._producer: dict[int, int] = {}
         self._consumers: dict[int, list[int]] = {}
@@ -209,6 +211,36 @@ class CircleGraph:
             )
         return operators[operator_index]
 
+    def operator(self, operator_index: int) -> Any:
+        """Return one operator with a bounds check (snapshot-cached)."""
+
+        return self._operator(operator_index)
+
+    def tensor(self, tensor_index: int) -> Any:
+        """Return one tensor with a bounds check (snapshot-cached)."""
+
+        tensors = self._tensors_list
+        if tensor_index < 0 or tensor_index >= len(tensors):
+            raise IndexError(
+                f"Tensor index {tensor_index} is outside the valid range "
+                f"0..{len(tensors) - 1}."
+            )
+        return tensors[tensor_index]
+
+    def produced_tensor_indices(self) -> frozenset[int]:
+        """Return indices of tensors produced by any operator, computed once.
+
+        The set is cached because instances are revision-pinned snapshots:
+        the producer topology cannot change during this instance's lifetime.
+        """
+
+        if self._produced_tensor_indices_cache is None:
+            produced: set[int] = set()
+            for operator in self._operators_list:
+                produced.update(as_indices(getattr(operator, "outputs", None)))
+            self._produced_tensor_indices_cache = frozenset(produced)
+        return self._produced_tensor_indices_cache
+
     def tensor_name(self, tensor_index: int) -> str:
         """Return a decoded tensor name."""
 
@@ -223,7 +255,37 @@ class CircleGraph:
     def is_constant(self, tensor_index: int) -> bool:
         """Return whether a tensor has constant storage, possibly zero bytes."""
 
-        return is_constant_tensor(self.model, self.subgraph, tensor_index)
+        tensors = self._tensors_list
+        if tensor_index < 0 or tensor_index >= len(tensors):
+            return False
+        tensor = tensors[tensor_index]
+        if bool(getattr(tensor, "isVariable", False)):
+            return False
+        buffer_index = int(getattr(tensor, "buffer", 0) or 0)
+        buffers = self._buffers_list
+        if buffer_index <= 0 or buffer_index >= len(buffers):
+            return False
+        buffer = buffers[buffer_index]
+        if buffer is None:
+            return False
+        if has_buffer_payload(buffer):
+            return True
+
+        # shape=[] is a scalar (one element), not an empty tensor. A zero
+        # extent in a concrete shape is required before accepting a
+        # zero-byte buffer.
+        shape = as_indices(getattr(tensor, "shape", None))
+        if 0 not in shape or any(dimension < 0 for dimension in shape):
+            return False
+        signature = as_indices(getattr(tensor, "shapeSignature", None))
+        if signature and signature != shape:
+            return False
+
+        # Do not promote a runtime zero-sized tensor to a constant merely
+        # because an imported model assigned it an empty, nonzero buffer.
+        if tensor_index in self.inputs:
+            return False
+        return tensor_index not in self.produced_tensor_indices()
 
     def predecessors(self, operator_index: int) -> tuple[int, ...]:
         """Return operators that directly feed an operator."""
