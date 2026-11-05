@@ -22,6 +22,8 @@ from typing import Any, cast, Mapping
 
 import torch
 
+from tico.config import CompileConfigBase
+
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.recipes.export.circle import (
     convert_and_save_circle as _convert_and_save,
@@ -399,6 +401,7 @@ def _export_gemma4_vision_stages(
     output_dir: Path,
     granularity: str,
     strict: bool,
+    compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export monolithic, split, or both Gemma4 static vision pipelines."""
     granularity = _normalize_vision_export_granularity(granularity)
@@ -413,6 +416,7 @@ def _export_gemma4_vision_stages(
             (pixel_values,),
             output_dir / _circle_name("vision_prefill", artifact_tag),
             strict=strict,
+            config=compile_config,
         )
         return
 
@@ -443,6 +447,7 @@ def _export_gemma4_vision_stages(
             (pixel_values,),
             output_dir / monolithic_artifact,
             strict=strict,
+            config=compile_config,
         )
 
     qvision = cast(QuantGemma4VisionModel, qvision)
@@ -468,6 +473,7 @@ def _export_gemma4_vision_stages(
         (pixel_values,),
         output_dir / patch_artifact,
         strict=strict,
+        config=compile_config,
     )
     stage_artifacts.append(
         {
@@ -497,6 +503,7 @@ def _export_gemma4_vision_stages(
             (hidden_states, *shared_context),
             output_dir / artifact,
             strict=strict,
+            config=compile_config,
         )
         stage_artifacts.append(
             {
@@ -536,6 +543,7 @@ def _export_gemma4_vision_stages(
         (hidden_states,),
         output_dir / pooler_artifact,
         strict=strict,
+        config=compile_config,
     )
     stage_artifacts.append(
         {
@@ -563,6 +571,7 @@ def _export_gemma4_vision_stages(
         (pooled_hidden_states,),
         output_dir / post_projection_artifact,
         strict=strict,
+        config=compile_config,
     )
     stage_artifacts.append(
         {
@@ -730,6 +739,7 @@ def _export_gemma4_ple_embedding_stage(
     output_dir: Path,
     embedding_format: str,
     strict: bool,
+    compile_config: CompileConfigBase | None = None,
 ) -> dict[str, Any]:
     """Export the shared PLE lookup as a dynamic Circle graph or ``.pt`` table.
 
@@ -797,6 +807,7 @@ def _export_gemma4_ple_embedding_stage(
         output_dir / artifact,
         dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
         strict=strict,
+        config=compile_config,
     )
     manifest["artifact"] = artifact
     return manifest
@@ -812,6 +823,7 @@ def _export_gemma4_ple_projection_stages(
     output_dir: Path,
     prefill_decode: bool,
     strict: bool,
+    compile_config: CompileConfigBase | None = None,
 ) -> list[dict[str, Any]]:
     """Export the fixed-shape PLE projection graphs for prefill and decode.
 
@@ -837,6 +849,7 @@ def _export_gemma4_ple_projection_stages(
             inputs,
             output_dir / artifact,
             strict=strict,
+            config=compile_config,
         )
         stages.append(
             {
@@ -929,6 +942,7 @@ def export_gemma4_per_layer(
     strict: bool = False,
     vision_granularity: str = "monolithic",
     ple_embedding_format: str = "auto",
+    compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export a floating-point or PTQ-wrapped Gemma4 E2B by runtime stage.
 
@@ -1024,6 +1038,7 @@ def export_gemma4_per_layer(
         output_dir=output_dir,
         granularity=vision_granularity,
         strict=strict,
+        compile_config=compile_config,
     )
 
     # Dynamic-sequence QUANT export traces frozen fake-quant ops with
@@ -1042,6 +1057,7 @@ def export_gemma4_per_layer(
         output_dir / _circle_name("token_embedding", artifact_tag),
         dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
         strict=strict,
+        config=compile_config,
     )
     ple_embedding_manifest: dict[str, Any] | None = None
     if ple_dim:
@@ -1057,6 +1073,7 @@ def export_gemma4_per_layer(
             output_dir=output_dir,
             embedding_format=ple_embedding_format,
             strict=strict,
+            compile_config=compile_config,
         )
 
     text_embeds = torch.randn(1, max_seq_len, hidden_size, device="cpu")
@@ -1070,6 +1087,7 @@ def export_gemma4_per_layer(
         (text_embeds, visual_embeds),
         output_dir / _circle_name(fusion_name, artifact_tag),
         strict=strict,
+        config=compile_config,
     )
 
     prefill_hidden = torch.randn(1, max_seq_len, hidden_size, device="cpu")
@@ -1085,6 +1103,7 @@ def export_gemma4_per_layer(
             output_dir=output_dir,
             prefill_decode=prefill_decode,
             strict=strict,
+            compile_config=compile_config,
         )
         assert ple_embedding_manifest is not None
         _save_ple_pipeline_manifest(
@@ -1153,6 +1172,7 @@ def export_gemma4_per_layer(
             output_dir / _circle_name(prefill_stem, artifact_tag),
             kwargs=prefill_kwargs,
             strict=strict,
+            config=compile_config,
         )
 
         if not prefill_decode:
@@ -1212,6 +1232,7 @@ def export_gemma4_per_layer(
             / _circle_name(f"decoder_layer_decode_{layer_idx}", artifact_tag),
             kwargs=decode_kwargs,
             strict=strict,
+            config=compile_config,
         )
 
     lm_head_hidden = torch.randn(1, 1, hidden_size, device="cpu")
@@ -1220,4 +1241,5 @@ def export_gemma4_per_layer(
         (lm_head_hidden,),
         output_dir / _circle_name("lm_head", artifact_tag),
         strict=strict,
+        config=compile_config,
     )

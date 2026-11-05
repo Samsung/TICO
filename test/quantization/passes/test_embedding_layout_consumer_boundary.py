@@ -245,7 +245,9 @@ def _projection_oracle(module, ids):
 class EmbeddingLayoutConsumerBoundaryTest(unittest.TestCase):
     def _runtime(self, module, inputs):
         exported = torch.export.export(module.eval(), inputs)
-        converted = tico.convert_from_exported_program(exported)
+        converted = tico.convert_from_exported_program(
+            exported, config=tico.CompileConfigV1(preserve_embedding_quantization=True)
+        )
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "embedding_projection.circle"
             converted.save(destination)
@@ -524,7 +526,10 @@ class EmbeddingLayoutConsumerBoundaryTest(unittest.TestCase):
                 with self.subTest(kind=kind, fc_first=fc_first):
                     module = _SharedLayoutProjection(kind, fc_first).eval()
                     prepared = _prepare_exported_program(
-                        torch.export.export(module, (ids,))
+                        torch.export.export(module, (ids,)),
+                        config=tico.CompileConfigV1(
+                            preserve_embedding_quantization=True
+                        ),
                     )
                     linear = next(
                         node

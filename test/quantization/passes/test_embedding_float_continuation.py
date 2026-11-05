@@ -205,14 +205,21 @@ class EmbeddingFloatContinuationTest(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeError, "Unsupported explicit embedding float side operand"
         ):
-            tico.convert_from_exported_program(exported)
+            tico.convert_from_exported_program(
+                exported,
+                config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+            )
 
     def _prepared(self, module, inputs):
-        return _prepare_exported_program(torch.export.export(module.eval(), inputs))
+        return _prepare_exported_program(
+            torch.export.export(module.eval(), inputs),
+            config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+        )
 
     def _runtime(self, module, inputs):
         converted = tico.convert_from_exported_program(
-            torch.export.export(module.eval(), inputs)
+            torch.export.export(module.eval(), inputs),
+            config=tico.CompileConfigV1(preserve_embedding_quantization=True),
         )
         document = CircleDocument.from_bytes(converted.circle_binary)
         self.assertTrue(document.verify().ok)

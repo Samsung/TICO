@@ -23,6 +23,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
+from tico import CompileConfigV1
 from tico.circle import CircleDocument
 from tico.circle.runtime import (
     CircleReferenceRuntime,
@@ -64,6 +65,7 @@ class QwenTokenEmbeddingIntegrationTest(unittest.TestCase):
             adapter,
             (torch.tensor([[0, 15, 7, 3]]),),
             path,
+            config=CompileConfigV1(preserve_embedding_quantization=True),
             dynamic_shapes=make_token_embedding_dynamic_shapes(16),
             strict=False,
         )
@@ -249,6 +251,7 @@ class QwenTokenEmbeddingIntegrationTest(unittest.TestCase):
                         past_key_values=past,
                     ),
                     strict=False,
+                    config=CompileConfigV1(preserve_embedding_quantization=True),
                 )
                 path = Path(directory) / "decoder_layer_decode_0.q.circle"
                 converted.save(path)

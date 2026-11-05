@@ -105,7 +105,10 @@ class ExplicitEmbeddingReducedRangeTest(unittest.TestCase):
 
         # This is the public production path, including quant legalization and O1.
         with patch.object(conversion, "_prepare_exported_program", side_effect=capture):
-            converted = tico.convert_from_exported_program(program)
+            converted = tico.convert_from_exported_program(
+                program,
+                config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+            )
         with TemporaryDirectory() as directory:
             path = Path(directory) / "embedding.circle"
             converted.save(path)

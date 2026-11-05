@@ -14,6 +14,7 @@
 
 import contextlib
 import io
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ import tico.quantization.recipes.export.llama as llama_export
 
 import torch
 
+from tico.quantization.recipes.export.circle import resolve_compile_config
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.static_inputs import capture_rope_state
@@ -253,10 +255,56 @@ class TestExportMain(unittest.TestCase):
             "output_dir": None,
             "artifacts": None,
             "no_prefill_decode": False,
+            "preserve_embedding_quantization": False,
             "set": [],
         }
         values.update(overrides)
         return SimpleNamespace(**values)
+
+    def test_preservation_cli_default_and_opt_in(self):
+        for enabled in (False, True):
+            argv = ["export.py", "--config", "recipe.yaml", "--source", "model"]
+            if enabled:
+                argv.append("--preserve-embedding-quantization")
+            with self.subTest(enabled=enabled), patch.object(sys, "argv", argv):
+                self.assertIs(
+                    export_example.parse_args().preserve_embedding_quantization, enabled
+                )
+
+    def test_preservation_cli_sets_recipe_export_policy(self):
+        adapter = Mock()
+        with (
+            patch.object(
+                export_example,
+                "parse_args",
+                return_value=self._args(preserve_embedding_quantization=True),
+            ),
+            patch.object(export_example, "load_recipe_config", return_value={}) as load,
+            patch.object(export_example, "resolve_adapter", return_value=adapter),
+            patch.object(export_example, "set_seed"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            export_example.main()
+        self.assertIn(
+            "export.preserve_embedding_quantization=true",
+            load.call_args.kwargs["overrides"],
+        )
+
+    def test_recipe_preservation_policy_requires_boolean(self):
+        self.assertIs(resolve_compile_config({}).preserve_embedding_quantization, False)
+        for enabled in (False, True):
+            self.assertIs(
+                resolve_compile_config(
+                    {"preserve_embedding_quantization": enabled}
+                ).preserve_embedding_quantization,
+                enabled,
+            )
+        for invalid in ("true", 1, None):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(TypeError, "must be a boolean"),
+            ):
+                resolve_compile_config({"preserve_embedding_quantization": invalid})
 
     def test_model_source_loads_the_adapter_model(self):
         """Model-source export should load the FP model through the adapter."""

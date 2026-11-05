@@ -266,6 +266,7 @@ Current version 1.0 fields are:
 | `convert_single_batch_lhs_const_bmm_to_fc` | `False` | Enables the supported single-batch `bmm` rewrite with a constant left-hand side. |
 | `convert_expand_to_slice_cat` | `False` | Enables lowering of supported `expand` patterns to slice/concatenate operations. |
 | `eliminate_rank_round_trip` | `False` | Declared in `CompileConfigV1`, but the current conversion pipeline does not read this field; `EliminateRankRoundTripRegion` is currently enabled unconditionally. Do not rely on this field to disable that pass. |
+| `preserve_embedding_quantization` | `False` | Preserve explicit quantization boundaries in supported embedding paths during Circle export. Omission and explicit `False` retain the existing embedding export policy; see [CPU embedding contracts](cpu_token_embedding.md). |
 | `circle_optimize` | `True` | Runs the verified Circle O1 pipeline on both bytes and file conversion paths. Set to `False` to disable Circle O1 while retaining the FX passes. |
 
 Create a default configuration with either of the following:
@@ -324,6 +325,7 @@ convert_rhs_const_mm_to_fc: true
 convert_single_batch_lhs_const_bmm_to_fc: false
 convert_expand_to_slice_cat: false
 eliminate_rank_round_trip: false
+preserve_embedding_quantization: false
 circle_optimize: true
 ```
 

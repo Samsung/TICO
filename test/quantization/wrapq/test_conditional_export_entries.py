@@ -127,7 +127,12 @@ class TestLlamaConditionalExportEntry(unittest.TestCase):
         for source in (model, restored):
             adapter = LlamaTokenEmbeddingExportAdapter(source).eval()
             with torch.no_grad():
-                exported = tico.convert(adapter, (tokens,), strict=False)
+                exported = tico.convert(
+                    adapter,
+                    (tokens,),
+                    strict=False,
+                    config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+                )
             document = CircleDocument.from_bytes(exported.circle_binary)
             self.assertTrue(document.verify().ok)
             runtime = CircleReferenceRuntime(document)

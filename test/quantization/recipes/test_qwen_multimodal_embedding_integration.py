@@ -56,7 +56,12 @@ class QwenMultimodalEmbeddingIntegrationTest(unittest.TestCase):
             fixture.owner, visual_start_idx=2
         ).eval()
         path = Path(directory) / f"{name}.circle"
-        tico.convert_to_file(adapter, (ids, images), path)
+        tico.convert_to_file(
+            adapter,
+            (ids, images),
+            path,
+            config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+        )
         document = CircleDocument.load(path)
         self.assertTrue(document.verify().ok)
         restored_during_load = []
@@ -276,7 +281,12 @@ class QwenMultimodalEmbeddingIntegrationTest(unittest.TestCase):
         pixels = torch.linspace(-1, 1, 16 * 12).reshape(1, 16, 12)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "vision.circle"
-            tico.convert_to_file(adapter, (pixels,), path)
+            tico.convert_to_file(
+                adapter,
+                (pixels,),
+                path,
+                config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+            )
             vision = CircleReferenceRuntime(CircleDocument.load(path))
             output = vision.output_tensors[0]
             self.assertEqual(output.dtype, np.dtype("int16"))
@@ -336,6 +346,7 @@ class QwenMultimodalEmbeddingIntegrationTest(unittest.TestCase):
                         sample.kwargs["position_embeddings"],
                     ),
                     path,
+                    config=tico.CompileConfigV1(preserve_embedding_quantization=True),
                 )
                 consumer = CircleReferenceRuntime(CircleDocument.load(path))
                 hidden = consumer.input_tensors[0]

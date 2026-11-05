@@ -361,6 +361,24 @@ python -m tico.quantization.examples.export \
   --checkpoint ./out/llama_quantized/quantized_model.pt
 ```
 
+Supported explicit embedding export is opt-in for Llama, Qwen3-VL and Gemma4.
+Add `--preserve-embedding-quantization` to the export command, or set the recipe
+YAML field:
+
+```yaml
+export:
+  preserve_embedding_quantization: true
+```
+
+Both default to `False`. Omission and explicit `False` retain the existing
+embedding export policy. The exporter forwards
+`CompileConfigV1(preserve_embedding_quantization=True)` to the production Circle
+conversion path. This selects supported embedding Q/DQ preservation; it does not
+change calibration, activation dtype or runtime execution mode. Explicit embedding
+examples and benchmarks that run compilation must opt in. See
+[CPU embedding contracts](../../../docs/cpu_token_embedding.md) for supported
+paths and limitations.
+
 Qwen3-VL uses the same generic `circle_per_layer` artifact key. The exporter
 keeps the fixed-grid vision model as one prefill stage and emits each text
 decoder layer separately for prefill and decode:

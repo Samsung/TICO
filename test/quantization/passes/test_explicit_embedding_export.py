@@ -80,7 +80,11 @@ def _has_gemma4():
 
 class ExplicitEmbeddingExportTest(unittest.TestCase):
     def _runtime(self, module, inputs):
-        converted = tico.convert(module.eval(), inputs)
+        converted = tico.convert(
+            module.eval(),
+            inputs,
+            config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+        )
         # Conversion includes default Circle O1; force a generated-schema repack/reload.
         document = CircleDocument.from_bytes(converted.circle_binary)
         self.assertTrue(document.verify().ok)

@@ -14,6 +14,7 @@
 
 import unittest
 
+import tico
 import torch
 import torch.ao.quantization.fx._decomposed
 
@@ -68,11 +69,15 @@ class PreserveEmbeddingQuantizationTest(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeError, "dynamic quantized MUL operand.*static scale required"
         ):
-            _prepare_exported_program(program)
+            _prepare_exported_program(
+                program,
+                config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+            )
 
     def test_strict_checker_accepts_only_explicit_cpu_contract(self):
         ep = _prepare_exported_program(
-            torch.export.export(_Embedding().eval(), (torch.tensor([[0, 1]]),))
+            torch.export.export(_Embedding().eval(), (torch.tensor([[0, 1]]),)),
+            config=tico.CompileConfigV1(preserve_embedding_quantization=True),
         )
         check_missing_qparam(ep, strict=True)
         emb = next(

@@ -23,6 +23,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
+from tico import CompileConfigV1
 from tico.circle import CircleDocument
 from tico.circle.runtime import (
     CircleReferenceRuntime,
@@ -55,7 +56,7 @@ from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
 from tico.utils.model import CircleModel
 
 
-def _make_quantized_llama(signed):
+def _make_quantized_llama(signed, *, num_hidden_layers=1):
     from transformers import LlamaConfig, LlamaForCausalLM
 
     with torch.random.fork_rng(devices=[]):
@@ -64,7 +65,7 @@ def _make_quantized_llama(signed):
             dict(
                 hidden_size=8,
                 intermediate_size=16,
-                num_hidden_layers=1,
+                num_hidden_layers=num_hidden_layers,
                 num_attention_heads=2,
                 num_key_value_heads=1,
                 head_dim=4,
@@ -122,6 +123,68 @@ def _native_oracle(codes, weight_grid, output_grid, ids, dtype):
 
 @unittest.skipUnless(has_transformers_for("llama"), "requires local Llama transformers")
 class LlamaExplicitEmbeddingIntegrationTest(unittest.TestCase):
+    def test_recipe_config_selects_saved_embedding_policy(self):
+        from tico.quantization.recipes.adapters.llama import LlamaAdapter
+        from tico.quantization.recipes.context import RecipeContext
+
+        contracts = {}
+        for preserve in (None, False, True):
+            with (
+                self.subTest(preserve=preserve),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                # Each recipe starts from fresh frozen state; no previously
+                # preserved ExportedProgram or metadata enters the default path.
+                model = _make_quantized_llama(False, num_hidden_layers=0)
+                export_config = {
+                    "enabled": True,
+                    "artifacts": ["circle_per_layer"],
+                    "output_dir": directory,
+                    "max_seq_len": 8,
+                }
+                if preserve is not None:
+                    export_config["preserve_embedding_quantization"] = preserve
+                adapter = LlamaAdapter()
+                adapter.export(
+                    RecipeContext(
+                        cfg={"export": export_config}, adapter=adapter, model=model
+                    )
+                )
+                document = CircleDocument.load(
+                    Path(directory) / "token_embedding.q.circle"
+                )
+                self.assertTrue(document.verify().ok)
+                runtime = CircleReferenceRuntime(document)
+                program = runtime.program
+                names = [op.name for op in program.operators]
+                self.assertEqual(
+                    names,
+                    ["DEQUANTIZE", "GATHER", "QUANTIZE"] if preserve else ["GATHER"],
+                )
+                gather = next(op for op in program.operators if op.name == "GATHER")
+                self.assertEqual(
+                    program.tensor(gather.outputs[0]).dtype,
+                    np.dtype(np.float32 if preserve else np.uint8),
+                )
+                weight = next(
+                    t for t in program.tensors if t.is_constant and t.shape == (7, 8)
+                )
+                assert weight.constant is not None
+                output = runtime.output_tensors[0]
+                contracts[preserve] = (
+                    names,
+                    weight.dtype,
+                    weight.quantization,
+                    weight.constant.copy(),
+                    output.dtype,
+                    output.shape,
+                    output.quantization,
+                )
+        omitted, disabled = contracts[None], contracts[False]
+        self.assertEqual(omitted[:3], disabled[:3])
+        np.testing.assert_array_equal(omitted[3], disabled[3])
+        self.assertEqual(omitted[4:], disabled[4:])
+
     def _assert_snapshot(self, before, model):
         after = _snapshot(model)
         self.assertEqual(before.keys(), after.keys())
@@ -162,7 +225,14 @@ class LlamaExplicitEmbeddingIntegrationTest(unittest.TestCase):
                 adapter = LlamaTokenEmbeddingExportAdapter(llama)
                 self.assertIs(adapter.embed_tokens, llama.model.wrapped.embed_tokens)
                 self.assertIsNone(adapter.rotate_embedding)
-                export_token_embedding(llama, 8, Path(directory))
+                export_token_embedding(
+                    llama,
+                    8,
+                    Path(directory),
+                    compile_config=CompileConfigV1(
+                        preserve_embedding_quantization=True
+                    ),
+                )
                 path = Path(directory) / "token_embedding.q.circle"
 
                 from tico.circle.runtime import executor, rowwise_gather
@@ -294,7 +364,13 @@ class LlamaExplicitEmbeddingIntegrationTest(unittest.TestCase):
                 )
                 # Separately packaged tied head uses the same codes/grid. This
                 # does not imply physical buffer sharing between Circle files.
-                export_lm_head(llama, Path(directory))
+                export_lm_head(
+                    llama,
+                    Path(directory),
+                    compile_config=CompileConfigV1(
+                        preserve_embedding_quantization=True
+                    ),
+                )
                 head_runtime = CircleReferenceRuntime(
                     CircleDocument.load(Path(directory) / "lm_head.q.circle")
                 )
@@ -322,7 +398,12 @@ class LlamaExplicitEmbeddingIntegrationTest(unittest.TestCase):
         before = _snapshot(model)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            export_token_embedding(llama, 8, root)
+            export_token_embedding(
+                llama,
+                8,
+                root,
+                compile_config=CompileConfigV1(preserve_embedding_quantization=True),
+            )
             embedding_runtime = CircleReferenceRuntime(
                 CircleDocument.load(root / "token_embedding.q.circle")
             )
@@ -339,6 +420,7 @@ class LlamaExplicitEmbeddingIntegrationTest(unittest.TestCase):
                 layer.as_export_module("prefill", return_kv=False),
                 (torch.from_numpy(hidden),),
                 destination,
+                config=CompileConfigV1(preserve_embedding_quantization=True),
                 kwargs={"attention_mask": mask, "position_embeddings": position},
             )
             decoder = CircleReferenceRuntime(CircleDocument.load(destination))

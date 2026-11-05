@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 
 import torch
+from tico import CompileConfigV1
 from tico.circle import CircleDocument
 from tico.circle.runtime import CircleReferenceRuntime
 from tico.quantization.recipes.export.llama import export_llama_bundle
@@ -455,6 +456,7 @@ class TestFakeQuantizedLlamaCircleRuntime(unittest.TestCase):
                 q_model=copy.deepcopy(cls.model),
                 max_seq_len=8,
                 output_dir=cls.bundle_dir,
+                compile_config=CompileConfigV1(preserve_embedding_quantization=True),
             )
 
     def test_saved_embedding_owns_calibrated_weight_and_activation_domains(self):

@@ -302,7 +302,9 @@ The second graph snapshot is emitted after this phase when graph dumping is enab
 
 ### 5.6 Conditional quantization bundle
 
-TICO detects whether the graph contains quantization operations. Only then it runs:
+TICO detects whether the graph contains quantization operations. Only then it runs
+the following bundle, prepending `PreserveEmbeddingQuantization` when
+`config.get("preserve_embedding_quantization") is True`:
 
 ```text
 FoldQuantOps
@@ -429,6 +431,7 @@ At the end of conversion:
 | `convert_expand_to_slice_cat` | `False` | `ConvertExpandToSliceCat` |
 | `eliminate_rank_round_trip` | `False` | Currently not consumed; the pass is instantiated with `enabled=True`. |
 | `circle_optimize` | `True` | Shared Circle O1 document pipeline, after packing on the bytes path and before final packing on the file path. |
+| `preserve_embedding_quantization` | `False` | Conditionally inserts `PreserveEmbeddingQuantization` before `FoldQuantOps` to preserve explicit quantization boundaries in supported embedding paths during Circle export. |
 
 `CompileConfigBase.from_dict()` applies only keys already present on the dataclass. The
 current implementation ignores unknown fields rather than rejecting them. Configuration
@@ -620,9 +623,11 @@ domain. It does not change the export contract above.
 Wrapper fake-quantization calls mark tensor quantization domains and calibration
 points. After decomposition, their Q-DQ pairs are an intermediate representation
 of those domains; they do not require physical Circle `QUANTIZE` and `DEQUANTIZE`
-operators at every marked point. Outside explicitly preserved CPU embedding islands,
-for a producer with no existing qparams,
-`FoldQuantOps` converts its first quantization point into tensor metadata:
+operators at every marked point. With the default embedding export policy, or
+outside embedding paths explicitly preserved by
+`CompileConfigV1(preserve_embedding_quantization=True)`, for a producer with no
+existing qparams, `FoldQuantOps` converts its first quantization point into tensor
+metadata:
 
 ```text
 op -> Q(A) -> DQ(A)    =>    op [QPARAM=A]
@@ -661,9 +666,12 @@ shape, and control values are excluded. An intentional CPU float island instead
 uses real FLOAT32 tensors without qparams, with explicit conversion operators at
 its integer boundaries; it must not use fabricated qparams to satisfy NPU checks.
 
-For constant UINT8 rank-two row-wise embedding tables (axis 0),
-`PreserveEmbeddingQuantization` runs before folding and retains this canonical
-Circle representation:
+The compile option `preserve_embedding_quantization` defaults to `False`; omission
+and explicit `False` retain the existing embedding export policy. Only explicit
+`True` inserts `PreserveEmbeddingQuantization` immediately before `FoldQuantOps`,
+without changing the following pass order. For supported constant UINT8 rank-two
+row-wise embedding tables (axis 0), this retains the canonical Circle
+representation:
 
 ```text
 Wq [row qparams] -> DEQUANTIZE -> GATHER(float, integer IDs) -> Q_A
@@ -684,9 +692,12 @@ rounding/clipping. Default O1 and explicit HEAVY constant folding keep this dyna
 lookup table compressed. Unsupported target plans receive a diagnostic rather
 than a hidden full-table restoration.
 
-Other quantized export policies are unchanged. In particular, legacy non-target
-embedding artifacts with distinct integer input/output domains are not proof of
-native reference support: GATHER does not requantize codes. Structural verification,
+The option does not change calibration, observer configuration, activation dtype
+or runtime execution mode, and is never enabled from model or device detection.
+Runtime planning and constant-folding protection follow the serialized graph,
+independently of the compile option. Other quantized export policies are unchanged.
+In particular, legacy embedding artifacts with distinct integer input/output
+domains are not proof of native reference support: GATHER does not requantize codes. Structural verification,
 native reference execution, fake-quant evaluation, and external backend validation
 remain separate checks. See [CPU embedding design and contracts](cpu_token_embedding.md)
 and [reference execution modes](../tico/circle/README.md#quantized-models).

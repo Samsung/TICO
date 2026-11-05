@@ -256,7 +256,14 @@ class TestGemma4ConditionalCapabilities(unittest.TestCase):
             for owner in (source, restored):
                 adapter = adapter_type(owner).eval()
                 with torch.no_grad():
-                    converted = tico.convert(adapter, (self.ids,), strict=False)
+                    converted = tico.convert(
+                        adapter,
+                        (self.ids,),
+                        strict=False,
+                        config=tico.CompileConfigV1(
+                            preserve_embedding_quantization=True
+                        ),
+                    )
                 document = CircleDocument.from_bytes(converted.circle_binary)
                 self.assertFalse(document.verify().issues)
                 runtime = CircleReferenceRuntime(document)

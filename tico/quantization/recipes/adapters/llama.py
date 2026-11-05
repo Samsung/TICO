@@ -31,7 +31,10 @@ from tico.quantization.recipes.evaluation.llm import (
 )
 from tico.quantization.recipes.evaluation.selection import should_run_evaluation
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
-from tico.quantization.recipes.export.circle import export_full_circle
+from tico.quantization.recipes.export.circle import (
+    export_full_circle,
+    resolve_compile_config,
+)
 from tico.quantization.recipes.export.llama import (
     export_llama_bundle,
     export_llama_per_layer,
@@ -446,6 +449,7 @@ class LlamaAdapter(ModelAdapter):
                 name="model.q.circle",
                 strict=bool(export_cfg.get("strict", False)),
                 max_seq_len=max_seq_len,
+                config=resolve_compile_config(export_cfg),
             )
 
         if "circle_bundle" in artifacts:
@@ -455,6 +459,7 @@ class LlamaAdapter(ModelAdapter):
                 output_dir=output_dir,
                 tokenizer=ctx.tokenizer,
                 append_prefill_buckets=export_cfg.get("append_prefill_buckets"),
+                compile_config=resolve_compile_config(export_cfg),
             )
         elif "circle_per_layer" in artifacts:
             export_llama_per_layer(
@@ -463,6 +468,7 @@ class LlamaAdapter(ModelAdapter):
                 output_dir=output_dir,
                 prefill_decode=bool(export_cfg.get("prefill_decode", False)),
                 append_prefill_buckets=export_cfg.get("append_prefill_buckets"),
+                compile_config=resolve_compile_config(export_cfg),
             )
 
 

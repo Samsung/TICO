@@ -32,6 +32,7 @@ import tico.quantization.recipes.adapters.gemma4 as gemma_adapter_mod
 import tico.quantization.recipes.export.gemma4 as gemma_export
 
 import torch
+from tico.config import CompileConfigV1
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.wrapq.dtypes import DType
@@ -686,6 +687,7 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
             strict=False,
             vision_granularity="both",
             ple_embedding_format="auto",
+            compile_config=CompileConfigV1(),
         )
 
     def test_adapter_rejects_non_mapping_vision_options(self) -> None:

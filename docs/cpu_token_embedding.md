@@ -13,6 +13,66 @@ part of each model's configuration and calibration contract. See the
 and [reference execution modes](../tico/circle/README.md#quantized-models) for
 runtime arithmetic and backend support.
 
+## Select the export policy
+
+`CompileConfigV1.preserve_embedding_quantization` defaults to `False`. Its meaning
+is: Preserve explicit quantization boundaries in supported embedding paths during
+Circle export. Omitting the option or setting it to `False` keeps the existing
+embedding export policy. Set it explicitly to `True` to select the policy described
+below; model family, CPU execution and the presence of an embedding do not enable
+it automatically.
+
+```python
+import tico
+
+config = tico.CompileConfigV1(
+    preserve_embedding_quantization=True,
+)
+circle_model = tico.convert_from_exported_program(
+    exported_program,
+    config=config,
+)
+```
+
+The same `config=` argument is accepted by `convert`, `convert_from_pt2`, and the
+corresponding file-output APIs. The public `pt2-to-circle` CLI reads the option
+through its existing YAML configuration path:
+
+```yaml
+version: "1.0"
+preserve_embedding_quantization: true
+```
+
+```bash
+pt2-to-circle -i embedding.pt2 -o embedding.circle --config compile.yaml
+```
+
+The Llama, Qwen3-VL and Gemma4 recipe exporter exposes the same opt-in:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/llama_export.yaml \
+  --checkpoint quantized_model.pt \
+  --preserve-embedding-quantization
+```
+
+Use the corresponding Qwen3-VL or Gemma4 recipe config for those model families.
+Recipe YAML can instead set `export.preserve_embedding_quantization: true` in its
+`export` mapping. Recipe helpers accept
+`compile_config=tico.CompileConfigV1(preserve_embedding_quantization=True)`.
+The recipe convenience flag also defaults to `False`.
+
+This compile option selects Circle export policy. It does not change calibration,
+observers, activation dtype or runtime execution mode. It applies only to the
+supported paths and dtype contracts documented here. It does not add support for
+other embedding tables or general native quantized FC execution.
+
+Explicit embedding conversion examples, integration tests and export benchmarks
+must opt in. A runtime benchmark that constructs an explicit Circle graph directly
+already supplies that graph's Q/DQ contract and does not run the compile pipeline.
+Runtime selected-row execution remains controlled independently by the serialized
+graph and runtime settings such as `enable_rowwise_gather`.
+
 ## Why the graph contains explicit conversions
 
 GATHER selects values; it does not convert between quantization domains. Copying
@@ -98,7 +158,9 @@ automatically perform this handoff.
 ## Export-pass invariants
 
 [PreserveEmbeddingQuantization](../tico/quantization/passes/preserve_embedding_quantization.py)
-identifies the supported embedding path before Q/DQ folding. Its export-only
+runs only when `preserve_embedding_quantization=True` and identifies the supported
+embedding path immediately before Q/DQ folding. When disabled, it is absent from
+the pass list and adds no graph nodes or metadata. Its export-only
 markers distinguish a preserved boundary (`EXPLICIT_EMBEDDING` on Quantize) from a
 real float intermediate (`FLOAT_EMBEDDING`). Backward propagation must leave the
 preserved Quantize's arguments and qparam metadata intact, including through layout
@@ -187,8 +249,9 @@ Reference execution does not establish production-runtime or device support.
 
 ## Model adapters and stage interfaces
 
-The small-config integration tests use the real model classes, WrapQ
-prepare/calibrate/convert, production export adapters, Circle files, and fresh
+The small-config integration tests explicitly opt in to this export policy and use
+the real model classes, WrapQ prepare/calibrate/convert, production export adapters,
+Circle files, and fresh
 reference runtime instances. They require a compatible Transformers installation,
 but no checkpoint download or accelerator.
 
@@ -241,8 +304,10 @@ within an artifact, not duplicated packaging across files.
 
 ## Regression coverage
 
-The tests exercise the production export pipeline, Circle save/load and reference
-execution. Relevant coverage includes:
+The explicit embedding tests use `preserve_embedding_quantization=True` through
+the production export pipeline, Circle save/load and reference execution. Direct
+preservation-pass unit tests exercise the pass independently of compile settings.
+Relevant coverage includes:
 
 - [Explicit embedding export](../test/quantization/passes/test_explicit_embedding_export.py):
   integer output contracts, intermediate quantization, scale operands and tied weights.

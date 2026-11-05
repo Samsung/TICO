@@ -54,6 +54,7 @@ from tico.quantization.recipes.evaluation.vlm import (
     run_vqa_evaluation,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
+from tico.quantization.recipes.export.circle import resolve_compile_config
 from tico.quantization.recipes.export.gemma4 import export_gemma4_per_layer
 from tico.quantization.recipes.override_policies import (
     COMMON_LINEAR_MODULES,
@@ -925,4 +926,5 @@ class Gemma4Adapter(ModelAdapter):
                 ple_embedding_format=str(
                     export_cfg.get("ple_embedding_format", "auto")
                 ),
+                compile_config=resolve_compile_config(export_cfg),
             )

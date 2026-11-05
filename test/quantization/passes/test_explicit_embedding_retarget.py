@@ -107,7 +107,10 @@ class ExplicitEmbeddingRetargetTest(unittest.TestCase):
                     and node.args[1] == 0.25
                 )
                 original = fake_quantize.args[1:]
-                prepared = _prepare_exported_program(exported)
+                prepared = _prepare_exported_program(
+                    exported,
+                    config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+                )
                 quantize = next(
                     node
                     for node in prepared.graph.nodes
@@ -142,7 +145,11 @@ class ExplicitEmbeddingRetargetTest(unittest.TestCase):
             with self.subTest(path=path), tempfile.TemporaryDirectory() as directory:
                 module = _EmbeddingConcat(path).eval()
                 # This public path performs torch.export and default Circle O1.
-                converted = tico.convert(module, (ids,))
+                converted = tico.convert(
+                    module,
+                    (ids,),
+                    config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+                )
                 destination = Path(directory) / "embedding.circle"
                 converted.save(destination)
                 document = CircleDocument.load(destination)

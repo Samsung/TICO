@@ -798,11 +798,17 @@ execution mode instead of by guessing backend arithmetic:
   operators it listed and rejected the others; the runtime classifies every supported
   operator as either value-preserving or requantizing.
 
-For explicit constant UINT8 row-wise (axis 0) `DEQUANTIZE -> GATHER` lookups,
-the CPU runtime prepares a selected-row plan once. It restores only requested
+To retain supported explicit embedding boundaries during PyTorch-to-Circle export,
+set `CompileConfigV1(preserve_embedding_quantization=True)` (default: `False`).
+Omitting the option retains the existing embedding export policy.
+
+For serialized constant UINT8 row-wise (axis 0) `DEQUANTIZE -> GATHER` lookups,
+the CPU runtime prepares a selected-row plan once. Runtime planning follows the
+serialized graph independently of compile settings. It restores only requested
 rows, leaving subsequent Q/DQ/MUL boundaries intact and the full-table DQ virtual
 (even in traces). Unsafe target sharing or unsupported row contracts are diagnosed;
-`enable_rowwise_gather=False` is an explicit small-model oracle option. See
+`enable_rowwise_gather=False` is an independent small-model oracle option; the
+compile option does not select runtime execution mode or this optimization. See
 [CPU token embedding](../../docs/cpu_token_embedding.md) for design rationale, memory behavior,
 and external-runtime limitations.
 

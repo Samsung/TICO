@@ -116,7 +116,10 @@ class EmbeddingSharedFloatLayoutTest(unittest.TestCase):
         # Observe, rather than substitute, the real pipeline. The returned
         # ExportedProgram can differ from the program supplied by the caller.
         with patch.object(conversion, "_prepare_exported_program", side_effect=capture):
-            converted = tico.convert_from_exported_program(program)
+            converted = tico.convert_from_exported_program(
+                program,
+                config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+            )
         with TemporaryDirectory() as directory:
             path = Path(directory) / "shared-layout.circle"
             converted.save(path)

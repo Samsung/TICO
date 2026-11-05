@@ -14,16 +14,26 @@
 
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import torch
 
 import tico
+
+from tico.config import CompileConfigBase, CompileConfigV1, get_default_config
 from tico.quantization.wrapq.utils.static_export import (
     prepared_static_export,
     validate_export_execution,
 )
 from tico.utils.utils import SuppressWarning
+
+
+def resolve_compile_config(export_config: Mapping[str, Any]) -> CompileConfigV1:
+    """Resolve the recipe's explicit Circle embedding preservation policy."""
+    preserve = export_config.get("preserve_embedding_quantization", False)
+    if not isinstance(preserve, bool):
+        raise TypeError("export.preserve_embedding_quantization must be a boolean.")
+    return CompileConfigV1(preserve_embedding_quantization=preserve)
 
 
 def convert_and_save_circle(
@@ -34,6 +44,7 @@ def convert_and_save_circle(
     kwargs: dict[str, Any] | None = None,
     dynamic_shapes: Any | None = None,
     strict: bool = False,
+    config: CompileConfigBase | None = None,
 ) -> None:
     """Convert one prepared export stage to Circle and save it."""
     validate_export_execution(module, example_inputs, kwargs=kwargs)
@@ -45,6 +56,7 @@ def convert_and_save_circle(
             kwargs=kwargs,
             dynamic_shapes=dynamic_shapes,
             strict=strict,
+            config=config if config is not None else get_default_config(),
         )
     circle_model.save(save_path)
 
@@ -57,6 +69,7 @@ def export_full_circle(
     name: str = "model.q.circle",
     strict: bool = False,
     max_seq_len: int | None = None,
+    config: CompileConfigBase | None = None,
 ) -> Path:
     """Best-effort full-model Circle export for PTQ/fake-quant models."""
     output_dir = Path(output_dir)
@@ -103,7 +116,13 @@ def export_full_circle(
     )
     validate_export_execution(export_model, args, kwargs=kwargs)
     with preparation, torch.no_grad(), SuppressWarning(UserWarning, ".*"):
-        cm = tico.convert(export_model, args, kwargs=kwargs, strict=strict)
+        cm = tico.convert(
+            export_model,
+            args,
+            kwargs=kwargs,
+            strict=strict,
+            config=config if config is not None else get_default_config(),
+        )
     cm.save(path)
     print(f"Saved Circle model to {path.resolve()}")
     return path

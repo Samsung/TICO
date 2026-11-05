@@ -224,7 +224,12 @@ class FoldQuantOpsEmbeddingTest(unittest.TestCase):
         weight_scale, weight_zero = quantized.wrapped.weight_obs.compute_qparams()
         act_scale, act_zero = quantized.wrapped.act_out_obs.compute_qparams()
         weight, output = self._assert_quantized_embedding_circle(
-            tico.convert(quantized, (tokens,)), explicit=True
+            tico.convert(
+                quantized,
+                (tokens,),
+                config=tico.CompileConfigV1(preserve_embedding_quantization=True),
+            ),
+            explicit=True,
         )
         self.assertEqual(weight.tensor_type, circle.TensorType.TensorType.UINT8)
         self.assertEqual(output.tensor_type, circle.TensorType.TensorType.UINT8)
