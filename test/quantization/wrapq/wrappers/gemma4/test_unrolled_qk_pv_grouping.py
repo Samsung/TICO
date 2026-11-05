@@ -163,7 +163,9 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
         for name, expected_shapes in (
             ("obs_logits_raw", [(1, 9, 7)] * 2),
             ("obs_logits", [(1, 9, 7)] * 2),
-            ("obs_mask_add", [(1, 9, 7)] * 2),
+            # The mask add and softmax keep the [B, rep, T, S] head view; the
+            # per-tensor observer sees the same elements as the flattened rows.
+            ("obs_mask_add", [(1, 3, 3, 7)] * 2),
             ("obs_softmax", [(1, 9, 7)] * 2),
             ("obs_attn_out", [(1, 3, 4)] * 6),
             ("obs_attn_weights", [(1, 6, 3, 7)]),
@@ -219,6 +221,38 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
             for operand in node.args[:2]:
                 self.assertEqual(operand.meta["val"].dim(), 3)
         self.assertFalse(any("repeat" in str(n.target) for n in program.graph.nodes))
+        for actual, expected in zip(program.module()(*args), adapter(*args)):
+            torch.testing.assert_close(actual, expected)
+
+    def test_export_grouping_avoids_mask_and_query_concat(self):
+        """Tm=T masks broadcast over a head view; grouped queries are a reshape."""
+        attention = self._attention(6, 2)
+        args = (*self._inputs(1, 6, 2, 3, False), torch.zeros(1, 1, 3, 7))
+        adapter = _CoreAdapter(attention).eval()
+        program = torch.export.export(adapter, args)
+        cats = [
+            n for n in program.graph.nodes if n.target == torch.ops.aten.cat.default
+        ]
+        # Only the per-head output/weight stacks may concatenate; the mask and
+        # the grouped query rows must not be materialized by a cat.
+        for node in cats:
+            shape = tuple(node.meta["val"].shape)
+            self.assertNotIn(shape, [(1, 9, 7), (1, 9, 4)], node.format_node())
+        adds = [n for n in program.graph.nodes if n.target == torch.ops.aten.add.Tensor]
+        mask_adds = [
+            n for n in adds if any(getattr(a, "name", "") == "mask" for a in n.args)
+        ]
+        self.assertEqual(len(mask_adds), 2)
+        for node in mask_adds:
+            self.assertEqual(tuple(node.meta["val"].shape), (1, 3, 3, 7))
+        softmaxes = [
+            n
+            for n in program.graph.nodes
+            if n.target in (torch.ops.aten._softmax.default, torch.ops.aten.softmax.int)
+        ]
+        self.assertEqual(
+            [tuple(n.meta["val"].shape) for n in softmaxes], [(1, 3, 3, 7)] * 2
+        )
         for actual, expected in zip(program.module()(*args), adapter(*args)):
             torch.testing.assert_close(actual, expected)
 

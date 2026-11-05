@@ -1161,11 +1161,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
             attention_mask=attention_mask,
         )
         kv_rep = self.num_key_value_groups
-        attn_mask = attention_mask.squeeze(1)
-        # A singleton query row broadcasts to every head/token. Otherwise repeat
-        # all T rows in head-major order, retaining the original causal offsets.
-        if kv_rep != 1 and attn_mask.size(-2) != 1:
-            attn_mask = torch.cat([attn_mask] * kv_rep, dim=1)
+        # The [B, 1, Tm, S] mask broadcasts over a [B, rep, T, S] view of the
+        # grouped logits, so no in-graph mask repeat/concat is materialized. A
+        # singleton query row (Tm=1) still broadcasts to every head/token.
+        attn_mask = attention_mask
 
         attn_weights_parts: list[torch.Tensor] = []
         attn_out_parts: list[torch.Tensor] = []
@@ -1173,20 +1172,24 @@ class QuantGemma4TextAttention(QuantModuleBase):
         for kv_idx in range(num_kv_heads):
             key_i = key_states[:, kv_idx, :, :]
             value_i = value_states[:, kv_idx, :, :]
-            query_parts = [
-                query_states[:, kv_idx * kv_rep + rep_idx, :, :]
-                for rep_idx in range(kv_rep)
-            ]
-            query_group = (
-                query_parts[0] if kv_rep == 1 else torch.cat(query_parts, dim=1)
-            )
+            query_group = query_states[
+                :, kv_idx * kv_rep : (kv_idx + 1) * kv_rep, :, :
+            ].reshape(batch_size, kv_rep * q_len, self.head_dim)
             logits = query_group @ key_i.transpose(-2, -1)
             logits = self._apply_attention_scale(logits)
-            logits = self._fq(logits + attn_mask, self.obs_mask_add)
+            kv_len = logits.size(-1)
+            # Keep the head view through the mask add and the softmax. The
+            # softmax is per row either way, but the TRIV3 compiler lowers the
+            # [B, rep, T, S] softmax with half the DLA passes of the flattened
+            # [B, rep*T, S] form (same as the per-head baseline), which is where
+            # the measured prefill gain of the grouped graph comes from.
+            logits = logits.reshape(batch_size, kv_rep, q_len, kv_len) + attn_mask
+            logits = self._fq(logits, self.obs_mask_add)
 
             attn_group = torch.softmax(logits, dim=-1, dtype=torch.float32).to(
                 query_group.dtype
             )
+            attn_group = attn_group.reshape(batch_size, kv_rep * q_len, kv_len)
             if self.training and self.attention_dropout > 0.0:
                 attn_group = F.dropout(
                     attn_group,
