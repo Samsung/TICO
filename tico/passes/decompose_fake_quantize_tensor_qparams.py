@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import operator
-from typing import TYPE_CHECKING, Union
+from typing import Dict, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     import torch._ops
@@ -40,6 +40,30 @@ from tico.utils.validate_args_kwargs import FakeQuantizePerTensorTQParamArgs
 
 
 def get_constant_from_tensor(
+    node: Union[torch.fx.Node, bool, int, float],
+    ep: ExportedProgram,
+    *,
+    _cache: Union[
+        Dict[Union[str, bool, int, float], Union[bool, int, float]], None
+    ] = None,
+) -> Union[bool, int, float]:
+    """Memoizing wrapper around `_get_constant_from_tensor_impl`.
+
+    One cache dict per pass run collapses the repeated scale/zero-point
+    constant-chain walks shared by thousands of fake-quantize nodes.
+
+    `_cache` is internal and keyword-only: pass one dict per pass run to
+    share memoized values across calls, or omit it for a one-off lookup.
+    """
+    if _cache is None:
+        return _get_constant_from_tensor_impl(node, ep)
+    key = node if isinstance(node, (bool, int, float)) else node.name
+    if key not in _cache:
+        _cache[key] = _get_constant_from_tensor_impl(node, ep)
+    return _cache[key]
+
+
+def _get_constant_from_tensor_impl(
     node: Union[torch.fx.Node, bool, int, float], ep: ExportedProgram
 ) -> Union[bool, int, float]:
     """Evaluate supported singleton constant expressions, then extract a scalar.
@@ -198,6 +222,7 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
         gm = exported_program.graph_module
         g = gm.graph
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
+        _const_cache: Dict[Union[str, bool, int, float], Union[bool, int, float]] = {}
 
         # Validate live tuple uses before rewriting any cachemask operation.
         # Dead masks and their dead consumers do not restrict inference export.
@@ -221,7 +246,9 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                 continue
             assert len(node.args) == 6
             try:
-                enabled = get_constant_from_tensor(node.args[3], exported_program)
+                enabled = get_constant_from_tensor(
+                    node.args[3], exported_program, _cache=_const_cache
+                )
             except (AssertionError, AttributeError, RuntimeError, ValueError) as exc:
                 raise RuntimeError(
                     f"{node.target}: fake_quant_enabled must be a compile-time "
@@ -308,8 +335,8 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                     continue
                 # Get constant tensors
                 ep = exported_program
-                s_value = get_constant_from_tensor(s, ep)
-                zp_value = int(get_constant_from_tensor(zp, ep))
+                s_value = get_constant_from_tensor(s, ep, _cache=_const_cache)
+                zp_value = int(get_constant_from_tensor(zp, ep, _cache=_const_cache))
                 quant_kwargs = {
                     **node.kwargs,
                     **{"dtype": get_quant_type(quant_min, quant_max)},
@@ -345,8 +372,8 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
 
                 # Get constant tensors
                 ep = exported_program
-                s_value = get_constant_from_tensor(s, ep)
-                zp_value = int(get_constant_from_tensor(zp, ep))
+                s_value = get_constant_from_tensor(s, ep, _cache=_const_cache)
+                zp_value = int(get_constant_from_tensor(zp, ep, _cache=_const_cache))
                 quant_kwargs = {
                     **node.kwargs,
                     **{"dtype": get_quant_type(quant_min, quant_max)},

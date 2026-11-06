@@ -210,7 +210,7 @@ class _LinearRuleBase(CircleRewriteRule[LinearFusionPlan]):
     def _is_live(self, graph: CircleGraph, operator_index: int) -> bool:
         """Return whether an operator contributes to a serialized graph output."""
 
-        return operator_index in graph.backward_operators(graph.outputs)
+        return operator_index in graph.live_operators()
 
     def _linear_state(
         self,
@@ -222,10 +222,9 @@ class _LinearRuleBase(CircleRewriteRule[LinearFusionPlan]):
     ) -> _LinearState | None:
         """Validate and decode one supported dense FLOAT32 linear operator."""
 
-        operators = as_list(getattr(graph.subgraph, "operators", None))
-        if operator_index < 0 or operator_index >= len(operators):
+        if operator_index < 0 or operator_index >= graph.operator_count:
             return None
-        operator = operators[operator_index]
+        operator = graph.operator(operator_index)
         descriptor = self.descriptors.get(
             operator_builtin_code(document.model, operator)
         )
@@ -397,7 +396,7 @@ class _PostAffineIntoLinearRule(_LinearRuleBase):
             return None
         if not self._is_live(graph, operator_index):
             return None
-        operator = as_list(graph.subgraph.operators)[operator_index]
+        operator = graph.operator(operator_index)
         affine_name = _lookup_name(
             self.affine_codes,
             operator_builtin_code(document.model, operator),
@@ -600,7 +599,7 @@ class _PreAffineIntoFullyConnectedRule(_LinearRuleBase):
             return None
         if not self._is_live(graph, operator_index):
             return None
-        operator = as_list(graph.subgraph.operators)[operator_index]
+        operator = graph.operator(operator_index)
         if operator_builtin_code(document.model, operator) != self.fully_connected_code:
             return None
         linear = self._linear_state(
@@ -614,7 +613,7 @@ class _PreAffineIntoFullyConnectedRule(_LinearRuleBase):
         affine_index = graph.producer(linear.data_tensor)
         if affine_index is None:
             return None
-        affine = as_list(graph.subgraph.operators)[affine_index]
+        affine = graph.operator(affine_index)
         affine_name = _lookup_name(
             self.affine_codes,
             operator_builtin_code(document.model, affine),
@@ -788,7 +787,7 @@ class _HorizontalFullyConnectedRule(_LinearRuleBase):
             return None
         if not self._is_live(graph, operator_index):
             return None
-        operator = as_list(graph.subgraph.operators)[operator_index]
+        operator = graph.operator(operator_index)
         if operator_builtin_code(document.model, operator) != self.add_code:
             return None
         if int(getattr(operator, "builtinOptionsType", 0) or 0) != (
