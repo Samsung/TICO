@@ -1153,12 +1153,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         value_states: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run grouped rank-3 QK, softmax and PV with head-major query rows.
-
-        The PV observer owns [B, rep*T, D] in CALIB and QUANT for every policy,
-        including rep=1. EMA updates once per KV group; axis-based policies
-        refer to the grouped layout, not to the former per-head [B, T, D] view.
-        """
+        """Run grouped rank-3 QK, softmax and PV with head-major query rows."""
         batch_size, _, q_len, num_kv_heads = self._validate_attention_shapes(
             query_states=query_states,
             key_states=key_states,
