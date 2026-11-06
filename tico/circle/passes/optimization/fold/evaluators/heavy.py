@@ -104,6 +104,21 @@ class DequantizeEvaluator(ConstantEvaluator):
             return None
         if output_spec.name != "FLOAT32":
             return None
+        # Keep row-wise lookup tables compressed even with the HEAVY profile.
+        # The runtime plans DQ -> GATHER from these serialized contracts and
+        # restores only the rows requested by dynamic indices. Folding this DQ
+        # would allocate and retain an entire FLOAT32 table before execution.
+        quantization = input_contract.quantization
+        if (
+            input_spec.name == "UINT8"
+            and len(input_contract.shape) == 2
+            and quantization is not None
+            and quantization.quantized_dimension == 0
+            and len(quantization.scale) == input_contract.shape[0]
+            and len(quantization.zero_point) == input_contract.shape[0]
+            and _feeds_dynamic_row_gather(context)
+        ):
+            return None
 
         source = context.input_value(0).data
         if input_spec.name == "FLOAT16":
@@ -137,6 +152,29 @@ class DequantizeEvaluator(ConstantEvaluator):
                 ),
             )
         )
+
+
+def _feeds_dynamic_row_gather(context: ConstantEvaluationContext) -> bool:
+    """Keep row lookups compressed, including cases the CPU plan must reject."""
+
+    operators = as_list(context.graph.subgraph.operators)
+    opcodes = as_list(context.document.model.operatorCodes)
+    output_index = context.output_indices[0]
+    gather_code = _schema_enum_value("BuiltinOperator", "GATHER")
+    for consumer_index in context.graph.consumers(output_index):
+        consumer = operators[consumer_index]
+        opcode = opcodes[int(consumer.opcodeIndex)]
+        inputs = tuple(int(index) for index in consumer.inputs)
+        options = getattr(consumer, "builtinOptions", None)
+        if (
+            int(opcode.builtinCode) == gather_code
+            and len(inputs) == 2
+            and inputs[0] == output_index
+            and int(getattr(options, "axis", 0)) in (0, -2)
+            and not context.graph.is_constant(inputs[1])
+        ):
+            return True
+    return False
 
 
 class FullyConnectedEvaluator(ConstantEvaluator):

@@ -26,6 +26,8 @@ from torch._export.utils import (
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.preserve_embedding_quantization import EXPLICIT_EMBEDDING
+
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam, to_qparam_dtype
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
@@ -225,8 +227,9 @@ class RemoveWeightDequantOp(PassBase):
     node attaches quantization metadata to the weight, and later dequantize
     nodes are removed after verifying that their quantization parameters match.
 
-    Weight and activation qparams describe independent tensor domains, including
-    the table and output of an embedding/GATHER.
+    Weight and activation qparams describe independent tensor domains. Explicit
+    CPU embedding DQs retain their float edges; other users of a shared DQ still
+    connect to the original integer weight.
 
     NOTE Removing a DQ causes a semantic change: f32 -> quantized.
 
@@ -283,6 +286,14 @@ class RemoveWeightDequantOp(PassBase):
 
             else:
                 q_weight.meta[QPARAM_KEY] = quant_param
+
+            if dq.meta.get(EXPLICIT_EMBEDDING):
+                # Keep the CPU float edge while shared FC consumers still see
+                # the original integer weight and its unchanged grid.
+                for user in list(dq.users):
+                    if not user.meta.get(EXPLICIT_EMBEDDING):
+                        user.replace_input_with(dq, q_weight)
+                continue
 
             dq.replace_all_uses_with(q_weight, propagate_meta=False)
             logger.debug(f"{dq.name} is removed.")

@@ -256,7 +256,14 @@ class TestGemma4ConditionalCapabilities(unittest.TestCase):
             for owner in (source, restored):
                 adapter = adapter_type(owner).eval()
                 with torch.no_grad():
-                    converted = tico.convert(adapter, (self.ids,), strict=False)
+                    converted = tico.convert(
+                        adapter,
+                        (self.ids,),
+                        strict=False,
+                        config=tico.CompileConfigV1(
+                            preserve_embedding_quantization=True
+                        ),
+                    )
                 document = CircleDocument.from_bytes(converted.circle_binary)
                 self.assertFalse(document.verify().issues)
                 runtime = CircleReferenceRuntime(document)
@@ -278,10 +285,16 @@ class TestGemma4ConditionalCapabilities(unittest.TestCase):
                 self.assertEqual(
                     output_tensor.quantization.zero_point, (int(snapshot.zero_point),)
                 )
-                self.assertFalse(
+                self.assertTrue(
                     {"QUANTIZE", "DEQUANTIZE"}
-                    & {op.name for op in runtime.program.operators}
+                    <= {op.name for op in runtime.program.operators}
                 )
+                self.assertTrue(runtime.rowwise_gather_plans)
+                for op in runtime.program.operators:
+                    if op.name == "GATHER":
+                        selected = runtime.program.tensor(op.outputs[0])
+                        self.assertEqual(selected.dtype, np.dtype(np.float32))
+                        self.assertIsNone(selected.quantization)
                 actual = runtime.run(
                     [self.ids.numpy()], mode=ExecutionMode.FAKE_QUANTIZE
                 ).outputs[0]

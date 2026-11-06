@@ -30,6 +30,7 @@ import tico.quantization.recipes.adapters.qwen3_vl as qwen_adapter_mod
 import tico.quantization.recipes.export.qwen3_vl as qwen_export
 
 import torch
+from tico.config import CompileConfigV1
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -366,6 +367,7 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
             model_args=_model_args(),
             prefill_decode=True,
             strict=True,
+            compile_config=CompileConfigV1(),
         )
 
 

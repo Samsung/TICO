@@ -100,6 +100,11 @@ def parse_args() -> argparse.Namespace:
             "export.prefill_decode."
         ),
     )
+    parser.add_argument(
+        "--preserve-embedding-quantization",
+        action="store_true",
+        help="Preserve explicit quantization boundaries in supported embedding export paths (default: False).",
+    )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     args = parser.parse_args()
     try:
@@ -124,6 +129,9 @@ def main() -> None:
         overrides.append(f"export.artifacts={args.artifacts}")
     if args.no_prefill_decode:
         overrides.append("export.prefill_decode=false")
+
+    if args.preserve_embedding_quantization:
+        overrides.append("export.preserve_embedding_quantization=true")
 
     cfg = load_recipe_config(args.config, overrides=overrides)
     set_seed(cfg.get("runtime", {}).get("seed", 42))

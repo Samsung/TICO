@@ -87,6 +87,7 @@ class TestExportCircleStage(unittest.TestCase):
                         "kwargs",
                         "dynamic_shapes",
                         "strict",
+                        "config",
                     ),
                 )
                 for name in ("module", "example_inputs", "save_path"):
@@ -98,6 +99,7 @@ class TestExportCircleStage(unittest.TestCase):
                     ("kwargs", None),
                     ("dynamic_shapes", None),
                     ("strict", False),
+                    ("config", None),
                 ):
                     self.assertEqual(
                         parameters[name].kind, inspect.Parameter.KEYWORD_ONLY

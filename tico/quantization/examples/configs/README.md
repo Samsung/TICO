@@ -840,9 +840,17 @@ grammar, the diagnostic JSONL contract and fixed-input comparisons.
 
 ## `export`
 
+`preserve_embedding_quantization` defaults to `false`. Set it to `true` to preserve
+explicit quantization boundaries in supported Llama, Qwen3-VL and Gemma4 embedding
+export paths. Omission and explicit `false` retain the existing embedding export
+policy. The export CLI also accepts `--preserve-embedding-quantization`. This
+compile policy does not change calibration, activation dtype or runtime settings;
+see [CPU embedding contracts](../../../../docs/cpu_token_embedding.md).
+
 ```yaml
 export:
   enabled: false
+  preserve_embedding_quantization: false
   output_dir: ./out/llama
   artifacts:
     - ptq_checkpoint

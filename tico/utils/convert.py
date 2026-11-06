@@ -73,6 +73,9 @@ from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
 )
 from tico.quantization.passes.legalize_quantized_clamp import LegalizeQuantizedClamp
+from tico.quantization.passes.preserve_embedding_quantization import (
+    PreserveEmbeddingQuantization,
+)
 from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBackward
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropPass
@@ -85,7 +88,7 @@ from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.graph import save_fx_graph_as_png
 from tico.utils.model import CircleModel
-from tico.utils.passes import PassManager
+from tico.utils.passes import PassBase, PassManager
 from tico.utils.trace_decorators import (
     trace_const_diff_on_func,
     trace_graph_diff_on_func,
@@ -326,8 +329,11 @@ def _prepare_exported_program(
     # TODO Give an option to enable quantiztion to user
     enable_quantization = has_quantization_ops(exported_program.graph)
     if enable_quantization:
-        quantize_graph = PassManager(
-            passes=[
+        quantization_passes: list[PassBase] = []
+        if config.get("preserve_embedding_quantization") is True:
+            quantization_passes.append(PreserveEmbeddingQuantization())
+        quantization_passes.extend(
+            [
                 FoldQuantOps(),
                 RemoveWeightDequantOp(),
                 PropagateQParamForward(),
@@ -339,6 +345,7 @@ def _prepare_exported_program(
                 InsertQuantizeOnDtypeMismatch(),
             ]
         )
+        quantize_graph = PassManager(passes=quantization_passes)
         quantize_graph.run(exported_program)
 
         # For `torch.ops.aten.split_with_sizes`, the qparam is attached to the corresponding `getitem` nodes.

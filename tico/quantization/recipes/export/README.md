@@ -75,7 +75,13 @@ dump formats, or hardware-specific artifacts.
 `convert_and_save_circle()` is the shared single-stage writer used by the
 LLaMA, Qwen3-VL, and Gemma4 exporters. It puts the supplied module in eval mode,
 converts and saves it, and returns `None`. Callers own input preparation,
-device placement, output-directory creation, and staged I/O contracts.
+device placement, output-directory creation, and staged I/O contracts. Its optional
+`config=` argument forwards the public compile configuration. The LLaMA, Qwen3-VL,
+and Gemma4 staged exporters accept `compile_config=` and forward it to each stage;
+`export_full_circle()` accepts `config=`. Recipe adapters resolve the boolean
+`export.preserve_embedding_quantization` (default `false`) into that configuration.
+See [CPU token embedding](../../../../docs/cpu_token_embedding.md) for the supported
+explicit embedding policy and its limits.
 
 Frozen-state validation and fake-quant execution compatibility are separate.
 CPU-resident BF16 per-channel scales remain valid checkpoint state, but enabled

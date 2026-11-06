@@ -48,6 +48,7 @@ from tico.quantization.recipes.evaluation.vlm import (
     run_vqa_evaluation,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
+from tico.quantization.recipes.export.circle import resolve_compile_config
 from tico.quantization.recipes.export.qwen3_vl import export_qwen3_vl_per_layer
 from tico.quantization.recipes.override_policies import (
     COMMON_LINEAR_MODULES,
@@ -695,6 +696,7 @@ class Qwen3VLAdapter(ModelAdapter):
                 model_args=model_args,
                 prefill_decode=bool(export_cfg.get("prefill_decode", True)),
                 strict=bool(export_cfg.get("strict", False)),
+                compile_config=resolve_compile_config(export_cfg),
             )
 
 

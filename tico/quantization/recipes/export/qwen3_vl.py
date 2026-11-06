@@ -18,6 +18,8 @@ from typing import Any, cast, Mapping
 
 import torch
 
+from tico.config import CompileConfigBase
+
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.qwen3_vl_attention import (
     is_npu_export_text_attention_options,
@@ -285,6 +287,7 @@ def export_qwen3_vl_per_layer(
     model_args: Mapping[str, Any],
     prefill_decode: bool = True,
     strict: bool = False,
+    compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export a floating-point or PTQ-wrapped Qwen3-VL model by runtime stage.
 
@@ -365,6 +368,7 @@ def export_qwen3_vl_per_layer(
         (pixel_values,),
         output_dir / vision_profile.circle_filename(artifact_tag),
         strict=strict,
+        config=compile_config,
     )
 
     token_input_ids = torch.randint(
@@ -380,6 +384,7 @@ def export_qwen3_vl_per_layer(
         output_dir / _circle_name("token_embedding", artifact_tag),
         dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
         strict=strict,
+        config=compile_config,
     )
 
     prefill_input_ids = torch.randint(
@@ -405,6 +410,7 @@ def export_qwen3_vl_per_layer(
             artifact_tag,
         ),
         strict=strict,
+        config=compile_config,
     )
 
     prefill_hidden = torch.randn(1, max_seq_len, hidden_size, device="cpu")
@@ -433,6 +439,7 @@ def export_qwen3_vl_per_layer(
                 "position_embeddings": prefill_position_embeddings,
             },
             strict=strict,
+            config=compile_config,
         )
 
         if layer_idx < deepstack_count:
@@ -452,6 +459,7 @@ def export_qwen3_vl_per_layer(
                     artifact_tag,
                 ),
                 strict=strict,
+                config=compile_config,
             )
 
         if prefill_decode:
@@ -482,6 +490,7 @@ def export_qwen3_vl_per_layer(
                     "past_key_values": (past_key, past_value),
                 },
                 strict=strict,
+                config=compile_config,
             )
 
     lm_head_hidden = torch.randn(1, 1, hidden_size, device="cpu")
@@ -490,4 +499,5 @@ def export_qwen3_vl_per_layer(
         (lm_head_hidden,),
         output_dir / _circle_name("lm_head", artifact_tag),
         strict=strict,
+        config=compile_config,
     )

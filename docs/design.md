@@ -317,7 +317,9 @@ The second graph snapshot is emitted after this phase when graph dumping is enab
 
 ### 5.6 Conditional quantization bundle
 
-TICO detects whether the graph contains quantization operations. Only then it runs:
+TICO detects whether the graph contains quantization operations. Only then it runs
+the following bundle, prepending `PreserveEmbeddingQuantization` when
+`config.get("preserve_embedding_quantization") is True`:
 
 ```text
 FoldQuantOps
@@ -356,6 +358,9 @@ Concat's domain, including through reshape/permute nodes, when the
 quantized dtype matches, the Quantize's sole user is the propagating node, and
 its input has no established quantization domain. A proven requantization retains
 its original boundary even when private.
+Explicit Quantize boundaries marked by `PreserveEmbeddingQuantization` are
+excluded from this retargeting, even when their float inputs have no qparams.
+See [embedding boundary invariants](cpu_token_embedding.md#export-pass-invariants).
 Retargeting updates its scale/zero-point arguments and output qparam metadata
 atomically and stops at its input boundary. Shared Quantize outputs, unsupported
 overloads, and non-affine or non-scalar domains remain unchanged. Serialization
@@ -444,6 +449,7 @@ At the end of conversion:
 | `convert_expand_to_slice_cat` | `False` | `ConvertExpandToSliceCat` |
 | `eliminate_rank_round_trip` | `False` | Currently not consumed; the pass is instantiated with `enabled=True`. |
 | `circle_optimize` | `True` | Shared Circle O1 document pipeline, after packing on the bytes path and before final packing on the file path. |
+| `preserve_embedding_quantization` | `False` | Conditionally inserts `PreserveEmbeddingQuantization` before `FoldQuantOps` to preserve explicit quantization boundaries in supported embedding paths during Circle export. |
 
 `CompileConfigBase.from_dict()` applies only keys already present on the dataclass. The
 current implementation ignores unknown fields rather than rejecting them. Configuration
@@ -479,7 +485,7 @@ The current serializer:
 `NodeVisitor` subclasses register one or more ATen overload targets with the
 `register_node_visitor` decorator. The registry provides both:
 
-- the target-to-visitor mapping used during serialization
+- the target-to-visitor mapping used by the serializer
 - the supported-target set used by pre-serialization validation
 
 A newly added visitor is not useful unless its module is imported by the serializer
@@ -635,8 +641,11 @@ domain. It does not change the export contract above.
 Wrapper fake-quantization calls mark tensor quantization domains and calibration
 points. After decomposition, their Q-DQ pairs are an intermediate representation
 of those domains; they do not require physical Circle `QUANTIZE` and `DEQUANTIZE`
-operators at every marked point. For a producer with no existing qparams,
-`FoldQuantOps` converts its first quantization point into tensor metadata:
+operators at every marked point. With the default embedding export policy, or
+outside embedding paths explicitly preserved by
+`CompileConfigV1(preserve_embedding_quantization=True)`, for a producer with no
+existing qparams, `FoldQuantOps` converts its first quantization point into tensor
+metadata:
 
 ```text
 op -> Q(A) -> DQ(A)    =>    op [QPARAM=A]
@@ -670,46 +679,46 @@ observable even when storage dtypes match.
 MX propagation also checks axis remapping and shared-exponent block membership;
 layouts that regroup blocks are not interchangeable domains.
 
-For NPU-targeted quantized Circle export, every runtime data tensor belonging to
-the quantized graph must carry valid qparams. Semantic index, shape, and control
-values, such as token IDs and gather indices, are excluded. Accidental FLOAT32
-activation or weight islands violate this contract. Multiple consumers alone do
-not justify preserving a producer as float: annotate the producer's quantization
-domain and retain explicit requantization where a downstream domain differs. This
-is an export contract, not a general rejection policy for mixed-precision models.
+For NPU-targeted quantized tensors, valid qparams remain required. Semantic index,
+shape, and control values are excluded. An intentional CPU float island instead
+uses real FLOAT32 tensors without qparams, with explicit conversion operators at
+its integer boundaries; it must not use fabricated qparams to satisfy NPU checks.
 
-For example, embedding table and activation qparams describe independent tensor
-domains. Interpreting fake quantization as the following physical topology is
-incorrect for this contract:
-
-```text
-weight -> DQ -> FLOAT GATHER -> Q
-```
-
-The intended representation is:
+The compile option `preserve_embedding_quantization` defaults to `False`; omission
+and explicit `False` retain the existing embedding export policy. Only explicit
+`True` inserts `PreserveEmbeddingQuantization` immediately before `FoldQuantOps`,
+without changing the following pass order. For supported constant UINT8 rank-two
+row-wise embedding tables (axis 0), this retains the canonical Circle
+representation:
 
 ```text
-quantized embedding table [W-qparam]    integer token/index tensor
-                  |                              |
-                  +------------ GATHER ----------+
-                                  |
-                quantized embedding output [A-qparam]
+Wq [row qparams] -> DEQUANTIZE -> GATHER(float, integer IDs) -> Q_A
+  -> DQ_A -> MUL(float, fake-quantized scale) -> Q_B [original integer ABI]
 ```
 
-The table owns W-qparam and the GATHER output directly owns A-qparam. Neither
-weight dequantization nor output quantization should remain merely to preserve a
-FLOAT32 lookup.
+The optional MUL continuation keeps each intermediate Q/DQ boundary. The shared
+weight is not scaled or modified, and FC consumers keep its original integer
+codes and qparams. GATHER remains a selection operation, with no implicit
+weight-to-activation domain conversion. Explicitly marked float tensors and
+semantic operands are checked separately from quantized NPU data tensors.
 
-The Circle reference runtime treats `GATHER` as value-preserving. Its native
-mode copies table codes and cannot execute independent table/output dtypes, such
-as an INT8 table with UINT8 output, because output dtype validation rejects the
-copied INT8 result. Fake-quantize mode forwards dequantized table values without
-rounding to the output activation grid, so it need not reproduce PyTorch's
-explicit output fake quantization. Structural Circle verification does not
-establish target execution support; these independent embedding domains require
-target-backend validation. Reference parity is separate from the NPU Circle ABI
-and must not be restored by introducing a float island. See the
-[reference execution modes](../tico/circle/README.md#quantized-models).
+The built-in reference CPU runtime prepares the serialized constant-DQ/GATHER
+pattern once, gathering integer rows and corresponding row qparams before restoring
+only the selected FP32 values. The full-table DQ is virtual at execution, including
+tracing. Existing Q/DQ/MUL kernels still execute on selected tensors and preserve
+rounding/clipping. Default O1 and explicit HEAVY constant folding keep this dynamic
+lookup table compressed. Unsupported target plans receive a diagnostic rather
+than a hidden full-table restoration.
+
+The option does not change calibration, observer configuration, activation dtype
+or runtime execution mode, and is never enabled from model or device detection.
+Runtime planning and constant-folding protection follow the serialized graph,
+independently of the compile option. Other quantized export policies are unchanged.
+In particular, legacy embedding artifacts with distinct integer input/output
+domains are not proof of native reference support: GATHER does not requantize codes. Structural verification,
+native reference execution, fake-quant evaluation, and external backend validation
+remain separate checks. See [CPU embedding design and contracts](cpu_token_embedding.md)
+and [reference execution modes](../tico/circle/README.md#quantized-models).
 
 ### 10.3 Recipe architecture
 

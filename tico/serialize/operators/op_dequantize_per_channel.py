@@ -47,23 +47,33 @@ class DequantizePerChannelDefaultVisitor(NodeVisitor):
         scales = args.scales
         zero_points = args.zero_points
         axis = args.axis
-        quant_min = args.quant_min
-        quant_max = args.quant_max
-
-        output_tensor: circle.Tensor.TensorT = self.graph.get_tensor(node)
-        assert not output_tensor.quantization
+        input_tensor = self.graph.get_tensor(input)
+        output_tensor = self.graph.get_tensor(node)
+        assert output_tensor.quantization is None, "DEQUANTIZE output must be float"
         quant_param = circle.QuantizationParameters.QuantizationParametersT()
-        quant_param.min = [quant_min]
-        quant_param.max = [quant_max]
-
-        # Retrieve scale
+        # Qparams belong to the integer input. Decode their actual storage types;
+        # exported observer zero-points may be INT32 or INT64.
         scale_buf = bytes(self.graph.get_buffer(scales).data)
-        quant_param.scale = np.frombuffer(scale_buf, dtype=np.float32).tolist()  # type: ignore[assignment]
-        # Retrieve zp
+        scale_dtype = str(scales.meta["val"].dtype).removeprefix("torch.")
+        quant_param.scale = (
+            np.frombuffer(scale_buf, dtype=scale_dtype).astype(np.float32).tolist()
+        )
         zp_buf = bytes(self.graph.get_buffer(zero_points).data)
-        quant_param.zeroPoint = np.frombuffer(zp_buf, dtype=np.int32).tolist()  # type: ignore[assignment]
+        zp_dtype = str(zero_points.meta["val"].dtype).removeprefix("torch.")
+        quant_param.zeroPoint = (
+            np.frombuffer(zp_buf, dtype=zp_dtype).astype(np.int64).tolist()
+        )
         quant_param.quantizedDimension = axis
-        output_tensor.quantization = quant_param
+        if input_tensor.quantization is not None:
+            existing = input_tensor.quantization
+            if (
+                list(existing.scale) != list(quant_param.scale)
+                or list(existing.zeroPoint) != list(quant_param.zeroPoint)
+                or existing.quantizedDimension != axis
+            ):
+                raise RuntimeError("DEQUANTIZE arguments disagree with input qparams")
+        else:
+            input_tensor.quantization = quant_param
 
         inputs = [input]
         outputs = [node]

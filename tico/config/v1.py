@@ -28,6 +28,8 @@ class CompileConfigV1(CompileConfigBase):
     eliminate_rank_round_trip: bool = False
     # Apply Circle O1 to the built Circle document, independently of the FX passes.
     circle_optimize: bool = True
+    # Preserve explicit quantization boundaries in supported embedding paths during Circle export.
+    preserve_embedding_quantization: bool = False
 
     def get(self, name: str):
         return super().get(name)

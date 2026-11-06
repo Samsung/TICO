@@ -374,7 +374,7 @@ def _pad_v2(ctx: KernelContext) -> tuple[np.ndarray, ...]:
     return (_pad_common(ctx, constant.reshape(())),)
 
 
-def _check_indices(
+def check_indices(
     ctx: KernelContext, indices: np.ndarray, limit: int, *, what: str
 ) -> np.ndarray:
     if indices.dtype.kind not in {"i", "u"}:
@@ -407,7 +407,7 @@ def _gather(ctx: KernelContext) -> tuple[np.ndarray, ...]:
             f"GATHER batch dimensions of params {params.shape} and indices "
             f"{indices.shape} differ."
         )
-    normalized = _check_indices(ctx, indices, params.shape[axis], what="indices")
+    normalized = check_indices(ctx, indices, params.shape[axis], what="indices")
     if batch_dims == 0:
         return (np.take(params, normalized, axis=axis),)
     batch_shape = params.shape[:batch_dims]
@@ -443,7 +443,7 @@ def _gather_nd(ctx: KernelContext) -> tuple[np.ndarray, ...]:
     coordinates = []
     for position in range(depth):
         coordinates.append(
-            _check_indices(
+            check_indices(
                 ctx,
                 indices[..., position],
                 params.shape[position],

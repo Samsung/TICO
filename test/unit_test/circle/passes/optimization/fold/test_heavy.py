@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
+from circle_schema import circle
 
 from tico.circle.document import CircleDocument
 from tico.circle.errors import CircleValueError
@@ -552,6 +554,83 @@ class SerializedDequantizeFoldingTest(unittest.TestCase):
                     result = pipeline.run(document, CirclePassContext())
                     self.assertFalse(result.modified)
                     self.assertEqual(document.to_bytes(), binary)
+
+    def _row_lookup_document(
+        self,
+        *,
+        dtype=np.uint8,
+        axis=0,
+        per_tensor=False,
+        constant_indices=False,
+        shared_output=False,
+        batch_dims=0,
+    ):
+        builder = CircleModelBuilder()
+        value = np.array([[0, 1, 2], [3, 4, 5]], dtype=dtype)
+        extent = 1 if per_tensor else value.shape[axis]
+        table = builder.quantized_constant(
+            "table",
+            value,
+            tensor_type=default_tensor_type_registry()
+            .by_name("UINT8" if dtype is np.uint8 else "INT8")
+            .tensor_type,
+            scale=[0.25 * (i + 1) for i in range(extent)],
+            zero_point=list(range(extent)),
+            quantized_dimension=axis,
+        )
+        indices = (
+            builder.constant("ids", [[1, 0]], dtype=np.int64)
+            if constant_indices
+            else builder.input("ids", (1, 2), dtype=np.int64)
+        )
+        dequantized = builder.activation("dequantized", value.shape)
+        selected = builder.activation("selected", (1, 2, 3))
+        builder.operator("DEQUANTIZE", (table,), (dequantized,))
+        options = circle.GatherOptions.GatherOptionsT()
+        options.axis = 0
+        options.batchDims = batch_dims
+        builder.operator("GATHER", (dequantized, indices), (selected,), options=options)
+        builder.set_outputs(selected, *([dequantized] if shared_output else []))
+        return CircleDocument.from_bytes(builder.build().to_bytes())
+
+    def test_heavy_preserves_compressed_dynamic_row_lookup(self):
+        for shared, batch_dims in ((False, 0), (True, 0), (False, 1)):
+            with self.subTest(shared=shared, batch_dims=batch_dims):
+                document = self._row_lookup_document(
+                    shared_output=shared, batch_dims=batch_dims
+                )
+                before = document.to_bytes()
+                with patch(
+                    "tico.circle.passes.optimization.fold.evaluators.heavy._affine_dequantize",
+                    side_effect=AssertionError("must not restore the table"),
+                ):
+                    result = FoldConstantsPass(
+                        profile=ConstantFoldingProfile.HEAVY
+                    ).run(document, CirclePassContext())
+                self.assertFalse(result.modified)
+                self.assertEqual(document.to_bytes(), before)
+                self.assertTrue(document.verify(raise_on_error=False).ok)
+
+    def test_heavy_still_folds_non_target_dequantize(self):
+        for settings in (
+            {"dtype": np.int8},
+            {"axis": 1},
+            {"per_tensor": True},
+            {"constant_indices": True},
+        ):
+            with self.subTest(settings=settings):
+                document = self._row_lookup_document(**settings)
+                result = FoldConstantsPass(profile=ConstantFoldingProfile.HEAVY).run(
+                    document, CirclePassContext()
+                )
+                self.assertTrue(result.modified)
+                codes = [
+                    document.model.operatorCodes[int(op.opcodeIndex)].builtinCode
+                    for op in document.subgraph().operators
+                ]
+                self.assertNotIn(
+                    circle.BuiltinOperator.BuiltinOperator.DEQUANTIZE, codes
+                )
 
 
 if __name__ == "__main__":

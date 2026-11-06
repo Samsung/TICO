@@ -17,6 +17,8 @@ from typing import Any, cast, Sequence
 
 import torch
 
+from tico.config import CompileConfigBase
+
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.recipes.export.circle import (
     convert_and_save_circle as _convert_and_save,
@@ -232,6 +234,7 @@ def export_token_embedding(
     *,
     artifact_tag: str = "q",
     register_fake_quant_kernels: bool = True,
+    compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export the token embedding stage with the configured precision tag."""
     if register_fake_quant_kernels:
@@ -243,6 +246,7 @@ def export_token_embedding(
         (example,),
         output_dir / _circle_name("token_embedding", artifact_tag),
         dynamic_shapes=dynamic_shapes,
+        config=compile_config,
     )
 
 
@@ -251,6 +255,7 @@ def export_lm_head(
     output_dir: Path,
     *,
     artifact_tag: str = "q",
+    compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export the final normalization and LM head stage."""
     qmodel = cast(QuantLlamaForCausalLM, qmodel)
@@ -259,6 +264,7 @@ def export_lm_head(
         LlamaLMHeadExportAdapter(qmodel),
         (example_hidden,),
         output_dir / _circle_name("lm_head", artifact_tag),
+        config=compile_config,
     )
 
 
@@ -269,6 +275,7 @@ def export_llama_per_layer(
     output_dir: str | Path,
     prefill_decode: bool = False,
     append_prefill_buckets: Sequence[int] | None = None,
+    compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export a floating-point or PTQ-wrapped LLaMA model by stage and layer.
 
@@ -298,6 +305,7 @@ def export_llama_per_layer(
         output_dir=output_dir,
         prefill_decode=prefill_decode,
         append_prefill_buckets=append_prefill_buckets,
+        compile_config=compile_config,
     )
 
 
@@ -310,6 +318,7 @@ def _export_prepared_llama_per_layer(
     output_dir: Path,
     prefill_decode: bool,
     append_prefill_buckets: Sequence[int] | None,
+    compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Write stages without preparing the model a second time."""
     qmodel = cast(QuantLlamaForCausalLM, cast(PTQWrapper, export_model).wrapped)
@@ -328,6 +337,7 @@ def _export_prepared_llama_per_layer(
         output_dir,
         artifact_tag=artifact_tag,
         register_fake_quant_kernels=register_fake_quant_kernels,
+        compile_config=compile_config,
     )
 
     for i, qlayer in enumerate(layers):
@@ -355,6 +365,7 @@ def _export_prepared_llama_per_layer(
                 "attention_mask": attention_mask,
                 "position_embeddings": position_embeddings,
             },
+            config=compile_config,
         )
 
         if prefill_decode:
@@ -371,6 +382,7 @@ def _export_prepared_llama_per_layer(
                     "past_key_value": past,
                     "position_embeddings": pos,
                 },
+                config=compile_config,
             )
 
         for append_seq in append_buckets:
@@ -389,9 +401,12 @@ def _export_prepared_llama_per_layer(
                     "past_key_value": past,
                     "position_embeddings": pos,
                 },
+                config=compile_config,
             )
 
-    export_lm_head(qmodel, output_dir, artifact_tag=artifact_tag)
+    export_lm_head(
+        qmodel, output_dir, artifact_tag=artifact_tag, compile_config=compile_config
+    )
 
 
 def export_llama_bundle(
@@ -401,6 +416,7 @@ def export_llama_bundle(
     output_dir: str | Path,
     tokenizer: Any = None,
     append_prefill_buckets: Sequence[int] | None = None,
+    compile_config: CompileConfigBase | None = None,
 ) -> Path:
     """Export paired Circle stages and their self-contained host contracts.
 
@@ -442,6 +458,7 @@ def export_llama_bundle(
         output_dir=output_dir,
         prefill_decode=True,
         append_prefill_buckets=append_buckets,
+        compile_config=compile_config,
     )
     return write_llama_bundle(
         metadata=metadata,
