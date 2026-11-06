@@ -375,7 +375,8 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
                     softmaxes = [
                         node
                         for node in program.graph.nodes
-                        if node.target in (
+                        if node.target
+                        in (
                             torch.ops.aten._softmax.default,
                             torch.ops.aten.softmax.int,
                         )

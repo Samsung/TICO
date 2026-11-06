@@ -1198,9 +1198,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
 
             # Quantization is complete before restoring the original head order.
             weights_heads = attn_group.reshape(batch_size, kv_rep, q_len, kv_len)
-            output_heads = out_group.reshape(
-                batch_size, kv_rep, q_len, self.head_dim
-            )
+            output_heads = out_group.reshape(batch_size, kv_rep, q_len, self.head_dim)
             for rep_idx in range(kv_rep):
                 attn_weights_parts.append(weights_heads[:, rep_idx, :, :])
                 attn_out_parts.append(output_heads[:, rep_idx, :, :])
