@@ -378,7 +378,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
             if node.op == "call_function"
             and any(name in str(node.target) for name in ("matmul", "bmm"))
         ]
-        self.assertEqual(len(matmul_nodes), 2 * cfg.num_attention_heads)
+        self.assertEqual(len(matmul_nodes), 2 * cfg.num_key_value_heads)
         for node in matmul_nodes:
             for argument in node.args[:2]:
                 value = getattr(argument, "meta", {}).get("val")
