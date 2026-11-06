@@ -1153,7 +1153,12 @@ class QuantGemma4TextAttention(QuantModuleBase):
         value_states: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run rank-3 QK/PV with head-major query rows sharing each K/V head."""
+        """Run grouped rank-3 QK, softmax and PV with head-major query rows.
+
+        The PV observer owns [B, rep*T, D] in CALIB and QUANT for every policy,
+        including rep=1. EMA updates once per KV group; axis-based policies
+        refer to the grouped layout, not to the former per-head [B, T, D] view.
+        """
         batch_size, _, q_len, num_kv_heads = self._validate_attention_shapes(
             query_states=query_states,
             key_states=key_states,
@@ -1178,18 +1183,15 @@ class QuantGemma4TextAttention(QuantModuleBase):
             logits = query_group @ key_i.transpose(-2, -1)
             logits = self._apply_attention_scale(logits)
             kv_len = logits.size(-1)
-            # Keep the head view through the mask add and the softmax. The
-            # softmax is per row either way, but the TRIV3 compiler lowers the
-            # [B, rep, T, S] softmax with half the DLA passes of the flattened
-            # [B, rep*T, S] form (same as the per-head baseline), which is where
-            # the measured prefill gain of the grouped graph comes from.
+            # Use the head view only for mask broadcasting, then restore the
+            # grouped rows before softmax. No repeated mask is materialized.
             logits = logits.reshape(batch_size, kv_rep, q_len, kv_len) + attn_mask
             logits = self._fq(logits, self.obs_mask_add)
+            logits = logits.reshape(batch_size, kv_rep * q_len, kv_len)
 
             attn_group = torch.softmax(logits, dim=-1, dtype=torch.float32).to(
                 query_group.dtype
             )
-            attn_group = attn_group.reshape(batch_size, kv_rep * q_len, kv_len)
             if self.training and self.attention_dropout > 0.0:
                 attn_group = F.dropout(
                     attn_group,
@@ -1197,36 +1199,16 @@ class QuantGemma4TextAttention(QuantModuleBase):
                     training=True,
                 )
             attn_group = self._fq(attn_group, self.obs_softmax)
-            out_group = attn_group @ value_i
+            out_group = self._fq(attn_group @ value_i, self.obs_attn_out)
 
-            # Calibration retains the original ordered head samples (including
-            # EMA updates). With a frozen scalar affine grid, applying that same
-            # pointwise FQ before splitting is equivalent and gives the grouped
-            # PV tensor a Circle quantization domain. Channel/MX policies retain
-            # their original head-local interpretation.
-            grouped_output_fq = (
-                self._mode is Mode.QUANT
-                and isinstance(self.obs_attn_out, AffineObserverBase)
-                and self.obs_attn_out.channel_axis is None
+            # Quantization is complete before restoring the original head order.
+            weights_heads = attn_group.reshape(batch_size, kv_rep, q_len, kv_len)
+            output_heads = out_group.reshape(
+                batch_size, kv_rep, q_len, self.head_dim
             )
-            if kv_rep != 1 and grouped_output_fq:
-                out_group = self._fq(out_group, self.obs_attn_out)
-            if kv_rep == 1:
-                attn_weights_parts.append(attn_group)
-                attn_out_parts.append(self._fq(out_group, self.obs_attn_out))
-            else:
-                weights_heads = attn_group.reshape(batch_size, kv_rep, q_len, -1)
-                output_heads = out_group.reshape(
-                    batch_size, kv_rep, q_len, self.head_dim
-                )
-                for rep_idx in range(kv_rep):
-                    attn_weights_parts.append(weights_heads[:, rep_idx, :, :])
-                    out_i = output_heads[:, rep_idx, :, :]
-                    attn_out_parts.append(
-                        out_i
-                        if grouped_output_fq
-                        else self._fq(out_i, self.obs_attn_out)
-                    )
+            for rep_idx in range(kv_rep):
+                attn_weights_parts.append(weights_heads[:, rep_idx, :, :])
+                attn_out_parts.append(output_heads[:, rep_idx, :, :])
 
         attn_weights = self._fq(
             torch.stack(attn_weights_parts, dim=1),

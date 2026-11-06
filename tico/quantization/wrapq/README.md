@@ -149,6 +149,27 @@ Once a registered wrapper is selected, its constructor errors propagate unchange
 in either mode. A wrapper's `NotImplementedError` for an unsupported model variant
 therefore fails preparation immediately, including with `strict_wrap=False`.
 
+### Gemma4 grouped attention boundaries
+
+Gemma4's unrolled attention uses rank-3 QK, Softmax and PV tensors. Only mask
+addition keeps the `[B, g, T, S]` head view so that a shared `[B, 1, Tm, S]`
+mask broadcasts without being concatenated. `obs_mask_add` retains that rank-4
+boundary; its result is flattened before Softmax. Here `g = Hq / Hkv`.
+
+`obs_attn_out` observes and fake-quantizes the grouped PV output `[B, g*T, D]`
+once per KV group in both CALIB and QUANT, including `g=1`. Head splitting is
+only a layout operation and adds no head-local quantization. EMA therefore
+updates once per group, not once per query head. This intentionally changes
+fresh calibration statistics; it does not promise legacy head-wise EMA parity.
+
+Axis-based policies at this site refer to `[B, g*T, D]`: the last axis is `D`,
+and axis 1 is the grouped row axis. Per-channel row grids have `g*T` entries;
+MX policies along that axis may share exponents across former head boundaries.
+Reprepare and recalibrate when adopting these statistics or changing an axis
+policy; do not reinterpret old head-local row grids as grouped grids. Frozen
+scalar affine grids remain pointwise compatible. Eager support for a policy
+alone does not establish its Circle or target-backend support.
+
 ---
 
 ## 4. Simple API Usage
