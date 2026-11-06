@@ -15,10 +15,12 @@
 """Regression contracts for the actual grouped Gemma4 attention wrapper core."""
 
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import torch
 from tico.quantization.wrapq.dtypes import UINT8
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
@@ -212,7 +214,7 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
     def test_pv_boundary_is_grouped_for_all_modes_and_policies(self):
         """CALIB and QUANT use the same rank-3 PV boundary, including g=1."""
         affine = {"dtype": UINT8, "qscheme": QScheme.PER_TENSOR_ASYMM}
-        policies = (
+        policies: tuple[tuple[str, type[ObserverBase], dict[str, Any]], ...] = (
             ("minmax", MinMaxObserver, affine),
             ("ema", EMAObserver, {**affine, "momentum": 0.9}),
             ("identity", IdentityObserver, {}),
