@@ -15,9 +15,17 @@
 """Regression contracts for the actual grouped Gemma4 attention wrapper core."""
 
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import torch
+from tico.quantization.wrapq.dtypes import UINT8
+from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.ema import EMAObserver
+from tico.quantization.wrapq.observers.identity import IdentityObserver
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
     QuantGemma4TextAttention,
 )
@@ -82,7 +90,7 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
         return *tensors, value
 
     def test_masks_noncontiguous_and_head_token_order(self):
-        """Tm=1 broadcasts; Tm=T repeats all rows, even when B and T exceed one."""
+        """Shared masks broadcast correctly with multiple batches and query rows."""
         for heads, kv_heads, batch, tokens, noncontiguous in (
             (24, 8, 2, 3, True),
             (4, 2, 1, 4, False),
@@ -155,7 +163,7 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
         )
 
     def test_observer_shapes_and_return_only_weights_boundary(self):
-        """Group upstream sites, retain head-wise PV and stack-only weight FQ."""
+        """Observe grouped PV and keep the return-only weight boundary off PV."""
         attention = self._attention(6, 2)
         query, key, value = self._inputs(1, 6, 2, 3, False)
         with patch.object(attention, "_fq", wraps=attention._fq) as calls:
@@ -163,11 +171,10 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
         for name, expected_shapes in (
             ("obs_logits_raw", [(1, 9, 7)] * 2),
             ("obs_logits", [(1, 9, 7)] * 2),
-            # The mask add and softmax keep the [B, rep, T, S] head view; the
-            # per-tensor observer sees the same elements as the flattened rows.
+            # Only the mask add keeps the [B, rep, T, S] broadcast view.
             ("obs_mask_add", [(1, 3, 3, 7)] * 2),
             ("obs_softmax", [(1, 9, 7)] * 2),
-            ("obs_attn_out", [(1, 3, 4)] * 6),
+            ("obs_attn_out", [(1, 9, 4)] * 2),
             ("obs_attn_weights", [(1, 6, 3, 7)]),
             ("obs_attn_out_h", [(1, 3, 6, 4)]),
         ):
@@ -203,6 +210,95 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
             torch.testing.assert_close(
                 observer.fake_quant(group), headwise, atol=0, rtol=0
             )
+
+    def test_pv_boundary_is_grouped_for_all_modes_and_policies(self):
+        """CALIB and QUANT use the same rank-3 PV boundary, including g=1."""
+        affine = {"dtype": UINT8, "qscheme": QScheme.PER_TENSOR_ASYMM}
+        policies: tuple[tuple[str, type[ObserverBase], dict[str, Any]], ...] = (
+            ("minmax", MinMaxObserver, affine),
+            ("ema", EMAObserver, {**affine, "momentum": 0.9}),
+            ("identity", IdentityObserver, {}),
+            ("mx_feature", MXObserver, {"axis": -1}),
+            ("mx_row", MXObserver, {"axis": 1}),
+            (
+                "per_channel_feature",
+                MinMaxObserver,
+                {
+                    "dtype": UINT8,
+                    "qscheme": QScheme.PER_CHANNEL_ASYMM,
+                    "channel_axis": -1,
+                },
+            ),
+            (
+                "per_channel_row",
+                MinMaxObserver,
+                {
+                    "dtype": UINT8,
+                    "qscheme": QScheme.PER_CHANNEL_ASYMM,
+                    "channel_axis": 1,
+                },
+            ),
+        )
+        for heads, kv_heads in ((4, 4), (6, 2)):
+            for name, observer_type, kwargs in policies:
+                with self.subTest(heads=heads, kv_heads=kv_heads, policy=name):
+                    torch.manual_seed(708)
+                    attention = self._attention(heads, kv_heads)
+                    observer = observer_type(name="attn_out", **kwargs)
+                    attention.obs_attn_out = observer
+                    attention.enable_calibration()
+                    hidden = torch.randn(1, 3, attention.config.hidden_size)
+                    rope = (torch.ones(1, 3, 4), torch.zeros(1, 3, 4))
+                    attention(hidden, rope, attention_mask=torch.zeros(1, 1, 3, 3))
+                    args = (
+                        *self._inputs(1, heads, kv_heads, 3, False),
+                        torch.zeros(1, 1, 3, 7),
+                    )
+                    expected = [(1, heads // kv_heads * 3, 4)] * kv_heads
+                    for quantized in (False, True):
+                        with self.subTest(quantized=quantized):
+                            if quantized:
+                                attention.freeze_qparams()
+                                self.assertFalse(observer.enabled)
+                            with patch.object(
+                                attention, "_fq", wraps=attention._fq
+                            ) as calls:
+                                output, weights = _CoreAdapter(attention)(*args)
+                            shapes = [
+                                tuple(call.args[0].shape)
+                                for call in calls.call_args_list
+                                if call.args[1] is observer
+                            ]
+                            self.assertEqual(shapes, expected)
+                            self.assertTrue(torch.isfinite(output).all())
+                            self.assertTrue(torch.isfinite(weights).all())
+
+    def test_pv_ema_updates_once_per_group(self):
+        """EMA tracks group extrema rather than replaying head-wise updates."""
+        torch.manual_seed(709)
+        attention = self._attention(6, 2)
+        observer = EMAObserver(
+            name="attn_out",
+            dtype=UINT8,
+            qscheme=QScheme.PER_TENSOR_ASYMM,
+            momentum=0.9,
+        )
+        attention.obs_attn_out = observer
+        attention.enable_calibration()
+        query = torch.zeros(1, 6, 3, 4)
+        key = torch.zeros(1, 2, 7, 4)
+        value = torch.tensor([1.0, 10.0]).reshape(1, 2, 1, 1).expand(1, 2, 7, 4)
+        with patch.object(observer, "collect", wraps=observer.collect) as calls:
+            _CoreAdapter(attention)(query, key, value, torch.zeros(1, 1, 3, 7))
+        groups = [call.args[0] for call in calls.call_args_list]
+        self.assertEqual([tuple(group.shape) for group in groups], [(1, 9, 4)] * 2)
+        expected_min, expected_max = groups[0].min(), groups[0].max()
+        momentum = observer.momentum
+        for group in groups[1:]:
+            expected_min = momentum * expected_min + (1 - momentum) * group.min()
+            expected_max = momentum * expected_max + (1 - momentum) * group.max()
+        torch.testing.assert_close(observer.min_val, expected_min, atol=0, rtol=0)
+        torch.testing.assert_close(observer.max_val, expected_max, atol=0, rtol=0)
 
     def test_export_grouped_matmul_shapes(self):
         """24/8 has eight rank-3 QK and eight PV operations, without K/V repeats."""
@@ -251,13 +347,13 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
             if n.target in (torch.ops.aten._softmax.default, torch.ops.aten.softmax.int)
         ]
         self.assertEqual(
-            [tuple(n.meta["val"].shape) for n in softmaxes], [(1, 3, 3, 7)] * 2
+            [tuple(n.meta["val"].shape) for n in softmaxes], [(1, 9, 7)] * 2
         )
         for actual, expected in zip(program.module()(*args), adapter(*args)):
             torch.testing.assert_close(actual, expected)
 
     def test_g1_avoids_group_concat(self):
-        """No extra grouping/reorder nodes are needed with one query per KV."""
+        """No group concat is introduced with one query per KV."""
         attention = self._attention(4, 4)
         args = (*self._inputs(1, 4, 4, 3, False), torch.zeros(1, 1, 3, 7))
         program = torch.export.export(_CoreAdapter(attention).eval(), args)
@@ -265,6 +361,39 @@ class TestUnrolledQKPVGrouping(unittest.TestCase):
         self.assertFalse(
             any(n.target == torch.ops.aten.cat.default for n in program.graph.nodes)
         )
+
+    def test_rank_three_softmax_for_g1_and_decode(self):
+        """Both g=1 and g>1 keep decode/prefill softmax on grouped rank-3 rows."""
+        for heads, kv_heads in ((4, 4), (6, 2)):
+            for tokens in (1, 3):
+                with self.subTest(heads=heads, kv_heads=kv_heads, tokens=tokens):
+                    attention = self._attention(heads, kv_heads)
+                    args = (
+                        *self._inputs(1, heads, kv_heads, tokens, False),
+                        torch.zeros(1, 1, tokens, 7),
+                    )
+                    adapter = _CoreAdapter(attention).eval()
+                    program = torch.export.export(adapter, args)
+                    softmaxes = [
+                        node
+                        for node in program.graph.nodes
+                        if node.target
+                        in (
+                            torch.ops.aten._softmax.default,
+                            torch.ops.aten.softmax.int,
+                        )
+                    ]
+                    expected = (1, heads // kv_heads * tokens, 7)
+                    self.assertEqual(len(softmaxes), kv_heads)
+                    for node in softmaxes:
+                        self.assertEqual(
+                            tuple(node.args[0].meta["val"].shape), expected
+                        )
+                        self.assertEqual(tuple(node.meta["val"].shape), expected)
+                    for actual, expected_output in zip(
+                        program.module()(*args), adapter(*args)
+                    ):
+                        torch.testing.assert_close(actual, expected_output)
 
     def test_training_dropout_remains_supported(self):
         """Grouped call shapes may change samples, but training still executes gradients."""
