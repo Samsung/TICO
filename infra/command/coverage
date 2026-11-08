@@ -10,4 +10,4 @@
 
 CCEX_SCRIPTS_PATH="${CCEX_PROJECT_PATH}/infra/scripts"
 
-source ${CCEX_SCRIPTS_PATH}/coverage.sh "$@"
+source "${CCEX_SCRIPTS_PATH}/coverage.sh" "$@"
