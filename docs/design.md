@@ -280,6 +280,11 @@ promotion and promotion introduced only by an inner Clamp. The rewrite uses the
 original result metadata rather than the current default dtype and preserves
 other users of the original input and any shared inner Clamp.
 
+`RemoveRedundantReshapePattern1` removes a leading singleton around a rank-three
+permute and multiplication only when every unchanged tensor multiplier has rank at
+most three. A rank-four multiplier can restore that axis through broadcasting, so
+the original final reshape must remain to preserve the graph's output rank.
+
 `LowerPow2ToMul` squares in the original power's exported result dtype. If scalar
 promotion changes the base dtype, it casts before multiplying: integer `x.pow(2.0)`
 and boolean `x.pow(2)` retain their floating and integer result types respectively.

@@ -65,3 +65,15 @@ class ReshapeTorchAPI(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randn(2, 4, 5),), {}
+
+
+class ReshapePermuteMulBroadcast(TestModuleBase):
+    def forward(self, x, other):
+        permuted = x.reshape(1, 2, 3, 4).permute(0, 1, 3, 2)
+        return (permuted * other).reshape(2, 4, 3)
+
+    def get_example_inputs(self):
+        return (
+            torch.arange(24, dtype=torch.float32).reshape(2, 3, 4),
+            torch.arange(24, dtype=torch.float32).reshape(1, 2, 4, 3),
+        ), {}

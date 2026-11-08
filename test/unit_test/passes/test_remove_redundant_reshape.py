@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import unittest
 
+import numpy as np
+import tico
 import torch
+from circle_schema import circle
 
+from tico.circle import CircleDocument
 from tico.passes import ops
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.passes.remove_redundant_reshape import (
@@ -62,6 +67,119 @@ class RemoveRedundantReshapePattern1Test(SinglePassValueTest):
         for node in self.exported_program().graph.nodes:
             if not node.op == "call_function":
                 continue
+
+
+class _ReshapePermuteMul(torch.nn.Module):
+    def __init__(self, reverse=False, square=False, share=None):
+        super().__init__()
+        self.reverse = reverse
+        self.square = square
+        self.share = share
+
+    def forward(self, x, other):
+        expanded = x.reshape(1, *x.shape)
+        permuted = expanded.permute(0, 1, 3, 2)
+        multiplier = permuted if self.square else other
+        product = multiplier * permuted if self.reverse else permuted * multiplier
+        result = product.reshape(*product.shape[1:])
+        if self.share == "reshape":
+            return result, expanded
+        if self.share == "permute":
+            return result, permuted
+        if self.share == "mul":
+            return result, product
+        return result
+
+
+class RemoveRedundantReshapePattern1BroadcastTest(unittest.TestCase):
+    def _apply(self, model, args, expected_modified, dynamic_shapes=None):
+        ep = torch.export.export(model.eval(), args, dynamic_shapes=dynamic_shapes)
+        ConvertLayoutOpToReshape().call(ep)
+        self.assertEqual(num_of_ops(ep, ops.aten.reshape), 2)
+        expected = model(*args)
+        with ep.graph_module._set_replace_hook(ep.graph_signature.get_replace_hook()):
+            result = RemoveRedundantReshapePattern1().call(ep)
+        self.assertEqual(result.modified, expected_modified)
+        self.assertEqual(
+            num_of_ops(ep, ops.aten.reshape), 0 if expected_modified else 2
+        )
+        ep.validate()
+        torch.testing.assert_close(ep.module()(*args), expected, rtol=0, atol=0)
+        graph = str(ep.graph)
+        self.assertFalse(RemoveRedundantReshapePattern1().call(ep).modified)
+        self.assertEqual(str(ep.graph), graph)
+        return ep
+
+    def test_rank_four_multiplier_preserves_final_reshape(self):
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        for shape in ((1, 2, 4, 3), (1, 1, 1, 3), (1, 1, 4, 1)):
+            for reverse in (False, True):
+                with self.subTest(shape=shape, reverse=reverse):
+                    other = torch.arange(math.prod(shape), dtype=x.dtype).reshape(shape)
+                    self._apply(_ReshapePermuteMul(reverse), (x, other), False)
+
+    def test_scalar_and_lower_rank_multipliers_still_fuse(self):
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        for other in (
+            3.0,
+            torch.tensor(3.0),
+            torch.arange(3, dtype=x.dtype),
+            torch.arange(4, dtype=x.dtype).reshape(4, 1),
+            torch.arange(24, dtype=x.dtype).reshape(2, 4, 3),
+        ):
+            for reverse in (False, True):
+                with self.subTest(other=other, reverse=reverse):
+                    self._apply(_ReshapePermuteMul(reverse), (x, other), True)
+
+    def test_repeated_permute_operand_still_fuses(self):
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        self._apply(_ReshapePermuteMul(square=True), (x, torch.tensor(1.0)), True)
+
+    def test_shared_intermediates_are_unchanged(self):
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        for share in ("reshape", "permute", "mul"):
+            with self.subTest(share=share):
+                self._apply(
+                    _ReshapePermuteMul(share=share), (x, torch.tensor(3.0)), False
+                )
+
+    def test_dynamic_batch_preserves_rank_for_all_batch_sizes(self):
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        batch = torch.export.Dim("batch", min=1, max=4)
+        for shape, expected_modified in (((4, 3), True), ((1, 1, 4, 3), False)):
+            with self.subTest(shape=shape):
+                other = torch.arange(math.prod(shape), dtype=x.dtype).reshape(shape)
+                model = _ReshapePermuteMul()
+                ep = self._apply(
+                    model,
+                    (x, other),
+                    expected_modified,
+                    dynamic_shapes=({0: batch}, None),
+                )
+                for size in (1, 3, 4):
+                    value = torch.arange(size * 12, dtype=x.dtype).reshape(size, 3, 4)
+                    torch.testing.assert_close(
+                        ep.module()(value, other), model(value, other), rtol=0, atol=0
+                    )
+
+    def test_default_o1_circle_output_shape_and_values(self):
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        for shape in ((2, 4, 3), (1, 2, 4, 3), (1, 1, 1, 3)):
+            for reverse in (False, True):
+                with self.subTest(shape=shape, reverse=reverse):
+                    other = torch.arange(math.prod(shape), dtype=x.dtype).reshape(shape)
+                    model = _ReshapePermuteMul(reverse).eval()
+                    converted = tico.convert(model, (x, other))
+                    document = CircleDocument.from_bytes(converted.circle_binary)
+                    document.verify()
+                    graph = document.model.subgraphs[0]
+                    self.assertEqual(len(graph.outputs), 1)
+                    output = graph.tensors[graph.outputs[0]]
+                    self.assertEqual(list(output.shape), [2, 4, 3])
+                    self.assertEqual(output.type, circle.TensorType.TensorType.FLOAT32)
+                    np.testing.assert_array_equal(
+                        converted(x, other), model(x, other).numpy()
+                    )
 
 
 class RedundantReshapePattern2(torch.nn.Module):

@@ -61,6 +61,9 @@ class RemoveRedundantReshapePattern1(PassBase):
             `(AxBxC) - aten.reshape` - (1xAxBxC) - `aten.permute` - (1xAxCxB) - `aten.mul` - (1xAxCxB) - `aten.reshape - (AxCxB)`
         [AFTER]
             `(AxBxC) - `aten.permute` - (AxCxB) - `aten.mul` - (AxCxB)`
+
+        All unchanged tensor operands of mul must have rank at most three:
+        a rank-four operand would restore the leading axis through broadcasting.
         """
         logger = logging.getLogger(__name__)
 
@@ -100,6 +103,13 @@ class RemoveRedundantReshapePattern1(PassBase):
             if not is_target_node(mul, RemoveRedundantReshapePattern1.mul_ops):
                 continue
             if len(mul.users) != 1:
+                continue
+            if any(
+                isinstance(operand.meta["val"], torch.Tensor)
+                and operand.meta["val"].ndim > 3
+                for operand in mul.all_input_nodes
+                if operand is not permute
+            ):
                 continue
 
             ### second reshape
