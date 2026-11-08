@@ -1,5 +1,7 @@
 # algorithm
 
+[Quantization overview](../README.md) · [Documentation index](../../../docs/README.md)
+
 The _algorithm_ module implements quantization algorithms and preprocessing methods
 for deep learning. Some methods transform model weights before a later quantization
 stage, while others quantize weights or reconstruct activation quantization parameters.
@@ -7,16 +9,24 @@ They are not all graph rewrites or preprocessing steps.
 
 ## Available Algorithms
 
-| Algorithm | Directory | Description |
+| Algorithm | Reference | Description |
 |---|---|---|
 | GPTQ | [`gptq/`](./gptq/README.md) | Accurate post-training weight quantization |
+| Universal GPTQ | [Configuration source](../config/gptq.py), [implementation](./universal_gptq/quantizer.py) | Replay-based GPTQ with configurable module caching and GPTQ core |
+| FPI-GPTQ | [`fpi_gptq/`](./fpi_gptq/README.md) | Fixed-point-iteration GPTQ variant |
+| Qwen3-VL GPTQ | [`qwen3_vl_gptq/`](./qwen3_vl_gptq/README.md) | GPTQ specialization for Qwen3-VL models |
+| Gemma4 GPTQ | [`gemma4_gptq/`](./gemma4_gptq/README.md) | Stage-wise GPTQ for Gemma4 vision and text components |
 | Block reconstruction | [`block_reconstruction/`](./block_reconstruction/README.md) | Fixed-weight activation-qparam reconstruction |
 | AdaRound | [`adaround/`](./adaround/README.md) | Validation-aware hard Conv2d weight rounding |
 | SmoothQuant | [`smoothquant/`](./smoothquant/README.md) | Migrates activation outliers into weights via per-channel smoothing |
 | SpinQuant | [`spinquant/`](./spinquant/README.md) | Rotation-based outlier reduction |
 | CLE | [`cle/`](./cle/README.md) | Cross-Layer Equalization |
-| FPI-GPTQ | `fpi_gptq/` | Fixed-point-iteration GPTQ variant |
-| Qwen3-VL GPTQ | `qwen3_vl_gptq/` | GPTQ specialization for Qwen3-VL models |
+
+For Universal GPTQ recipe examples, see the
+[LLaMA preset](../examples/configs/llama_universal_gptq_quantize.yaml) and
+[Qwen3-VL preset](../examples/configs/qwen3_vl_universal_gptq_quantize.yaml).
+Both select the `universal` GPTQ stage variant; the configuration source documents
+`UniversalGPTQConfig` and its `gptq_factory` selection.
 
 ## Design Philosophy
 

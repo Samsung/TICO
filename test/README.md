@@ -1,6 +1,18 @@
-# test module
+# TICO tests
 
-This is a module for TICO unittest.
+This directory contains TICO's automated tests and performance benchmarks.
+
+## Test documentation
+
+| Task | Guide |
+|---|---|
+| Set up the test environment and run or filter tests | [Development guide](../docs/development.md) |
+| Understand test layers, validation criteria, and CI coverage | [System Test Guide](../docs/system_test.md) |
+| Add operator or network conversion test modules | [Test target modules](modules/README.md) |
+| Follow the conversion and comparison flow | [Conversion harness](pt2_to_circle_test/README.md) |
+| Run opt-in model-family tests with their dependencies | [Model tests](../docs/development.md#model-tests) |
+| Check numerical equivalence of Circle rewrites | [Circle value-test support](support/circle/README.md) |
+| Measure conversion, serialization, or Circle pass performance | [Performance benchmarks](performance/README.md) |
 
 ## How to debug using vscode?
 

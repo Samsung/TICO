@@ -7,6 +7,22 @@ debug workflows.
 Evaluation helpers are kept outside examples so that metrics can be shared
 across FP models, fake-quant models, checkpoint evaluation, and regression tests.
 
+See the [recipe developer guide](../README.md) for the adapter/helper boundaries.
+
+## Related evaluation guides
+
+- [Evaluation CLI](../../examples/README.md#evaluate): run configured tasks on an
+  FP model or a saved checkpoint.
+- [Evaluation configuration](../../examples/configs/README.md#evaluation): select
+  tasks and configure benchmark-specific settings.
+- [MMMU-Pro protocol and diagnostics](MMMU.md): prompt modes, parsing, and
+  per-sample comparison.
+- [LLaVA-Bench judge workflow](../../examples/README.md#llava-bench-judge-evaluation):
+  generate and compare FP/Quant answers with a judge.
+- [PyTorch/Circle output comparison API](../../evaluation/README.md): compare a
+  PyTorch module with a `CircleModel` on a selected backend using output metrics.
+  This is a separate API from the recipe benchmark helpers described here.
+
 ## Standard quality protocol: FP eager vs Quant eager
 
 LLaMA, Qwen3-VL, and Gemma4 use the same eager evaluation policy through

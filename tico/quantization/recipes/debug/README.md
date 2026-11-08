@@ -6,6 +6,19 @@ Debug utilities live in `tico.quantization.recipes.debug` and are exposed throug
 The purpose of this package is to avoid accumulating one-off debug scripts under
 `examples/`.
 
+See the [CLI examples](../../examples/README.md#inspect--debug) for command entry
+points and the [recipe developer guide](../README.md) for package responsibilities.
+
+## Debug workflows
+
+| Task | Guide |
+|---|---|
+| Trace FP vs PTQ module outputs | [Existing trace mode](#existing-trace-mode) |
+| Compare prepared models across calibration batches | [Multi-batch side-by-side comparison](#multi-batch-side-by-side-comparison) |
+| Check individual wrappers with synthetic inputs | [Wrapper smoke reference](wrapper_smoke/README.md) |
+| Compare static export across two checkouts | [Static export regression verification](../export/STATIC_EXPORT_REGRESSION.md) |
+| Validate recipes without downloading models or datasets | [Download-free CPU recipe validation](#download-free-cpu-recipe-validation) |
+
 ## Current pattern
 
 ```bash
@@ -30,8 +43,9 @@ It performs this flow:
 6. Apply the stage's `specs` / `override_policies` / `raw_overrides` with the same
    `apply_ptq_override_policies()` helper that `PTQStage` uses, resolving model
    structure from the copied model through the selected adapter's
-   `build_quant_target_context()` (see "PTQ selector override structure" in
-   `../adapters/README.md`). Invalid overrides raise here, before `prepare()`.
+   `build_quant_target_context()` (see
+   [PTQ selector override structure](../adapters/README.md#ptq-selector-override-structure)).
+   Invalid overrides raise here, before `prepare()`.
 7. Prepare and calibrate the copied model.
 8. Call `convert()` only when `--enable-quantization` is set.
 9. Run the first calibration sample through the FP model and collect module

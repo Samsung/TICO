@@ -1,5 +1,7 @@
 # quantization
 
+[Documentation index](../../docs/README.md) · [Guide map](#documentation-map)
+
 ## Overview
 
 The _quantization_ module provides a unified, modular interface for quantizing neural
@@ -92,12 +94,16 @@ The module is designed to:
 ```bash
 quantization/
 ├── algorithm/        # Algorithm-specific quantizers
+│   ├── adaround/     #   Conv2d weight rounding
+│   ├── block_reconstruction/ # Activation-qparam reconstruction
 │   ├── cle/          #   Cross-Layer Equalization
 │   ├── fpi_gptq/     #   Fixed-point-iteration GPTQ variant
+│   ├── gemma4_gptq/  #   GPTQ specialization for Gemma4
 │   ├── gptq/         #   GPTQ weight quantization
 │   ├── qwen3_vl_gptq/#   GPTQ specialization for Qwen3-VL
 │   ├── smoothquant/  #   SmoothQuant
-│   └── spinquant/    #   SpinQuant (rotation-based)
+│   ├── spinquant/    #   SpinQuant (rotation-based)
+│   └── universal_gptq/ # Replay-based GPTQ with configurable caching
 ├── analysis/         # Numerical ablation, clipping, and sensitivity
 ├── config/           # Configuration definitions (PTQConfig, GPTQConfig, ...)
 ├── evaluation/       # Evaluation utilities
@@ -126,19 +132,22 @@ On top of these, two layers make the toolkit usable end-to-end from the command 
 
 ## Documentation Map
 
-| Document | Description |
+| Task | Guide |
 |---|---|
-| [Quantized Circle design](../../docs/design.md#102-conversion-time-quantized-graph-legalization) | Fake-quant markers, qparam folding, requantization, and the NPU tensor contract |
-| [analysis/README.md](./analysis/README.md) | Numerical PTQ ablation, clipping, and sensitivity APIs |
-| [algorithm/README.md](./algorithm/README.md) | Algorithm module design and usage guidelines |
-| [algorithm/gptq/README.md](./algorithm/gptq/README.md) | GPTQ |
-| [algorithm/smoothquant/README.md](./algorithm/smoothquant/README.md) | SmoothQuant |
-| [algorithm/spinquant/README.md](./algorithm/spinquant/README.md) | SpinQuant |
-| [algorithm/cle/README.md](./algorithm/cle/README.md) | Cross-Layer Equalization |
-| [wrapq/README.md](./wrapq/README.md) | Wrapper-based PTQ infrastructure |
-| [recipes/README.md](./recipes/README.md) | Recipes developer guide (adapters, stages, import rules) |
-| [examples/README.md](./examples/README.md) | CLI examples: quantize, evaluate, inspect |
-| [examples/configs/README.md](./examples/configs/README.md) | YAML config preset reference |
+| Use the Python `prepare` / `convert` API | [Basic usage](#basic-usage) |
+| Choose a quantization algorithm or model-specific implementation | [Algorithm catalog](./algorithm/README.md#available-algorithms) |
+| Quantize weights with GPTQ | [GPTQ guide](./algorithm/gptq/README.md) |
+| Apply smoothing, rotations, or equalization | [SmoothQuant](./algorithm/smoothquant/README.md), [SpinQuant](./algorithm/spinquant/README.md), and [CLE](./algorithm/cle/README.md) |
+| Understand wrappers, observers, calibration, and frozen state | [WrapQ guide](./wrapq/README.md) |
+| Compare PyTorch and exported Circle outputs | [Numerical evaluation API](./evaluation/README.md) |
+| Run model benchmarks through recipes | [Recipe evaluation guide](./recipes/evaluation/README.md) |
+| Analyze PTQ error, clipping, and sensitivity | [Quantization analysis](./analysis/README.md) |
+| Run quantization, evaluation, export, generation, or inspection from the CLI | [CLI examples](./examples/README.md) |
+| Configure pipelines and override policies | [YAML configuration reference](./examples/configs/README.md) |
+| Export checkpoints and staged Circle artifacts | [Export guide](./recipes/export/README.md) |
+| Trace outputs and inspect wrapper or export regressions | [Debug guide](./recipes/debug/README.md) |
+| Add adapters, stages, or reusable workflows | [Recipes developer guide](./recipes/README.md) |
+| Understand fake-quant lowering, qparam folding, and requantization | [Quantized Circle design](../../docs/design.md#102-conversion-time-quantized-graph-legalization) |
 
 ## Contributing: Adding a New Algorithm
 

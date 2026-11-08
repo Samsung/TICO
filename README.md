@@ -135,6 +135,9 @@ quantized_model = convert(prepared_model)
 
 ## Documentation
 
+Use the [documentation index](./docs/README.md) to find project guides, subsystem
+references, worked examples, test documentation, and historical design documents.
+
 ### For users
 
 | Document | Description |

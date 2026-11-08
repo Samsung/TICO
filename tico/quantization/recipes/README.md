@@ -7,6 +7,22 @@ The goal of this package is to keep example scripts small while still supporting
 many combinations of model families, quantization algorithms, calibration data,
 evaluation tasks, and export targets.
 
+For the public Python API, start with the [quantization overview](../README.md).
+For runnable commands and YAML settings, use the
+[CLI examples](../examples/README.md) and
+[configuration reference](../examples/configs/README.md).
+
+## Recipe guides
+
+| Guide | Scope |
+|---|---|
+| [Model adapters](adapters/README.md) | Model loading, input preparation, family-specific configuration, and adapter registration. |
+| [Pipeline stages](stages/README.md) | Stage contracts, algorithm orchestration, and stage registration. |
+| [Data builders](data/README.md) | Calibration inputs, dataset roles, provenance, and synthetic data. |
+| [Evaluation helpers](evaluation/README.md) | FP/Quant quality protocols, task selection, and benchmark integration. |
+| [Export helpers](export/README.md) | Artifact writers, static profiles, staged Circle contracts, and saved bundles. |
+| [Debug and inspection](debug/README.md) | Tensor tracing, wrapper smoke checks, and export regression workflows. |
+
 ## Design goals
 
 1. **Examples are thin entrypoints.**

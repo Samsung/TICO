@@ -1,5 +1,8 @@
 # Software Requirements Specification (SRS)
 
+> Historical project-initiation document. For the current supported contract, see
+> [Requirements](../../requirements.md) and the [documentation index](../../README.md).
+
 ## Table of Contents
 
 - [1. Introduction](#1-introduction)
