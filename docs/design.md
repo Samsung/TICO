@@ -273,6 +273,13 @@ not automatically schedule it. It must be inserted into this explicit pipeline.
 needed before either reusing it for equal shapes or expanding it to the destination
 shape. The cast does not change other users of the source tensor.
 
+`ConvertToReLU6` preserves the exported result dtype when replacing HardTanh,
+Clamp, or two nested Clamps with the equivalent `[0, 6]` activation. Scalar Clamp
+promotion is made explicit with a cast before ReLU6, including boolean-to-integer
+promotion and promotion introduced only by an inner Clamp. The rewrite uses the
+original result metadata rather than the current default dtype and preserves
+other users of the original input and any shared inner Clamp.
+
 `LowerPow2ToMul` squares in the original power's exported result dtype. If scalar
 promotion changes the base dtype, it casts before multiplying: integer `x.pow(2.0)`
 and boolean `x.pow(2)` retain their floating and integer result types respectively.
