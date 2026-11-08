@@ -218,9 +218,12 @@ class QuantConv3dDecomposed(QuantModuleBase):
         pad_front: int,
         pad_back: int,
     ) -> torch.Tensor:
-        """Apply explicit temporal padding using zeros and cat."""
+        """Extend the temporal boundary before observing each kernel slice."""
         if pad_front == 0 and pad_back == 0:
             return x
+
+        if self.module.padding_mode != "zeros":
+            return self._extend_boundary(x, 2, pad_front, pad_back)
 
         N, C_in, _, H_in, W_in = x.shape
         padded_parts = []
@@ -254,6 +257,35 @@ class QuantConv3dDecomposed(QuantModuleBase):
             )
 
         return torch.cat(padded_parts, dim=2)
+
+    def _extend_boundary(
+        self, x: torch.Tensor, axis: int, before: int, after: int
+    ) -> torch.Tensor:
+        """Copy boundary values using operations that preserve tensor domains."""
+        if before == 0 and after == 0:
+            return x
+        extent = x.shape[axis]
+        mode = self.module.padding_mode
+        if mode == "reflect":
+            if before >= extent or after >= extent:
+                raise RuntimeError(
+                    "Padding size must be less than the corresponding input dimension"
+                )
+            leading = [x.narrow(axis, i, 1) for i in range(before, 0, -1)]
+            trailing = [x.narrow(axis, extent - 2 - i, 1) for i in range(after)]
+        elif mode == "replicate":
+            leading = [x.narrow(axis, 0, 1)] * before
+            trailing = [x.narrow(axis, extent - 1, 1)] * after
+        elif mode == "circular":
+            if before > extent or after > extent:
+                raise RuntimeError(
+                    "Padding value causes wrapping around more than once."
+                )
+            leading = [x.narrow(axis, extent - before, before)] if before else []
+            trailing = [x.narrow(axis, 0, after)] if after else []
+        else:
+            raise ValueError(f"Unsupported boundary padding mode: {mode}")
+        return torch.cat([*leading, x, *trailing], dim=axis)
 
     def _get_padded_input_slice(
         self,
@@ -308,7 +340,11 @@ class QuantConv3dDecomposed(QuantModuleBase):
 
         h_top, h_bottom, w_left, w_right = spatial_padding
 
-        if h_top == h_bottom and w_left == w_right:
+        if self.module.padding_mode != "zeros":
+            input_2d = self._extend_boundary(input_2d, 2, h_top, h_bottom)
+            input_2d = self._extend_boundary(input_2d, 3, w_left, w_right)
+            conv_padding = (0, 0)
+        elif h_top == h_bottom and w_left == w_right:
             conv_padding = (h_top, w_left)
         else:
             input_2d = F.pad(input_2d, (w_left, w_right, h_top, h_bottom))
