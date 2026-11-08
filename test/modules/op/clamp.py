@@ -131,3 +131,20 @@ class ClampIntInputFloatMinMax(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randint(-200, 200, (5, 3)),), {}
+
+
+class ClampIntegerInputFloatReLU6Bounds(TestModuleBase):
+    def forward(self, x):
+        return torch.clamp(x, 0.0, 6.0), x
+
+    def get_example_inputs(self):
+        return (torch.tensor([-100, -1, 0, 1, 5, 6, 100], dtype=torch.int32),), {}
+
+
+class DoubleClampIntegerInputMixedReLU6Bounds(TestModuleBase):
+    def forward(self, x):
+        inner = torch.clamp(x, 0.0)
+        return torch.clamp(inner, max=6), inner, x
+
+    def get_example_inputs(self):
+        return (torch.tensor([-100, -1, 0, 1, 5, 6, 100], dtype=torch.int32),), {}
