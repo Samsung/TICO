@@ -7,6 +7,11 @@ workflow is implemented**.
 
 Most new examples should be added as config files in this directory.
 
+Use the [CLI examples](../README.md) to run a preset and the
+[recipe developer guide](../../recipes/README.md) to extend its implementation.
+For named specs, model-structure selectors, precedence, and override diagnostics,
+see [PTQ override policies](PTQ_OVERRIDE_POLICIES.md).
+
 For MMMU-Pro vision prompt modes, fixed-input generation comparisons and
 per-sample JSONL diagnostics, see the [MMMU evaluation guide](../../recipes/evaluation/MMMU.md).
 
@@ -135,6 +140,9 @@ Rules:
 - Keep dtype names simple: `float32`, `float16`, or `bfloat16`.
 
 ## `calibration`
+
+See [dataset roles and benchmark safety](../../recipes/data/README.md#dataset-roles-and-benchmark-safety)
+for calibration-source eligibility, provenance, and explicit experimental opt-ins.
 
 LLM example:
 
@@ -889,6 +897,9 @@ python -m tico.quantization.examples.quantize \
 
 Use dedicated config files for changes to `pipeline` stage ordering or large
 nested model-specific structures.
+
+The [CLI override reference](../README.md#cli-overrides) covers numeric and named
+pipeline selectors and the convenience aliases.
 
 ## Adding a new config preset
 

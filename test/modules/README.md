@@ -1,12 +1,23 @@
-Test target module directory.
-It can be accessed as a module as `test.modules.*`
+# Test target modules
 
-### How to use `target` decorator?
+Test targets are imported under `test.modules.*` and collected by the
+[conversion test harness](../pt2_to_circle_test/README.md). See the
+[test documentation index](../README.md) for setup, execution, and debugging.
+
+## Module guides
+
+| Guide | Scope |
+|---|---|
+| [Operator modules](op/README.md) | Focused operator conversion tests and skip tags. |
+| [Network modules](net/README.md) | Composed network tests under `test.modules.net`. |
+| [Model tests](../../docs/development.md#model-tests) | Opt-in model-family tests under [`model/`](model/), with separate dependencies. |
+
+## How to use `target` decorator?
 
 By default, all torch.nn.Module subclasses in the python script are assumed to be test targets.
 If `@target` decorator is set for any torch.nn.Module subclass in the file, only those modules will be tested.
 
-#### Example 1. net.Llama2
+### Example 1. net.Llama2
 
 `@target` decorator is used.
 
@@ -23,7 +34,7 @@ class Transformer(nn.Module): # <--- Tested
         super().__init__()
 ```
 
-#### Example 2.
+### Example 2.
 
 `@target` decorator is not used for any module in the file. All torch.nn.Module subclasses are test targets.
 

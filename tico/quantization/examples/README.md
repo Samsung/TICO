@@ -6,6 +6,26 @@ evaluation, export, Circle-bundle generation, and debugging workflows.
 The examples are intentionally small. Real implementation code lives in
 `tico.quantization.recipes`.
 
+See the [quantization overview](../README.md) for the Python API, the
+[configuration reference](configs/README.md) for YAML fields, and the
+[recipe developer guide](../recipes/README.md) for reusable implementation code.
+
+## Contents
+
+- [Choose a command](#which-command-should-i-use)
+- [LLaMA benchmark flow](#llama-benchmark-flow)
+- [Gemma4 E2B flow](#gemma4-e2b-flow)
+- [Quantize](#quantize)
+- [Evaluate](#evaluate)
+- [Export](#export)
+- [Generate from a LLaMA Circle bundle](#generate-from-a-llama-circle-bundle)
+- [LLaVA-Bench judge evaluation](#llava-bench-judge-evaluation)
+- [Inspect and debug](#inspect--debug)
+- [CLI overrides](#cli-overrides)
+- [GPTQ SMSE sensitivity](#gptq-smse-sensitivity)
+- [Contributing examples](#developer-rule-do-not-add-one-script-per-model-or-algorithm)
+- [Minimum smoke commands](#minimum-smoke-commands)
+
 ## Directory layout
 
 ```text
@@ -16,6 +36,7 @@ tico/quantization/examples/
 ├── export.py            # Export artifacts from a model or saved checkpoint
 ├── generate.py          # Generate from an exported LLaMA Circle bundle
 ├── inspector.py         # Run trace/parity/debug tools
+├── compare_side_by_side.py
 └── configs/             # Reusable recipe presets
 ```
 
@@ -621,6 +642,10 @@ regression checks, not for leaderboard-compatible LLaVA-Bench reporting.
 
 ### Inspect / debug
 
+See the [debug developer guide](../recipes/debug/README.md) for trace internals,
+CPU validation, and adding inspect modes. For `compare_side_by_side.py`, use the
+[multi-batch comparison guide](../recipes/debug/README.md#multi-batch-side-by-side-comparison).
+
 ```bash
 python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
@@ -699,6 +724,9 @@ Wrapper smoke mode runs module-level sanity checks for quantization wrappers.
 It is useful when you want to quickly validate `prepare -> calibrate -> convert`,
 numerical parity, plotting, and optional Circle export for a single wrapped
 module.
+
+The [wrapper smoke reference](../recipes/debug/wrapper_smoke/README.md) describes
+the available cases, size profiles, and output artifacts.
 
 Static Llama, Qwen3-VL text, and Gemma4 decoder cases assemble the export adapter
 and its invocation together. Calibration, eager comparison, and export use explicit

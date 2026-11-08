@@ -1,5 +1,8 @@
 # System Design Document
 
+> Historical project-initiation document. For the current implementation, see
+> [System Design](../../design.md) and the [documentation index](../../README.md).
+
 > Torch IR → Circle conversion & optimization library with pluggable passes and automated validation
 
 ## Table of Contents
@@ -22,8 +25,8 @@
   - [4.4 Error Handling & Logging](#44-error-handling--logging)
 - [5. Data & Interface Design](#5-data--interface-design)
   - [5.1 Public APIs](#51-public-apis)
-  - [5.2 Pass Interface](#52-pass-interface-conceptual)
-  - [5.3 Configuration Schema](#53-configuration-schema-excerpt)
+  - [5.2 Pass Interface](#52-pass-interface)
+  - [5.3 Configuration Schema](#53-configuration-schema)
 - [6. Performance Design](#6-performance-design)
 - [7. Reliability & Accuracy](#7-reliability--accuracy)
 - [8. Security & Compliance](#8-security--compliance)

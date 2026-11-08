@@ -7,6 +7,25 @@
  on a normalized Circle document before final file serialization. See
  [Direct file conversion](../../docs/large_circle_export.md#direct-file-conversion).
 
+## Contents
+
+- [Architecture](#architecture)
+- [What verification means](#what-verification-means)
+- [Python API](#python-api)
+- [Command-line interface](#command-line-interface)
+- [Graph and index handling](#graph-and-index-handling)
+- [Writing a new Circle pass](#writing-a-new-circle-pass)
+- [Testing](#testing)
+- [Reference runtime](#reference-runtime)
+- [Current limitations](#current-limitations)
+- [Pass taxonomy](#pass-taxonomy)
+- [Benchmark full-model O1 scheduling](#benchmark-full-model-o1-scheduling)
+
+Related guides: [documentation index](../../docs/README.md),
+[public conversion API](../../docs/getting_started.md),
+[large artifacts and memory ownership](../../docs/large_circle_export.md), and
+[Circle test helpers](../../test/support/circle/README.md).
+
 ## Architecture
 
 ```text

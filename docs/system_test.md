@@ -110,6 +110,9 @@ Large model tests are selected through `./ccex test -m ...`. The normal discover
 uses the `pt2_to_circle_test` package loader to collect the operator and network module
 suites without automatically loading every model directory.
 
+Use the [test documentation index](../test/README.md) for guides to test modules,
+the conversion harness, Circle helpers, and performance benchmarks.
+
 ## 4. End-to-end module test flow
 
 `NNModuleTest` in `test/pt2_to_circle_test/builder.py` provides the common conversion

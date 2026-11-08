@@ -1,5 +1,17 @@
 # Wrapper-based Quantization (WrapQ)
 
+[Quantization overview](../README.md) · [Documentation index](../../../docs/README.md)
+
+## Contents
+
+- [Design philosophy](#1-design-philosophy)
+- [Quantization flow](#2-quantization-flow)
+- [Wrapper design](#3-wrapper-design)
+- [Simple API usage](#4-simple-api-usage)
+- [Extensibility](#5-extensibility)
+- [Summary](#6-summary)
+- [Related guides](#related-guides)
+
 ## 1. Design Philosophy
 
 **WrapQ** is a module for wrapper-based post-training quantization. The module is designed to provide 
@@ -211,13 +223,15 @@ This minimal interface abstracts away the details of module wrapping, registry l
  and quantizer instantiation. Advanced users can override the configuration to control 
 dtype, scheme, or per-module granularity.
 
-**Ready-to-run examples** for PTQ and wrapper usage can be found in the `examples/` folder,
+**Ready-to-run examples** for PTQ and wrapper usage can be found in the [examples/](./examples/) folder,
 including quantization flows for nn.Linear, LLaMA MLPs, and full decoder layers.
 
 For output debugging, `utils.introspection.compare_outputs(..., full_tensor_diff=True)`
 returns signed float32 tensor differences at every depth, including tensors in lists,
 tuples, dictionaries, and object fields. The default returns tensor difference
 statistics. `compare_side_by_side()` uses full differences for `interesting_modules`.
+See the [side-by-side comparison guide](../recipes/debug/README.md#multi-batch-side-by-side-comparison)
+for the CLI workflow.
 
 LLaMA attention, decoder-layer, and model wrappers interpret boolean and integer
 (`uint8`, `int8`, `int16`, `int32`, `int64`) attention masks as keep masks: zero
@@ -270,3 +284,12 @@ WrapQ offers a balance between **explicit control** and **simple APIs**. It is m
 By decoupling configuration, calibration, and algorithm logic, it allows seamless 
 integration across diverse models and backends while maintaining transparency and 
 reliability in quantized inference.
+
+## Related guides
+
+| Task | Guide |
+|---|---|
+| Configure PTQ stages and observers in a recipe | [YAML configuration reference](../examples/configs/README.md) |
+| Select module-specific PTQ policies | [PTQ override policies](../examples/configs/PTQ_OVERRIDE_POLICIES.md) |
+| Check isolated wrappers and static Circle exports | [Wrapper smoke checks](../recipes/debug/wrapper_smoke/README.md) |
+| Quantize and export the Gemma4 MTP draft model | [Gemma4 assistant guide](./wrappers/gemma4_assistant/README.md) |

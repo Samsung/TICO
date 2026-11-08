@@ -6,6 +6,20 @@ Export helpers are kept outside examples so that checkpoint saving, Circle
 export, per-layer export, and future artifact formats can be shared by multiple
 model families and workflows.
 
+See the [export CLI](../../examples/README.md#export) for commands and the
+[recipe developer guide](../README.md) for adapter/helper responsibilities.
+
+## Export guides
+
+| Guide | Scope |
+|---|---|
+| [Artifact naming](#artifact-naming) | Shared naming conventions and Qwen3-VL profile-qualified stage files. |
+| [LLaMA Circle bundles](#llama-circle-bundles) | Bundle manifests, frozen host context, and runtime consumption. |
+| [LLaMA RoPE and checkpoint migration](LLAMA_ROPE_UNIFICATION.md) | Rotary-source contracts and migration of legacy checkpoints. |
+| [Gemma4 artifact reference](gemma4_artifacts.md) | Text, PLE, vision, and cache-boundary contracts. |
+| [Complete fixed-image Qwen3-VL prefill](#complete-fixed-image-qwen3-vl-prefill) | Composition of fixed-grid vision and text stages into a complete graph. |
+| [Static export regression verification](STATIC_EXPORT_REGRESSION.md) | Export isolation and comparison with a selected baseline checkout. |
+
 ## Responsibilities
 
 Export helpers should:

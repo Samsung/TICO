@@ -1,5 +1,9 @@
 # System Test Document
 
+> Historical project-initiation document. For current test commands and validation
+> rules, see the [System Test Guide](../../system_test.md) and the
+> [documentation index](../../README.md).
+
 ## Table of Contents
 
 - [1. Test Scope Overview](#1-test-scope-overview)
