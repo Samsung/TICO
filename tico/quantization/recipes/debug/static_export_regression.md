@@ -52,7 +52,7 @@ unified source. Length-dependent rotary implementations use the selected export
 profile. This does not make a fixed-capacity graph equivalent to every possible
 history-dependent eager execution outside that profile.
 
-Read [LLAMA_ROPE_UNIFICATION.md](LLAMA_ROPE_UNIFICATION.md) for checkpoint
+Read [LLaMA rotary source and checkpoint migration](../export/llama_artifacts.md) for checkpoint
 migration, focused numerical verification, and how to interpret intentional
 source differences. The two-checkout comparator reports all mismatches as
 FAIL; the correction is not an exception that disables regression checking.
@@ -333,7 +333,7 @@ Small randomly initialized HF models exercise frozen quantized generation,
 standard PTQ cache observation, PPL scoring, and export isolation. The default
 runner also performs actual Circle conversion and execution, including connected
 Qwen image-conditioned cache checks. Follow the commands in the
-[debug README](../debug/README.md) and use a new results directory. The runner
+[debug README](README.md) and use a new results directory. The runner
 records the execution environment in `environment.json` and stage statuses and
 log paths in `summary.json`. Random-model results do not measure pretrained
 quality. Full large-model conversion and NPU numerical and performance validation

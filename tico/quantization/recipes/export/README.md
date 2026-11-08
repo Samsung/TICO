@@ -13,12 +13,11 @@ See the [export CLI](../../examples/README.md#export) for commands and the
 
 | Guide | Scope |
 |---|---|
-| [Artifact naming](#artifact-naming) | Shared naming conventions and Qwen3-VL profile-qualified stage files. |
-| [LLaMA Circle bundles](#llama-circle-bundles) | Bundle manifests, frozen host context, and runtime consumption. |
-| [LLaMA RoPE and checkpoint migration](LLAMA_ROPE_UNIFICATION.md) | Rotary-source contracts and migration of legacy checkpoints. |
+| [Artifact naming](#artifact-naming) | Shared naming and output-directory conventions. |
+| [LLaMA artifact and runtime reference](llama_artifacts.md) | Bundle manifests, frozen host context, rotary sources, and checkpoint migration. |
+| [Qwen3-VL artifact reference](qwen3_vl_artifacts.md) | Profile-qualified stage files, host responsibilities, and complete fixed-image prefill. |
 | [Gemma4 artifact reference](gemma4_artifacts.md) | Text, PLE, vision, and cache-boundary contracts. |
-| [Complete fixed-image Qwen3-VL prefill](#complete-fixed-image-qwen3-vl-prefill) | Composition of fixed-grid vision and text stages into a complete graph. |
-| [Static export regression verification](STATIC_EXPORT_REGRESSION.md) | Export isolation and comparison with a selected baseline checkout. |
+| [Static export regression verification](../debug/static_export_regression.md) | Export isolation and comparison with a selected baseline checkout. |
 
 ## Responsibilities
 
@@ -137,99 +136,31 @@ effective_config.yaml
 export_inputs.pt
 ```
 
-Qwen3-VL `circle_per_layer` export profile-qualifies every graph whose tensor
-shape depends on the vision grid. Text-only stages keep stable shared names:
-
-```text
-vision_prefill_t<T>_h<H>_w<W>.q.circle
-token_embedding.q.circle
-multimodal_embedding_prefill_t<T>_h<H>_w<W>.q.circle
-decoder_layer_prefill_<index>.q.circle
-deepstack_fusion_<index>_t<T>_h<H>_w<W>.q.circle
-decoder_layer_decode_<index>.q.circle
-lm_head.q.circle
-```
-
-For example, `grid_thw: [1, 54, 72]` produces
-`vision_prefill_t1_h54_w72.q.circle`. The vision profile is baked into the
-vision, multimodal-embedding, and DeepStack graph shapes. The vision NPU graph
-accepts only `pixel_values`; `image_grid_thw` remains a CPU-runtime value used
-to select the matching profile-specific artifacts. The fixed
-`model_args.vision` settings must match the wrapped/quantized checkpoint.
-
-`token_embedding` has a dynamic sequence dimension and is shared by prefill
-and decode. The runtime owns mRoPE lookup, additive attention masks, and KV
-storage/update, and passes the required tensors to the decoder graphs. Exporting
-with `--source model` produces the same artifact set with `.f32.circle` tags.
+Use the [family references](#model-specific-artifacts) for stage-specific names
+and static-profile requirements.
 
 The output directory should come from `export.output_dir`.
 
+## Model-specific artifacts
+
 ### LLaMA Circle bundles
 
-Opt in to `export.artifacts: [circle_bundle]` for a self-contained LLaMA
-generation bundle. The LLaMA adapter writes it directly under
-`export.output_dir`; the existing `circle_per_layer` artifact keeps its current
-behavior. A bundle requires paired prefill/decode export and batch size 1.
+The [LLaMA bundle contract](llama_artifacts.md#llama-circle-bundles) defines the
+manifest, frozen host context, stage files, and saved-artifact generation API.
+The same guide owns [rotary-source behavior](llama_artifacts.md#rotary-source-behavior)
+and [legacy checkpoint migration](llama_artifacts.md#migrating-checkpoints-without-a-canonical-source).
 
-```text
-llama_manifest.json
-llama_host.npz
-token_embedding.<tag>.circle
-decoder_layer_prefill_<index>.<tag>.circle
-decoder_layer_decode_<index>.<tag>.circle
-lm_head.<tag>.circle
-tokenizer/                                  # when a tokenizer is available
-```
+### Qwen3-VL staged artifacts
 
-`<tag>` is `f32` for float32 model export and `q` for a quantized checkpoint.
-The versioned manifest records model geometry, sequence capacity, pad/EOS IDs,
-stage input/output roles, the host-context file, and the optional tokenizer
-directory. The host context preserves the prepared decoder layers' RoPE tables
-and attention-mask fill values. The consumer uses these frozen values instead
-of reconstructing them from a model name or a Transformers config.
+The [Qwen3-VL artifact contract](qwen3_vl_artifacts.md#artifact-naming) defines
+profile-qualified vision files, shared text stages, and host mRoPE/mask/KV
+responsibilities.
 
-`LlamaCircleRuntime` loads the saved Circle stages through the built-in reference
-runtime. It owns causal masks, right-padding for static prefill, logical token
-positions, and per-layer KV cache updates:
+### Complete fixed-image Qwen3-VL prefill
 
-```python
-import numpy as np
-
-from tico.quantization.recipes.runtime.llama import LlamaCircleRuntime
-
-runtime = LlamaCircleRuntime("./out/llama_bundle")
-tokens = runtime.generate(
-    np.asarray([[1, 2, 3]], dtype=np.int64),
-    max_new_tokens=4,
-)
-```
-
-Input IDs are one unpadded sequence with shape `[1, prompt_length]`. The result
-has shape `[1, prompt_length + generated_length]`, including EOS when emitted.
-Generation is greedy and uses the manifest's EOS ID or IDs by default. The
-requested prompt length plus `max_new_tokens` must not exceed `max_seq_len`;
-capacity errors do not silently truncate the prompt or reduce the requested
-steps. Generation starts a fresh sequence when at least one token is requested;
-a zero-token request returns the prompt without changing the current cache.
-
-`runtime.execution_mode` is `native` for floating-point artifacts or
-`fake_quantize` for quantized artifacts. Fake-quantize reference execution is a
-semantic check, not bit-exact validation of an integer target backend. The
-runtime itself does not import Transformers, load a PyTorch model, or fetch
-files. The optional [generation CLI](../../examples/README.md#generate-from-a-llama-circle-bundle)
-uses only local tokenizer files for prompt encoding/continuation decoding.
-
-Tiny deterministic random-model tests exercise floating-point saved-artifact
-parity, quantized tensor domains, and cache composition. Quantized reference
-execution does not promise PyTorch fake-quantization parity: a directly quantized
-embedding carries independent table/output qparams, while reference GATHER
-forwards table values without applying the output grid. See the
-[quantized Circle contract and reference limitation](../../../../docs/design.md#102-conversion-time-quantized-graph-legalization).
-Meaningful language output requires pretrained weights; model quality and
-target-device correctness and performance need their own evaluation.
-
-A file-by-file description of a complete Gemma4 E2B quantized export is kept in
-[`gemma4_artifacts.md`](gemma4_artifacts.md).
+The [complete-prefill contract](qwen3_vl_artifacts.md#complete-fixed-image-qwen3-vl-prefill)
+describes the composite graph's fixed image-token span, static preparation,
+frozen observer boundaries, and execution constraints.
 
 ### Gemma4 external-embedding text logits
 
@@ -408,28 +339,3 @@ For a new exporter, test:
 - missing example input behavior;
 - invalid artifact key behavior at the adapter/config level;
 - that the exporter does not run evaluation or quantization implicitly.
-
-## Complete fixed-image Qwen3-VL prefill
-
-`Qwen3VLModelPrefillExportAdapter` composes the existing fixed-grid vision,
-fixed-span fusion, decoder and DeepStack adapters into one complete graph. It
-accepts `[1, S]` token IDs and patchified pixels for one fixed image profile,
-and returns normalized hidden states for `QuantQwen3VLModel` or vocabulary logits
-for `QuantQwen3VLForConditionalGeneration`. The prompt must contain the profile's
-contiguous image-token span at the configured `visual_start_idx`. This path is
-cache-free prefill; external cache generation continues to use the staged exporter.
-
-Construct and capture this adapter inside `prepared_static_export(model, S)`.
-That context supplies the configured fixed-grid mRoPE positions, causal mask and
-RoPE tables, then removes its temporary source buffers on exit, including errors.
-The adapter reuses the actual vision, text and optional LM-head weights and
-preserves the full wrapper's multimodal, external-embedding and DeepStack frozen
-observer boundaries. Calibrate those real paths before conversion. No source
-observer is recalibrated during preparation or export.
-
-The adapter aligns temporary mask and RoPE operands to the actual hidden tensor's
-dtype and device before fake quantization. Prepared static buffers keep their
-original dtype and values, and position IDs remain integer tensors. CPU BF16
-activations still require FP32 per-channel scales for enabled fake quantization;
-see the [execution compatibility contract](../../wrapq/README.md). Successful BF16
-adapter execution does not establish BF16 Circle serialization/runtime support.

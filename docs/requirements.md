@@ -164,7 +164,7 @@ stages, a versioned manifest, frozen host context, and optional local tokenizer
 files. The reference consumer shall support batch-one greedy generation without
 loading the source model, reject incompatible contracts and context overflow,
 and select explicit fake-quantize semantics for quantized artifacts. See the
-[bundle contract](../tico/quantization/recipes/export/README.md#llama-circle-bundles).
+[bundle contract](../tico/quantization/recipes/export/llama_artifacts.md#llama-circle-bundles).
 
 ## 3. Quality requirements
 

@@ -16,7 +16,7 @@ points and the [recipe developer guide](../README.md) for package responsibiliti
 | Trace FP vs PTQ module outputs | [Existing trace mode](#existing-trace-mode) |
 | Compare prepared models across calibration batches | [Multi-batch side-by-side comparison](#multi-batch-side-by-side-comparison) |
 | Check individual wrappers with synthetic inputs | [Wrapper smoke reference](wrapper_smoke/README.md) |
-| Compare static export across two checkouts | [Static export regression verification](../export/STATIC_EXPORT_REGRESSION.md) |
+| Compare static export across two checkouts | [Static export regression verification](static_export_regression.md) |
 | Validate recipes without downloading models or datasets | [Download-free CPU recipe validation](#download-free-cpu-recipe-validation) |
 
 ## Current pattern

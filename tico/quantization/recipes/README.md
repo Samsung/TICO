@@ -118,7 +118,7 @@ calibration inputs or running quantization stages.
 `generate.py` consumes a saved bundle through `recipes/runtime/`; it does not
 load a recipe config, adapter, source model, or checkpoint. The LLaMA runtime
 executes staged Circle artifacts and owns mask, RoPE, and KV-cache composition.
-See the [bundle contract](export/README.md#llama-circle-bundles) for the reusable
+See the [bundle contract](export/llama_artifacts.md#llama-circle-bundles) for the reusable
 API and the [generation CLI](../examples/README.md#generate-from-a-llama-circle-bundle)
 for prompt and numeric-input examples.
 
@@ -132,7 +132,7 @@ for prompt and numeric-input examples.
 | New calibration dataset or synthetic data generator | `recipes/data/*.py` | [Data builders](data/README.md) |
 | New benchmark or metric | `recipes/evaluation/*.py` | [Evaluation helpers](evaluation/README.md) |
 | New checkpoint, Circle, or artifact output | `recipes/export/*.py` | [Export helpers](export/README.md) |
-| Generation and cache composition from saved model-family artifacts | `recipes/runtime/<family>.py` | [Saved LLaMA bundle contract](export/README.md#llama-circle-bundles) |
+| Generation and cache composition from saved model-family artifacts | `recipes/runtime/<family>.py` | [Saved LLaMA bundle contract](export/llama_artifacts.md#llama-circle-bundles) |
 | New tensor trace, parity, or inspection mode | `recipes/debug/*.py` and `examples/inspector.py` | [Debug and inspection](debug/README.md) |
 | New common command-line workflow | Usually a config file under `examples/configs/` | [Configuration reference](../examples/configs/README.md) |
 | New public top-level user action not covered by an existing command | A new script under `examples/`, only after design review | [Command selection](../examples/README.md#which-command-should-i-use) |

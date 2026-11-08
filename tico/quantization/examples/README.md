@@ -363,7 +363,7 @@ python -m tico.quantization.examples.export \
 
 The fixed values under `model_args.vision` must match those used when the
 checkpoint was wrapped and quantized. See the
-[artifact naming contract](../recipes/export/README.md#artifact-naming) for the
+[artifact naming contract](../recipes/export/qwen3_vl_artifacts.md#artifact-naming) for the
 Qwen3-VL filenames, vision profiles, and host/runtime input responsibilities.
 
 `llama_export.yaml` exports both prefill and decode layer artifacts by default.
@@ -401,7 +401,7 @@ python -m tico.quantization.examples.export \
 
 The directory includes the staged Circle files, a versioned manifest, frozen
 host RoPE/mask context, and local tokenizer files when the exporter has a
-tokenizer. See the [bundle contract](../recipes/export/README.md#llama-circle-bundles)
+tokenizer. See the [bundle contract](../recipes/export/llama_artifacts.md#llama-circle-bundles)
 for the layout and runtime API. Existing `circle_per_layer` exports remain
 available; select `circle_bundle` to add the metadata needed for generation.
 

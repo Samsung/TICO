@@ -277,6 +277,6 @@ For composing algorithms in a pipeline, use the
 | Task | Guide |
 |---|---|
 | Configure PTQ stages and observers in a recipe | [YAML configuration reference](../examples/configs/README.md) |
-| Select module-specific PTQ policies | [PTQ override policies](../examples/configs/PTQ_OVERRIDE_POLICIES.md) |
+| Select module-specific PTQ policies | [PTQ override policies](../examples/configs/ptq_override_policies.md) |
 | Check isolated wrappers and static Circle exports | [Wrapper smoke checks](../recipes/debug/wrapper_smoke/README.md) |
 | Quantize and export the Gemma4 MTP draft model | [Gemma4 assistant guide](./wrappers/gemma4_assistant/README.md) |
