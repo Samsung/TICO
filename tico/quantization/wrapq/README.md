@@ -150,6 +150,15 @@ same calibration and conversion routines while maintaining per-family specializa
 Each wrapper is registered automatically and discovered dynamically through the PTQ registry, 
 so extending PTQ for a new model family simply requires subclassing and registration.
 
+The registered `nn.Conv3d` wrapper decomposes convolution into temporal slices,
+Conv2d operations and accumulation while preserving `padding_mode` (`zeros`,
+`reflect`, `replicate`, or `circular`), including asymmetric `padding="same"`.
+Temporal boundary extension precedes the per-kernel slice observers; spatial
+extension follows those observers before Conv2d. Both use the original module's
+boundary policy, retaining the existing quantization sites and frozen grids.
+Nonzero boundary copies lower through slices and concatenation so Circle export
+preserves those activation domains through the padding operations.
+
 For unregistered module types, `strict_wrap` controls whether unsupported wrapping
 boundaries raise an error or allow the existing recursive traversal to continue.
 Once a registered wrapper is selected, its constructor errors propagate unchanged
