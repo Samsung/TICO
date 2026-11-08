@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -60,23 +60,35 @@ class QuantConvTranspose2d(QuantModuleBase):
         """Collect the fixed weight after common observer reset."""
         self.obs_weight.collect(self.module.weight.detach())
 
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input_: torch.Tensor, output_size: Optional[Sequence[int]] = None
+    ) -> torch.Tensor:
         """Execute ConvTranspose2d under the current WrapQ mode."""
+        # The native module owns target-size validation and stride ambiguity,
+        # including batched/unbatched inputs and dilation-aware output bounds.
+        padding = self.module.padding
+        assert not isinstance(padding, str)
+        output_padding = self.module._output_padding(
+            input_,
+            output_size,  # type: ignore[arg-type]
+            self.module.stride,  # type: ignore[arg-type]
+            padding,  # type: ignore[arg-type]
+            self.module.kernel_size,  # type: ignore[arg-type]
+            2,
+            self.module.dilation,  # type: ignore[arg-type]
+        )
         input_q = self._fq(input_, self.obs_act_in)
         weight = self.module.weight
         if self._mode is Mode.QUANT:
             weight = self.obs_weight.fake_quant(weight)
 
-        # ConvTranspose2d normalizes numeric padding to a pair in its constructor.
-        padding = self.module.padding
-        assert not isinstance(padding, str)
         output = F.conv_transpose2d(
             input_q,
             weight,
             self.module.bias,
             self.module.stride,
             padding,
-            self.module.output_padding,
+            output_padding,
             self.module.groups,
             self.module.dilation,
         )
