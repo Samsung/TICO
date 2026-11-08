@@ -90,11 +90,12 @@ registered Llama module case:
 - `llama3_2_3b_static_runtime` uses the same dimensions with batch one and a
   fixed 2,048-token prefill/decode capacity.
 
-Both profiles keep one synthetic layer and deterministic random weights. The
-checkpoint's 131,072-token context limit is not copied into
-`max_position_embeddings`, because the attention wrapper allocates its static
-causal-mask template from that value. The dimensions profile uses a bounded
-16-token capacity, while the static profile uses the configured runtime value.
+Both profiles keep one synthetic layer and deterministic random weights.
+`max_position_embeddings` follows the bounded smoke/export capacity instead
+of the checkpoint's 131,072-token context limit. The dimensions profile uses
+a 16-token capacity, while the static profile uses the configured runtime
+value. Eager attention builds masks from the actual query and cached-key
+lengths; static export inputs are prepared explicitly for the selected capacity.
 
 Supported cases:
 

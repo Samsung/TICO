@@ -335,7 +335,8 @@ tico-circle optimize model.circle --preset o1 -o model.o1.circle
 
 Use `tico-circle verify` for static Circle consistency. Use an end-to-end runtime test
 for numerical parity and backend execution. `CircleReferenceRuntime(...).run(inputs,
-trace=True)` returns every intermediate tensor value for debugging.
+trace=True)` retains every materialized tensor value for debugging. Virtual full-table
+dequantization values used by selected-row execution are omitted from the trace.
 
 ## Formatting and static checks
 

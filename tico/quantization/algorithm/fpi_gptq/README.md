@@ -16,11 +16,12 @@ the scaled error to all remaining columns via the inverse-Hessian factor. FPI-GP
 observes that the fully-updated weight matrix is a fixed point of the mapping
 
 ```
-W_{k+1} = W_0 − ((W_k − Q(W_k)) / diag(Hinv)) · triu(Hinv)
+W_{k+1} = W_0 − ((W_k − Q(W_k)) / diag(Hinv)) · triu(Hinv, diagonal=1)
 ```
 
 where `Q(·)` snaps to the quantization grid and `Hinv` is the upper Cholesky factor
-of the damped inverse Hessian (columns pre-sorted in activation order). Iterating
+of the damped inverse Hessian (columns pre-sorted in activation order). The update
+uses only its strictly upper-triangular part, excluding the diagonal. Iterating
 this map (up to `min(50, columns)` iterations) converges to approximately the same
 weights that sequential GPTQ would produce, and the final `Q(W)` is written back to
 the layer.

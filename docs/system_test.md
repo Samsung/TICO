@@ -516,14 +516,19 @@ For non-draft pull requests, at least one commit body must contain:
 TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>
 ```
 
-#### Style job
+#### Formatting and static analysis
 
-- Ubuntu 24.04
-- Python 3.12
-- `./ccex configure format`
-- `./ccex format --no-apply-patches`
+- `check-format` runs on Ubuntu 24.04 with Python 3.12. It configures the formatting
+  tools and runs lintrunner with `--take UFMT`, without installing PyTorch or waiting
+  for the package build.
+- `check-static` reuses the built wheel and the default Torch test environment. It
+  configures analysis tools, checks dependency consistency, and runs lintrunner with
+  `--take PYLINT,MYPY`.
+- `check-style` preserves the required **Check style** status by succeeding only when
+  both jobs succeed.
 
-The lintrunner configuration currently includes Pylint, ufmt, and mypy for Python files.
+These checks do not apply patches. See the
+[development guide](development.md#pull-request-ci) for the CI environment details.
 
 #### Build package once
 

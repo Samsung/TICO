@@ -23,9 +23,10 @@ evaluation tasks, and export targets.
    Tokenization, processors, calibration input format, model-family PTQ config
    construction, and model-family evaluation belong in `recipes/adapters/`.
 
-4. **Algorithm-specific behavior lives in stages.**
-   GPTQ, PTQ, SmoothQuant, SpinQuant, CLE, or future algorithms belong in
-   `recipes/stages/`.
+4. **Stages orchestrate algorithms within a recipe.**
+   GPTQ, PTQ, SmoothQuant, SpinQuant, and CLE pipeline integration belongs in
+   `recipes/stages/`. Numerical algorithm implementations belong in `algorithm/`,
+   and generic wrapper-based PTQ infrastructure belongs in `wrapq/`.
 
 5. **Examples must not import other examples.**
    Shared functions must be moved into `recipes`, `evaluation`, `export`,
@@ -56,7 +57,7 @@ tico/quantization/recipes/
 ├── utils.py               # Small reusable helpers
 ├── qparams.py             # GPTQ -> PTQ qparam transfer helpers
 ├── adapters/              # Model-family-specific behavior
-├── stages/                # Algorithm/pipeline-stage-specific behavior
+├── stages/                # Pipeline orchestration for algorithms and preprocessing
 ├── data/                  # Calibration data builders
 ├── evaluation/            # Reusable evaluation helpers
 ├── export/                # Checkpoint / Circle / other export helpers
@@ -77,7 +78,7 @@ examples/quantize.py
        ├─ validate_adapter_evaluation_config(adapter, cfg)
        ├─ validate pipeline stages and determine calibration requirements
        ├─ adapter.load_model(ctx)
-       ├─ adapter.build_calibration_inputs(ctx)
+       ├─ adapter.build_calibration_inputs(ctx)  # only when required
        ├─ for each enabled pipeline stage:
        │    └─ get_stage(stage_cfg["name"]).run(ctx, stage_cfg)
        ├─ adapter.evaluate(ctx)
@@ -109,7 +110,8 @@ for prompt and numeric-input examples.
 | Need | Add or modify |
 |---|---|
 | New model family, tokenizer, processor, calibration input shape, model-specific PTQ config | `recipes/adapters/<family>.py` |
-| New quantization algorithm or preprocessing pass | `recipes/stages/<algorithm>.py` |
+| New quantization algorithm or preprocessing implementation | `algorithm/<algorithm>/`, with configuration under `config/` |
+| Integrating an algorithm or preprocessing step into a recipe pipeline | `recipes/stages/<algorithm>.py` |
 | New calibration dataset or synthetic data generator | `recipes/data/*.py` |
 | New benchmark or metric | `recipes/evaluation/*.py` |
 | New checkpoint, Circle, or artifact output | `recipes/export/*.py` |
@@ -206,7 +208,7 @@ function themselves before using the recipe APIs.
 
 ### `Stage`
 
-A stage owns one algorithm or preprocessing pass:
+A stage orchestrates an algorithm or preprocessing step within the recipe pipeline:
 
 ```python
 class Stage(ABC):

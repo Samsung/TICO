@@ -24,9 +24,9 @@ tico/quantization/examples/
 ### Which command should I use?
 
 Use `quantize.py` when you want to run a quantization recipe. It loads the
-model, builds calibration inputs, runs enabled `pipeline` stages such as GPTQ,
-PTQ, SpinQuant, or CLE, and then optionally evaluates and exports the resulting
-model.
+model, builds calibration inputs when an enabled stage or the adapter requires
+them, runs enabled `pipeline` stages such as GPTQ, PTQ, SpinQuant, or CLE, and
+then optionally evaluates and exports the resulting model.
 
 Use `evaluate.py` when you only want to evaluate a floating-point model or an
 already saved checkpoint. `evaluate.py` does **not** run `pipeline` stages from
@@ -54,7 +54,7 @@ Summary:
 
 | Command | Runs `pipeline` stages? | Builds calibration inputs? | Evaluates? | Exports? |
 |---|---:|---:|---:|---:|
-| `quantize.py` | Yes | Yes | If `evaluation.enabled=true` | If `export.enabled=true` |
+| `quantize.py` | Yes | When required by enabled stages or the adapter | If `evaluation.enabled=true` | If `export.enabled=true` |
 | `evaluate.py` | No | No | Yes | No |
 | `export.py` | No | No | No | Yes |
 | `generate.py` | No | No | No | No |
@@ -128,7 +128,7 @@ writes static per-stage Circle files for the vision and text runtime.
    ```
 
 2. Evaluate either the floating-point model or the saved checkpoint with the
-   Gemma4 LLaVA-Bench judge suite.
+   configured Gemma4 evaluation suite.
 
    ```bash
    python -m tico.quantization.examples.evaluate \
@@ -293,7 +293,8 @@ Canonical targets are model-family specific:
 | Model family | Supported `--tasks` values |
 |---|---|
 | LLaMA | `lm_eval`, `ppl` |
-| Qwen3-VL, Gemma4 | `vqa`, `coco`, `llava_bench`, `videomme`, `mmlu`, `hellaswag`, `mmmu`, `ppl` |
+| Qwen3-VL | `vqa`, `coco`, `llava_bench`, `videomme`, `mmlu`, `hellaswag`, `mmmu`, `ppl` |
+| Gemma4 | `vqa`, `coco`, `llava_bench`, `videomme`, `mmlu`, `hellaswag`, `mmmu`, `ppl`, `cached_nll` |
 
 Run only the configured LM-Eval suite:
 
@@ -393,14 +394,18 @@ The fixed values under `model_args.vision` must match the values used when the
 checkpoint was wrapped and quantized. A default prefill/decode export writes:
 
 ```text
-vision_prefill.q.circle
+vision_prefill_t<T>_h<H>_w<W>.q.circle
 token_embedding.q.circle
-multimodal_embedding_prefill.q.circle
+multimodal_embedding_prefill_t<T>_h<H>_w<W>.q.circle
 decoder_layer_prefill_<index>.q.circle
-deepstack_fusion_<index>.q.circle
+deepstack_fusion_<index>_t<T>_h<H>_w<W>.q.circle
 decoder_layer_decode_<index>.q.circle
 lm_head.q.circle
 ```
+
+`<T>`, `<H>`, and `<W>` are the configured vision grid dimensions. Graphs that
+depend on this grid carry the profile suffix; text-only stages keep shared
+names. See the [artifact naming contract](../recipes/export/README.md#artifact-naming).
 
 `token_embedding` has a dynamic sequence dimension and is shared by prefill
 and decode. The runtime owns mRoPE lookup, additive attention-mask
@@ -536,6 +541,7 @@ Keep the FP answer JSONL because it is used as the regression baseline in step
 
 ```bash
 python -m tico.quantization.examples.evaluate \
+  --tasks llava_bench \
   --set evaluation.llava_bench.output.dir=./out/llava_bench_fp \
   --set evaluation.llava_bench.output.answers=./out/llava_bench_fp/answers.jsonl \
   --set evaluation.llava_bench.output.reviews=./out/llava_bench_fp/reviews.jsonl \
@@ -575,6 +581,7 @@ candidate = quantized-checkpoint answers
 python -m tico.quantization.examples.evaluate \
   --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
   --checkpoint ./out/qwen3_vl_quantized/quantized_model.pt \
+  --tasks llava_bench \
   --set evaluation.llava_bench.baseline_answers=./out/llava_bench_fp/answers.jsonl \
   --set evaluation.llava_bench.candidate_answers=null \
   --set evaluation.llava_bench.baseline_label=qwen3_vl_4b_fp \
@@ -810,13 +817,26 @@ python -m tico.quantization.examples.quantize \
   --set pipeline.3.spin_rotation_weight=int8
 ```
 
-Convenience aliases are also available:
+Lists of mappings with a unique `name` also accept named selectors. For
+example, these overrides select the stages without depending on their indices:
 
 ```bash
---model       # overrides model.name_or_path
---device      # overrides runtime.device
---output-dir  # overrides export.output_dir, quantize.py/export.py only
+--set pipeline.spinquant.enabled=false
+--set pipeline.ptq.spin_rotation_weight=int8
 ```
+
+The selector must exactly match the configured `name`. Missing names are
+rejected; if a name appears more than once, use a numeric index.
+
+Convenience aliases are also available:
+
+| Option | Effect |
+|---|---|
+| `--model` | Overrides `model.name_or_path`. |
+| `--device` | Overrides `runtime.device`. |
+| `--output-dir` with `quantize.py` or `export.py` | Overrides `export.output_dir`. |
+| `--output-dir` with `evaluate.py` | Overrides `evaluation.output_dir` for `evaluation_protocol.json`; benchmark-specific output paths keep their own settings. |
+| `--output-dir` with `inspector.py --mode wrapper-smoke` | Sets the directory for wrapper-smoke plots, reports, and Circle files. |
 
 ## GPTQ SMSE sensitivity
 
@@ -945,7 +965,8 @@ Before adding a new example script, check whether the feature should instead be:
 | Feature | Preferred location |
 |---|---|
 | New model family | `recipes/adapters/` |
-| New algorithm | `recipes/stages/` |
+| New algorithm implementation | `quantization/algorithm/` with configuration under `quantization/config/` |
+| Recipe integration of an algorithm | `recipes/stages/` |
 | New config combination | `examples/configs/` |
 | New benchmark | `recipes/evaluation/` |
 | New export artifact | `recipes/export/` |
@@ -975,8 +996,11 @@ No new example script is needed.
 
 For a new algorithm such as `awq`, do this:
 
-1. Add `recipes/stages/awq.py`.
-2. Register it in `recipes/stages/__init__.py`.
+1. Implement and register the quantizer and its configuration following the
+   [quantization contribution guide](../README.md#contributing-adding-a-new-algorithm).
+2. Add the recipe orchestration in `recipes/stages/awq.py` and register it in
+   `recipes/stages/__init__.py`. The stage calls the algorithm implementation
+   and delegates model-family behavior to the adapter.
 3. Add the stage to an existing or new config preset:
 
    ```yaml

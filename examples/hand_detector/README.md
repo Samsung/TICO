@@ -97,10 +97,12 @@ landmark values. Quantized export reuses the same command with
 structural verifier encodes palm-detector operator counts).
 
 `--hoist-head-means` swaps each head's `1x1 Conv -> spatial MEAN` chain into
-an exactly equivalent shared `MEAN -> 1x1 Conv` (both operations are linear).
+an algebraically equivalent shared `MEAN -> 1x1 Conv`: spatial mean commutes
+with a pointwise affine projection.
 This removes the quantized per-position head maps, shares one reduced feature
-vector across all four heads, shrinks the head convolutions by the spatial
-factor, and measured about 6% fewer NPU cycles at unchanged output error.
+vector across all four heads, and shrinks the head convolutions by the spatial
+factor. Quantized output error and NPU latency must be measured for the exported
+model and target backend.
 
 ## Export Circle models
 
@@ -473,10 +475,9 @@ Run the model example tests:
 python -m examples.hand_detector.test_hand_detector
 ```
 
-See `docs/layout_optimization.md` for the Circle layout-region optimization
-design, `docs/npu_latency_optimization.md` for the measured NPU latency
-optimization that led to the `--resize-tconv` export option, and
-`THIRD_PARTY_NOTICES.md` for source-model attribution.
+See [layout optimization](docs/layout_optimization.md) for the Circle layout-region
+optimization design and [third-party notices](THIRD_PARTY_NOTICES.md) for
+source-model attribution.
 
 ## Activation block reconstruction
 

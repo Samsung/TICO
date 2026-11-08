@@ -516,10 +516,11 @@ tico-circle optimize model.circle \
 ```
 
 The constant-folding pass preserves existing output tensor indices, so graph outputs
-and signature output mappings remain stable. It skips dynamic contracts, external
-buffers, unsafe integer overflow, non-zero fused activations, unsupported qparams, and
-zero-element outputs that cannot yet be represented as owned constants. Signature-bound
-graph inputs are retained even when a metadata-only fold removes their data dependence.
+and signature output mappings remain stable. It skips dynamic contracts, unresolved
+external buffer offsets, unsafe integer overflow, non-zero fused activations,
+unsupported qparams, and zero-element outputs. Appended payloads loaded through
+`CircleDocument` are resolved before folding. Signature-bound graph inputs are retained
+even when a metadata-only fold removes their data dependence.
 
 `EliminateTransposeBoundedLayoutRegionPass` moves a region into the source layout when
 all external data inputs cross one Transpose permutation and all external data outputs
@@ -536,6 +537,7 @@ cross its inverse. The registered layout-invariant operator families are:
 - axis option remapping: `CONCATENATION`
 - constant padding-row remapping: `PAD`, `PADV2`, and `MIRROR_PAD`
 - constant rank-vector remapping: `TILE` and `SLICE`
+- constant rank-vector and axis-mask remapping: rank-preserving `STRIDED_SLICE`
 - multi-output axis-constant remapping: `SPLIT` and `SPLIT_V`
 
 Unary inputs and outputs must have the same shape. Binary and variadic operators require
@@ -543,7 +545,9 @@ all data inputs and outputs to have exactly the same shape, so broadcasting rema
 region boundary. `CONCATENATION` remaps its normalized axis. `PADV2` preserves its
 scalar padding value, and `MIRROR_PAD` preserves its reflection mode. `TILE` requires a
 static INT32 multiples vector. `SLICE` requires static INT32 begin and size vectors and
-supports `-1` only in the size vector. `SPLIT` requires a static INT32 axis, equal-size
+supports `-1` only in the size vector. `STRIDED_SLICE` requires static INT32 begin, end,
+and positive-stride vectors; it remaps begin/end masks and rejects ellipsis, new-axis,
+shrink-axis, and offset modes. `SPLIT` requires a static INT32 axis, equal-size
 outputs, and a matching `numSplits` option. `SPLIT_V` requires static INT32 axis and
 size-splits constants, permits at most one inferred `-1` size, and validates every
 output shape. Rank-changing or unsupported axis-sensitive operators such as `PRELU`,
@@ -689,7 +693,7 @@ result = runtime.run([x_numpy, y_numpy])            # positional graph inputs
 outputs = result.outputs                            # tuple of NumPy arrays
 
 traced = runtime.run([x_numpy, y_numpy], trace=True)
-traced.tensor_values[7]                             # every tensor value by tensor index
+traced.tensor_values[7]                             # materialized value by tensor index
 
 runtime.probe_static_contracts()                    # zero-input contract check for static models
 ```
@@ -711,7 +715,9 @@ package. The selection never changes based on which packages are installed.
   the exporter allowed. Results are never reshaped or cast to fit the metadata; a
   mismatch raises `CircleRuntimeValidationError` naming the operator.
 - Constants are decoded with `TensorValueCodec` (little-endian, packed INT4/UINT4,
-  zero-sized tensors, scalars). External buffers (`offset`/`size`) are rejected.
+  zero-sized tensors, scalars). Loading complete binaries through `CircleDocument`
+  resolves appended payloads before runtime preparation. Object API models that still
+  contain unresolved external buffer `offset`/`size` fields are rejected.
 - BFLOAT16 tensors are rejected during runtime preparation with
   `UnsupportedCircleOperatorError`. The artifact value codec preserves their raw
   bits as `uint16`; this storage representation does not provide BFLOAT16 arithmetic.
@@ -851,9 +857,10 @@ execution results with PyTorch.
 
 Additional limitations:
 
-- A constant is recognized by inline buffer data or a non-zero external buffer offset/size. A zero-sized constant
- with no payload metadata may be conservatively promoted to an extracted graph input. Constant folding skips
- zero-element outputs until graph-level constant ownership can distinguish them from absent storage.
+- A zero-element constant with no payload is recognized only when it is non-variable,
+  owns a valid nonzero buffer, has a concrete shape and matching or absent shape
+  signature, and is neither a graph input nor an operator output. Constant folding
+  still skips zero-element outputs.
 - Tensor name selectors rely on names being present and stable. Operator indices remain useful for debugging
  but may change after any rewrite.
 - Signature synthesis is intentionally not attempted when extraction creates new boundaries; only an exactly

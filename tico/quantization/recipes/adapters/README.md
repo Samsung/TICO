@@ -223,9 +223,9 @@ The smoke config should be cheap enough for CI or manual sanity checks.
 Recommended tests:
 
 ```text
-tests/quantization/recipes/test_gemma_adapter_import.py
-tests/quantization/recipes/test_gemma_config_load.py
-tests/quantization/integration/test_gemma_ptq_smoke.py
+test/quantization/recipes/test_gemma_adapter_import.py
+test/quantization/recipes/test_gemma_config_load.py
+test/quantization/integration/test_gemma_ptq_smoke.py
 ```
 
 The import/config tests should not require downloading a large checkpoint.

@@ -488,7 +488,8 @@ The current serializer:
 - optionally excludes `ConstantArgument` inputs
 - always excludes `None` constant inputs
 - registers non-`None` user outputs
-- emits one Circle operator for each supported non-`getitem` call-function node
+- dispatches each supported non-`getitem` call-function node to its registered
+  visitor, which emits the required Circle operator or operator sequence
 - validates tensor shapes before packing
 - writes the `CIR0` file identifier
 

@@ -13,7 +13,7 @@ Export helpers should:
 - save model artifacts;
 - encapsulate target-format-specific export calls;
 - normalize example inputs for export;
-- return artifact paths for logging and tests.
+- expose output locations and document whether they return artifact paths or `None`.
 
 Export helpers should not:
 
@@ -246,7 +246,7 @@ When the text config sets `hidden_size_per_layer_input > 0`, the Gemma4
 
 ```text
 ple_embedding.<tag>.circle            # shared CPU lookup, dynamic 1 <= S <= max_seq_len
-ple_embedding.<tag>.pt                # ...or the host .pt table when the Circle would exceed 2 GiB
+ple_embedding.<tag>.pt                # ...or the host table selected by the recipe's auto policy
 ple_projection_prefill.<tag>.circle   # NPU projection/combine, S = max_seq_len
 ple_projection_decode.<tag>.circle    # NPU projection/combine, S = 1
 ple_pipeline.json                     # chosen format, shapes, and observer boundaries
@@ -259,11 +259,14 @@ ple_pipeline.json                     # chosen format, shapes, and observer boun
   contains the large `embed_tokens_per_layer` table. Prefill runs it with
   `S = max_seq_len`, decode with `S = 1`.
 - `export.ple_embedding_format` selects the lookup artifact: `auto` (default)
-  writes the Circle graph when the packed table fits the 2 GiB flatbuffer
-  limit and otherwise writes `ple_embedding.<tag>.pt`; `circle` and `pt`
+  retains the recipe's 2 GiB estimated-size threshold and writes
+  `ple_embedding.<tag>.pt` at or above that threshold; `circle` and `pt`
   force one format. The E2B table (262144 x 35 x 256 elements) is 9.4 GB in
-  float32 and 2.35 GB at 8-bit weights, so E2B exports use `.pt` for both
-  `f32` and `q` tags.
+  float32 and 2.35 GB at 8-bit weights, so `auto` selects `.pt` for both
+  `f32` and `q` tags. This format policy is separate from the serializer's
+  appended-payload support: explicitly selecting `circle` can write larger
+  tables through the shared serializer. See
+  [recipe format policies](../../../../docs/large_circle_export.md#recipe-format-policies).
 - The `.pt` artifact stores the complete stage contract: the float table (or
   the integer table with its per-row weight qparams), `embed_scale`, the packed
   geometry, and the frozen `embedding`, `embed_scale`, `act_out`, and
@@ -334,11 +337,16 @@ def export_full_circle(
     output_dir: str | Path,
     name: str = "model.q.circle",
     strict: bool = False,
+    max_seq_len: int | None = None,
+    config: CompileConfigBase | None = None,
 ) -> Path:
     ...
 ```
 
-Return a `Path` so callers can store it in `ctx.artifacts` or assert it in tests.
+`export_full_circle()` returns a `Path` so callers can store it in
+`ctx.artifacts` or assert it in tests. Multi-artifact writers such as
+`export_llama_per_layer()` return `None` and write into the supplied output
+directory; callers should inspect their documented artifacts there.
 
 For very simple helpers, positional arguments are acceptable:
 
@@ -355,7 +363,7 @@ def save_checkpoint(
 
 1. Add a helper under `recipes/export/`.
 2. Keep target-specific imports local if they are optional or heavy.
-3. Return the created artifact path.
+3. Document the output paths and return value; return a `Path` for a single-artifact helper.
 4. Add an artifact name under `export.artifacts`.
 5. Call the helper from the relevant adapter’s `export()` method.
 6. Add a tiny smoke export test if the target supports small models.
@@ -374,17 +382,27 @@ export:
   strict: false
 ```
 
-Example adapter call:
+Example inside the LLaMA adapter, after validating the export profile:
 
 ```python
+from pathlib import Path
+
+from tico.quantization.recipes.export.circle import resolve_compile_config
+from tico.quantization.recipes.export.llama import export_llama_per_layer
+from tico.quantization.recipes.sequence_length import resolve_export_max_seq_len
+
+export_cfg = ctx.cfg.get("export", {})
+output_dir = Path(export_cfg.get("output_dir", "./out/llama"))
 artifacts = set(export_cfg.get("artifacts", []))
 
 if "circle_per_layer" in artifacts:
-    export_llama_layers_to_circle(
-        model=ctx.model,
-        example_inputs=ctx.calibration_inputs[:1],
-        output_dir=output_dir / "layers",
-        strict=bool(export_cfg.get("strict", False)),
+    export_llama_per_layer(
+        q_model=ctx.model,
+        max_seq_len=resolve_export_max_seq_len(ctx),
+        output_dir=output_dir,
+        prefill_decode=bool(export_cfg.get("prefill_decode", False)),
+        append_prefill_buckets=export_cfg.get("append_prefill_buckets"),
+        compile_config=resolve_compile_config(export_cfg),
     )
 ```
 
@@ -440,32 +458,32 @@ input generation belongs in `recipes/data/` or an adapter-specific helper.
 
 The runner should save `effective_config.yaml` when `export.output_dir` is set.
 Export helpers should not mutate the config to record paths. Instead, return
-paths and let the runner or adapter attach them to `ctx.artifacts` if needed.
+paths when the helper's API provides them, or let the adapter record the known
+output locations in `ctx.artifacts` if needed.
 
 ## Error handling
 
-Fail early when export prerequisites are missing:
-
-```python
-if not ctx.calibration_inputs:
-    raise RuntimeError("Circle export requires at least one calibration input.")
-```
-
-Prefer clear errors over partially written artifacts.
+Fail early when the requested artifact lacks a valid static profile, compatible
+example inputs, or the required frozen quantization state. Use
+`resolve_export_max_seq_len(ctx)` for text capacity and the model-specific
+profile validators for vision geometry. Export builds shape examples from
+these profiles; it does not require `ctx.calibration_inputs`. A checkpoint
+missing required frozen qparams must be recalibrated through the quantization
+workflow before export. Prefer clear errors over partially written artifacts.
 
 ## Testing checklist
 
 For a new exporter, test:
 
 - output directory creation;
-- returned `Path`;
+- the documented return value and presence of the written artifacts;
 - existing output directory behavior;
 - CPU-only execution when possible;
 - missing example input behavior;
 - invalid artifact key behavior at the adapter/config level;
 - that the exporter does not run evaluation or quantization implicitly.
 
-### Complete fixed-image Qwen3-VL prefill
+## Complete fixed-image Qwen3-VL prefill
 
 `Qwen3VLModelPrefillExportAdapter` composes the existing fixed-grid vision,
 fixed-span fusion, decoder and DeepStack adapters into one complete graph. It
