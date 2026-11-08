@@ -10,10 +10,10 @@ Most new examples should be added as config files in this directory.
 Use the [CLI examples](../README.md) to run a preset and the
 [recipe developer guide](../../recipes/README.md) to extend its implementation.
 For named specs, model-structure selectors, precedence, and override diagnostics,
-see [PTQ override policies](PTQ_OVERRIDE_POLICIES.md).
+see [PTQ override policies](ptq_override_policies.md).
 
 For MMMU-Pro vision prompt modes, fixed-input generation comparisons and
-per-sample JSONL diagnostics, see the [MMMU evaluation guide](../../recipes/evaluation/MMMU.md).
+per-sample JSONL diagnostics, see the [MMMU evaluation guide](../../recipes/evaluation/mmmu_pro.md).
 
 ## File naming
 
@@ -856,10 +856,10 @@ An explicit budget in a preset still wins when overriding `prompt_mode`; set
 `max_new_tokens` as well, or use `null` to request the mode default. The total
 input-plus-output capacity comes from `evaluation.max_seq_len`.
 
-The [MMMU protocol guide](../../recipes/evaluation/MMMU.md) owns supported-scope
+The [MMMU protocol guide](../../recipes/evaluation/mmmu_pro.md) owns supported-scope
 validation, prompt migration, versioned answer parsing, and the diagnostic JSONL
-contract. Its [budgeting rules](../../recipes/evaluation/MMMU.md#configuration)
-and [fixed-input comparison](../../recipes/evaluation/MMMU.md#fixed-input-output-budget-comparison)
+contract. Its [budgeting rules](../../recipes/evaluation/mmmu_pro.md#configuration)
+and [fixed-input comparison](../../recipes/evaluation/mmmu_pro.md#fixed-input-output-budget-comparison)
 explain how these fields affect comparable FP/Quant runs.
 
 ## `export`
@@ -892,7 +892,7 @@ Rules:
   under `output_dir`. It always exports paired stages regardless of
   `export.prefill_decode`, requires float32 model export or a supported
   quantized checkpoint, and needs `export.max_seq_len >= 2`.
-  See the [bundle contract](../../recipes/export/README.md#llama-circle-bundles)
+  See the [bundle contract](../../recipes/export/llama_artifacts.md#llama-circle-bundles)
   and [generation CLI](../README.md#generate-from-a-llama-circle-bundle).
 - Qwen3-VL Circle export requires `model_args.profile: npu_export`, and its
   fixed vision grid/start/merge values must match the wrapped checkpoint.

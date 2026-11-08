@@ -66,6 +66,14 @@ constraints, and maintenance rules. When consolidating overlapping text, preserv
 any unique conditions or examples in the owner before replacing the other copy
 with a link.
 
+Use `README.md` for a directory's entry guide and descriptive
+`lower_snake_case.md` names for standalone references. Place a guide with the
+subsystem that owns its workflow: artifact contracts belong under recipe export,
+while export regression procedures belong under recipe debug. Fold a leaf README
+into its parent when its content is only a namespace note or a small part of the
+parent's workflow. A distinct protocol, ABI, or selection policy can justify its
+own reference regardless of length.
+
 | Topic | Owning guide |
 |---|---|
 | Public conversion API and first-use examples | [Getting Started](./getting_started.md) |
@@ -80,8 +88,10 @@ with a link.
 | Runnable CLI workflows; YAML fields and defaults | [CLI examples](../tico/quantization/examples/README.md) and [configuration reference](../tico/quantization/examples/configs/README.md) |
 | Extension routing, shared recipe rules, and adapter/stage boundaries | [Recipes developer guide](../tico/quantization/recipes/README.md) and its linked subsystem guides |
 | Trace workflows and APIs; wrapper cases and static profiles | [Debug guide](../tico/quantization/recipes/debug/README.md) and [wrapper smoke reference](../tico/quantization/recipes/debug/wrapper_smoke/README.md) |
-| Quality protocols; MMMU parsing and diagnostics | [Recipe evaluation](../tico/quantization/recipes/evaluation/README.md) and [MMMU reference](../tico/quantization/recipes/evaluation/MMMU.md) |
-| Export helpers and common artifact rules; Gemma4 artifact contracts | [Export guide](../tico/quantization/recipes/export/README.md) and [Gemma4 artifacts](../tico/quantization/recipes/export/gemma4_artifacts.md) |
+| Quality protocols; MMMU-Pro parsing and diagnostics | [Recipe evaluation](../tico/quantization/recipes/evaluation/README.md) and [MMMU-Pro reference](../tico/quantization/recipes/evaluation/mmmu_pro.md) |
+| Export helpers and common artifact rules | [Export guide](../tico/quantization/recipes/export/README.md) |
+| Model artifact contracts and runtime composition | [LLaMA artifacts](../tico/quantization/recipes/export/llama_artifacts.md), [Qwen3-VL artifacts](../tico/quantization/recipes/export/qwen3_vl_artifacts.md), and [Gemma4 artifacts](../tico/quantization/recipes/export/gemma4_artifacts.md) |
+| Static export isolation and comparison | [Static export regression guide](../tico/quantization/recipes/debug/static_export_regression.md) |
 | Application-specific commands, deployment profiles, and reports | The application's guide, such as the [hand-model example](../examples/hand_detector/README.md) |
 
 ### Implementation references

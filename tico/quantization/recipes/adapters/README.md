@@ -339,7 +339,7 @@ for that family.
 ## PTQ selector override structure
 
 Selector-based `override_policies` (see
-[`../../examples/configs/PTQ_OVERRIDE_POLICIES.md`](../../examples/configs/PTQ_OVERRIDE_POLICIES.md))
+[`../../examples/configs/ptq_override_policies.md`](../../examples/configs/ptq_override_policies.md))
 need to know, per logical component, where a model keeps its layers, how many
 there are, and which modules an `op_type` alias expands to. That structure is
 declared by the adapter through `build_quant_target_context(model)`, which

@@ -1,4 +1,4 @@
-# MMMU evaluation protocol and diagnostics
+# MMMU-Pro evaluation protocol and diagnostics
 
 The Qwen3-VL and Gemma4 recipe adapters share the MMMU evaluator. These options
 apply to both floating-point evaluation and checkpoint evaluation. They do not
