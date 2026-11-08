@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import unittest
 
+import tico
 import torch
 
+from circle_schema import circle
+from tico.circle import CircleDocument
+from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine
 from tico.quantization.wrapq.dtypes import DType
@@ -49,6 +53,17 @@ def _quant_config(bit_width: int) -> PTQConfig:
         weight=affine(dtype, qscheme=weight_qscheme),
         strict_wrap=False,
     )
+
+
+class _OutputSizedTranspose(nn.Module):
+    def __init__(self, wrapped=False):
+        super().__init__()
+        conv = nn.ConvTranspose2d(1, 1, 3, stride=2, padding=1, bias=False)
+        conv.weight.data.fill_(1.0)
+        self.conv = QuantConvTranspose2d(conv) if wrapped else conv
+
+    def forward(self, input_):
+        return self.conv(input_, output_size=(6, 6))
 
 
 class QuantConvTranspose2dTest(unittest.TestCase):
@@ -104,6 +119,131 @@ class QuantConvTranspose2dTest(unittest.TestCase):
         with torch.inference_mode():
             output = wrapper(input_)
         self.assertLess((output - reference).abs().max().item(), 1e-2)
+
+    def test_output_size_matches_native_for_batched_and_unbatched_inputs(self) -> None:
+        """Accept spatial/full targets as positional or keyword arguments."""
+        module = nn.ConvTranspose2d(1, 1, 3, stride=2, padding=1, bias=False)
+        module.weight.data.fill_(1.0)
+        for batched in (False, True):
+            input_ = torch.arange(9, dtype=torch.float32).reshape(1, 3, 3)
+            if batched:
+                input_ = input_.unsqueeze(0)
+            full_size = (1, 1, 6, 6) if batched else (1, 6, 6)
+            for target in ([6, 6], full_size, torch.Size(full_size)):
+                with self.subTest(batched=batched, target=target):
+                    wrapper = QuantConvTranspose2d(module)
+                    expected = module(input_, output_size=target)
+                    torch.testing.assert_close(
+                        wrapper(input_, target), expected, rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        wrapper(input_, output_size=target), expected, rtol=0, atol=0
+                    )
+
+    def test_output_size_overrides_configured_padding_with_dilation(self) -> None:
+        """Resolve each ambiguous axis using the native dilation-aware bounds."""
+        module = nn.ConvTranspose2d(
+            2,
+            2,
+            3,
+            stride=(2, 3),
+            padding=1,
+            output_padding=(0, 2),
+            dilation=(2, 1),
+            groups=2,
+        )
+        module.weight.data.fill_(0.25)
+        assert module.bias is not None
+        module.bias.data.fill_(0.5)
+        input_ = torch.arange(18, dtype=torch.float32).reshape(1, 2, 3, 3)
+        wrapper = QuantConvTranspose2d(module)
+        for target in (None, (7, 7), (8, 8), (8, 9)):
+            with self.subTest(target=target):
+                torch.testing.assert_close(
+                    wrapper(input_, output_size=target),
+                    module(input_, output_size=target),
+                    rtol=0,
+                    atol=0,
+                )
+        self.assertEqual(wrapper(input_).shape, (1, 2, 7, 9))
+
+    def test_invalid_output_sizes_preserve_native_errors(self) -> None:
+        """Reject unreachable sizes and invalid target ranks like ConvTranspose2d."""
+        module = nn.ConvTranspose2d(1, 1, 3, stride=2, padding=1)
+        wrapper = QuantConvTranspose2d(module)
+        for batched in (False, True):
+            input_ = torch.ones((1, 1, 3, 3) if batched else (1, 3, 3))
+            targets: list[tuple[int, ...]] = [(4, 6), (7, 6), (6,), (1, 1, 1, 6, 6)]
+            if not batched:
+                targets.append((1, 1, 6, 6))
+            for target in targets:
+                with self.subTest(batched=batched, target=target):
+                    with self.assertRaises(ValueError) as expected:
+                        module(input_, output_size=target)
+                    with self.assertRaises(ValueError) as actual:
+                        wrapper(input_, output_size=target)
+                    self.assertEqual(str(actual.exception), str(expected.exception))
+
+    def test_calibration_and_quantization_honor_output_size(self) -> None:
+        """Observe the requested output and keep fake-quantized dispatch equivalent."""
+        input_ = torch.arange(9, dtype=torch.float32).reshape(1, 1, 3, 3) / 8
+        for bit_width in (8, 16):
+            with self.subTest(bit_width=bit_width):
+                model = _OutputSizedTranspose().eval()
+                expected = model(input_)
+                prepared = prepare(model, _quant_config(bit_width), inplace=True)
+                torch.testing.assert_close(prepared(input_), expected, rtol=0, atol=0)
+                quantized = convert(prepared, inplace=True).eval()
+                wrapper = next(
+                    child
+                    for child in quantized.modules()
+                    if isinstance(child, QuantConvTranspose2d)
+                )
+                native = nn.ConvTranspose2d(1, 1, 3, stride=2, padding=1, bias=False)
+                native.weight.data.copy_(
+                    wrapper.obs_weight.fake_quant(wrapper.module.weight)
+                )
+                input_q = wrapper.obs_act_in.fake_quant(input_)
+                for target in ((5, 5), (5, 6), (6, 5), (6, 6)):
+                    with self.subTest(target=target):
+                        reference = wrapper.obs_act_out.fake_quant(
+                            native(input_q, output_size=target)
+                        )
+                        torch.testing.assert_close(
+                            wrapper(input_, output_size=target),
+                            reference,
+                            rtol=0,
+                            atol=0,
+                        )
+
+    def test_output_size_exports_to_default_circle_with_matching_contract(self) -> None:
+        """Serialize and execute the resolved target shape with default O1."""
+        input_ = torch.arange(9, dtype=torch.float32).reshape(1, 1, 3, 3)
+        model = _OutputSizedTranspose(wrapped=True).eval()
+        expected = model(input_)
+        converted = tico.convert(model, (input_,))
+        document = CircleDocument.from_bytes(converted.circle_binary)
+        self.assertTrue(document.verify().ok)
+        subgraph = document.model.subgraphs[0]
+        output = subgraph.tensors[subgraph.outputs[0]]
+        self.assertEqual(tuple(output.shape), (1, 1, 6, 6))
+        self.assertEqual(output.type, circle.TensorType.TensorType.FLOAT32)
+        torch.testing.assert_close(
+            torch.from_numpy(converted(input_)), expected, rtol=0, atol=0
+        )
+        prepared = prepare(
+            _OutputSizedTranspose().eval(), _quant_config(16), inplace=True
+        )
+        prepared(input_)
+        quantized = convert(prepared, inplace=True).eval()
+        artifact = tico.convert(quantized, (input_,))
+        document = CircleDocument.from_bytes(artifact.circle_binary)
+        self.assertTrue(document.verify().ok)
+        subgraph = document.model.subgraphs[0]
+        output = subgraph.tensors[subgraph.outputs[0]]
+        self.assertEqual(tuple(output.shape), (1, 1, 6, 6))
+        self.assertEqual(output.type, circle.TensorType.TensorType.INT16)
+        self.assertIsNotNone(output.quantization)
 
 
 if __name__ == "__main__":

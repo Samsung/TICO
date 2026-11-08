@@ -91,6 +91,13 @@ with a captured export mode must be rebuilt if the owner changes mode; an explic
 float mode cannot bypass a quantized owner's capability or producer observer.
 Plain floating stages require an explicit `Mode.NO_QUANT` contract.
 
+`QuantConvTranspose2d` preserves the native optional `output_size` argument in
+floating, calibration, and quantized modes. The wrapped ConvTranspose2d resolves
+spatial or full output sizes, including unbatched inputs, and rejects unreachable
+targets. An omitted target retains the module's configured `output_padding`.
+Static targets are resolved before Circle export and preserve the requested
+output shape in the artifact.
+
 An empty imported per-channel tensor can establish rank and channel extent even
 though it contributes no numerical statistics. Locked grids are validated against
 that shape before it is recorded. Empty uncalibrated tensors still cannot create
