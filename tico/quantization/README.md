@@ -4,13 +4,11 @@
 
 ## Overview
 
-The _quantization_ module provides a unified, modular interface for quantizing neural
-networks, including large language models (LLMs) and vision-language models (VLMs).
-Its primary goal is to simplify the process of preparing, calibrating, and converting
-models into their quantized versions while abstracting the underlying complexities of
-different quantization algorithms.
-At the top level, the module exposes two primary public interface functions:
-_prepare_ and _convert_.
+The _quantization_ module provides the public `prepare` / `convert` API for neural
+networks, including LLMs and VLMs. This guide owns the shared API and quantizer
+registration contract. Algorithm-specific options and numerical behavior are
+documented in the [algorithm guides](./algorithm/README.md); wrapper lifecycle and
+frozen-state contracts are documented in [WrapQ](./wrapq/README.md).
 
 - Public Interface
   - `prepare(model, quant_config, args, kwargs, inplace)`
@@ -36,10 +34,6 @@ _prepare_ and _convert_.
     `get_quantizer(quant_config)` and attaches it to the returned prepared model as
     `tico_quantizer`. That quantizer owns its configuration; `convert()` reuses the
     attached instance.
-
-This design ensures that users interact only with the high-level functions and
-configuration objects, while the internal details of each quantization algorithm are
-encapsulated within dedicated quantizer classes.
 
 After successful conversion, the returned model no longer carries `tico_quantizer`.
 If conversion fails, the original prepared model retains the handle for retry.
@@ -77,17 +71,6 @@ for d in dataset:
 # 3. Apply GPTQ
 quantized_model = convert(prepared_model)
 ```
-
-## Purpose
-
-The module is designed to:
-- Simplify Model Quantization: Provide a simple, high-level API that abstracts the
-  calibration and conversion complexities.
-- Support Multiple Algorithms: Enable users to choose quantization algorithms by
-  specifying configuration objects (e.g., `PTQConfig`, `GPTQConfig`).
-- Promote Modularity and Extensibility: Offer a clear separation between the public API,
-  configuration classes, and internal quantizer implementations, ensuring the module is
-  easy to extend and maintain.
 
 ## Directory Structure
 

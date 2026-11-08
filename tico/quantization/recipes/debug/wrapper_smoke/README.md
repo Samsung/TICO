@@ -1,19 +1,14 @@
 # Wrapper Smoke Check
 
 Wrapper smoke check is a lightweight developer workflow for validating
-quantization wrappers, export paths, and numerical parity at module level.
+quantization wrappers, export paths, and numerical parity at module level. It
+runs `prepare -> calibrate -> convert`, compares FP and quantized outputs, and
+optionally plots differences or exports the wrapped module to Circle.
 
-The goal is to make it easy to:
-
-- validate `prepare -> calibrate -> convert` flows
-- compare floating-point and quantized outputs
-- visualize numerical drift quickly
-- export individual wrapped modules to Circle
-- debug wrapper-specific regressions without running a full model benchmark
-
-The workflow is intentionally synthetic and fast. Each case builds a small
-deterministic module together with representative inputs that approximate the
-real runtime contract of the wrapper.
+Each case uses a deterministic synthetic module and representative inputs. This
+supports local debugging and CI smoke checks; it does not replace full-model
+evaluation, dataset-driven accuracy measurement, or latency benchmarks. See the
+[CLI workflows](../../../examples/README.md) for model quantization and evaluation.
 
 ## CLI Usage
 
@@ -41,7 +36,7 @@ python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case qwen3_vl_vision_attention \
-  --export circle   \
+  --export circle \
   --output-dir ./out/wrapper_smoke
 ```
 
@@ -53,6 +48,35 @@ python -m tico.quantization.examples.inspector \
   --mode wrapper-smoke \
   --case all
 ```
+
+Fail immediately if parity thresholds are exceeded:
+
+```bash
+python -m tico.quantization.examples.inspector \
+  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
+  --mode wrapper-smoke \
+  --case llama_decoder_layer_prefill \
+  --strict
+```
+
+Disable scatter-plot visualization:
+
+```bash
+python -m tico.quantization.examples.inspector \
+  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
+  --mode wrapper-smoke \
+  --case nn_linear \
+  --no-plot
+```
+
+### Static decoder input contracts
+
+Static Llama, Qwen3-VL text, and Gemma4 decoder cases assemble the export adapter
+and its invocation together. Calibration, eager comparison, and export use explicit
+host-owned additive causal masks and `(cos, sin)` RoPE tensors; cache-aware paths
+also supply fixed-capacity past KV (or full shared KV for Gemma4 consumers). The
+runner binds and validates these tensor shapes before Circle tracing, without an
+extra model forward. These host inputs remain part of the exported graph ABI.
 
 ### Tiny top-level export boundaries
 
@@ -355,26 +379,6 @@ Use the regular Gemma4 quantize/export recipe when full layer depth, the full
 vocabulary/PLE tables, pretrained weights, or end-to-end model evaluation is
 required.
 
-Fail immediately if parity thresholds are exceeded:
-
-```bash
-python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
-  --mode wrapper-smoke \
-  --case llama_decoder_layer_prefill \
-  --strict
-```
-
-Disable scatter-plot visualization:
-
-```bash
-python -m tico.quantization.examples.inspector \
---config tico/quantization/examples/configs/wrapper_smoke.yaml \
---mode wrapper-smoke \
---case nn_linear \
---no-plot
-```
-
 ## Output Example
 
 ```text
@@ -411,6 +415,9 @@ Unavailable cases print the failure summary and write the requested JSON report
 without constructing a model. With `--strict`, these diagnostics are emitted
 before the failure is raised.
 
+Visualization uses `plot_two_outputs()`, which supports Plotext 5 and 6. Use
+`--no-plot` for checks that only need numerical summaries or Circle artifacts.
+
 ## Adding a New Case
 
 Add a new file or registration entry under:
@@ -419,19 +426,11 @@ Add a new file or registration entry under:
 tico/quantization/recipes/debug/wrapper_smoke/cases/
 ```
 
-A case should define:
-
-- module construction
-- calibration samples
-- evaluation samples
-- export example inputs
-- parity thresholds
-
-Then register the case in:
-
-```text
-registry.py
-```
+Define the case-specific inputs and behavior listed in [Architecture](#architecture),
+then register the case in `registry.py`. Keep modules small and deterministic so
+they run quickly on CPU whenever possible. Synthetic inputs should approximate
+the real wrapper contract without large datasets or external preprocessing
+pipelines. Reuse the shared runner for common quantization and export behavior.
 
 After registration, the case automatically becomes available through:
 
@@ -439,84 +438,13 @@ After registration, the case automatically becomes available through:
 python -m tico.quantization.examples.inspector   --mode wrapper-smoke   --case <new_case>
 ```
 
-## Main Features
-
-Wrapper smoke check supports:
-
-- module-level quantization sanity checks
-- floating-point vs quantized parity metrics
-- PEIR and mean absolute error reporting
-- `plot_two_outputs()` visualization (supports Plotext 5 and 6)
-- Circle export for wrapped modules
-- deterministic synthetic calibration data
-- reusable shared runner infrastructure
-- CLI integration through `examples/inspector.py`
-
 ## Architecture
 
-```text
-examples/inspector.py
-    └── wrapper_smoke runner
-            ├── registry
-            ├── shared utilities
-            ├── export helpers
-            └── per-wrapper cases
-```
+`examples/inspector.py` dispatches the selected registered case to the shared
+runner. Case implementations use shared utilities and export helpers:
 
-Each case defines:
-
-- how to build the module
-- calibration inputs
-- evaluation inputs
-- export behavior
-- parity thresholds
-- optional visualization behavior
-
-The shared runner owns:
-
-- calibration loops
-- conversion flow
-- parity metrics
-- plotting
-- Circle export
-- result formatting
-- failure handling
-
-## Design Principles
-
-### Small deterministic modules
-
-Wrapper smoke checks should run quickly on CPU whenever possible.
-
-### Synthetic but representative inputs
-
-Inputs should approximate realistic wrapper contracts without requiring
-large datasets or external preprocessing pipelines.
-
-### Shared infrastructure
-
-Cases should focus only on wrapper-specific logic while the runner handles
-common quantization and export behavior.
-
-### Developer-focused debugging
-
-Wrapper smoke check is designed for rapid iteration during wrapper
-development, export debugging, and quantization regression analysis.
-
-## Intended Usage
-
-Wrapper smoke check is intended for:
-
-- wrapper development
-- quantization debugging
-- export debugging
-- parity inspection
-- CI smoke validation
-- fast local sanity checks
-
-It is not intended to replace:
-
-- end-to-end model evaluation
-- benchmark suites
-- dataset-driven accuracy validation
-- latency benchmarking
+| Owner | Responsibilities |
+|---|---|
+| Case | Module construction, calibration and evaluation samples, export example inputs and behavior, parity thresholds, optional visualization behavior. |
+| Registry | Available case names and case lookup. |
+| Shared runner | Calibration and conversion, parity metrics (including PEIR and mean absolute error), plotting, Circle export, result formatting, and failure handling. |

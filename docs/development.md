@@ -1,7 +1,10 @@
 # Development Guide
 
 This guide describes the current source-development workflow for TICO. Repository
-commands are routed through the `./ccex` helper in the project root.
+commands are routed through the `./ccex` helper in the project root. It owns environment
+setup, test and runtime commands, diagnostics, formatting, and CI reproduction.
+The [System Test Guide](system_test.md) owns test strategy, harness behavior, and
+correctness criteria.
 
 ## Contents
 
@@ -49,7 +52,11 @@ source .venv/bin/activate
 
 The order matters. `./ccex configure test` validates an already installed Torch package
 and installs the matching TorchVision build; it does not install TICO or Torch. Run
-`./ccex install` first.
+`./ccex install` first. Test configuration also installs
+[`test/requirements.txt`](../test/requirements.txt) and validates the package
+environment. [`test/requirements_pre.txt`](../test/requirements_pre.txt) is reserved
+for pre-release test dependencies and is currently empty. Optional external runtimes
+are installed separately; see [Runtime selection](#runtime-selection).
 
 Set up only one part of the environment when needed:
 
@@ -148,6 +155,8 @@ selected separately with `-m` and are not part of the normal model-independent s
 ./ccex test -k add
 ./ccex test -k ConvertMatmulToLinear
 ./ccex test -k quantization
+./ccex test -k passes
+./ccex test -k test_quantizer_registry
 ```
 
 Quote keyword patterns containing spaces to pass them to `unittest` as one argument.
@@ -175,7 +184,10 @@ to the complete suite for cross-cutting changes.
 ```
 
 `--all` and `--keyword` cannot be combined. `--model` also cannot be combined with
-`--all` or `--keyword`.
+`--all` or `--keyword`. `-i` sets `RUN_INTERNAL_TESTS=1` for discovery. `-p` / `--perf`
+selects the performance entry point instead of normal discovery. For example,
+`./ccex test -v -k add` combines verbose diagnostics with a focused test; setting
+`TICO_LOG=4` explicitly has the same effect (see [Log levels](#log-levels)).
 
 ### Performance benchmarks
 
@@ -202,38 +214,17 @@ See [`test/performance/README.md`](../test/performance/README.md) for all option
 
 ## Test organization
 
-```text
-test/
-├── modules/                 # Small PyTorch modules used by generated E2E tests
-│   ├── op/
-│   ├── net/
-│   └── model/               # Opt-in dependency-isolated model tests
-├── unit_test/               # Focused tests for core conversion and Circle utilities
-│   ├── circle/
-│   ├── ops/
-│   ├── passes/
-│   ├── quantization/
-│   ├── serialize/
-│   └── utils/
-├── quantization/            # Algorithms, WrapQ, recipes, configs, export, and analysis
-├── support/                 # Shared runtime and test-builder utilities
-├── performance/             # Conversion/size and Circle O1 scheduler benchmarks
-└── pt2_to_circle_test/      # CLI/API and end-to-end conversion tests
-```
+Use focused unit tests for local behavior and module tests for PyTorch-to-Circle
+parity. Model tests and performance benchmarks are opt-in workflows. The
+[test documentation index](../test/README.md) links the subsystem guides.
 
-The module test harness normally:
-
-1. Creates the PyTorch reference outputs before export.
-2. Exports directly or saves and reloads a `.pt2` file.
-3. Converts the `ExportedProgram` to Circle.
-4. Validates the serialized model: `CircleDocument.verify()` for structural
-   consistency, reference-runtime preparation for operator support, and a zero-input
-   contract probe for static models.
-5. Executes with the reference runtime (or an explicitly selected external runtime),
-   unless inference is disabled by a test tag.
-6. Compares output count, shape, dtype, and values with explicit tolerances.
-
-See [System Test Guide](./system_test.md) for the complete test strategy.
+The System Test Guide owns the [test layers](system_test.md#2-test-layers),
+[directory layout](system_test.md#3-test-directory-layout), and
+[end-to-end harness flow](system_test.md#4-end-to-end-module-test-flow). Consult its
+[correctness criteria](system_test.md#5-correctness-criteria) when deciding what a
+new regression must assert and its
+[change-specific checklist](system_test.md#13-adding-or-changing-tests) when choosing
+coverage.
 
 ## Runtime selection
 
@@ -426,9 +417,9 @@ central policy module rather than duplicated in workflow YAML.
      TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>
      ```
 
-2. **Format check**
+2. **Format check (`check-format`)**
    - Runs on Ubuntu 24.04 with Python 3.12.
-   - Executes `./ccex configure format`, then runs lintrunner for UFMT only without
+   - Executes `./ccex configure format`, then runs lintrunner with `--take UFMT` without
      applying patches.
    - Does not depend on the package build or install PyTorch.
 
@@ -436,16 +427,16 @@ central policy module rather than duplicated in workflow YAML.
    - Builds the TICO wheel once.
    - Uploads one short-lived artifact reused by static analysis and versioned tests.
 
-4. **Static analysis**
+4. **Static analysis (`check-static`)**
    - Runs on Ubuntu 24.04 with Python 3.12.
    - Reuses the test-environment setup action with the default Torch family from the
      central policy, including CPU Torch, matching TorchVision, TICO, and test
      dependencies.
    - Configures the analysis tools, checks package dependency consistency, records
-     installed versions, and runs lintrunner for Pylint and mypy without applying
+     installed versions, and runs lintrunner with `--take PYLINT,MYPY` without applying
      patches.
-   - The existing **Check style** status succeeds only when both formatting and
-     static analysis succeed, preserving existing required-check settings.
+   - The existing **Check style** status (`check-style`) succeeds only when both
+     formatting and static analysis succeed, preserving existing required-check settings.
 
 5. **Versioned tests**
    - Runs the complete suite on the default qualified family, currently 2.13.
@@ -454,10 +445,18 @@ central policy module rather than duplicated in workflow YAML.
    - Runs the same smoke tests non-blockingly on the qualification candidate, currently
      2.14.
 
-A separate compatibility workflow runs `nightly-latest` smoke tests daily and the
-complete supported/candidate/`nightly-latest` matrix weekly. Official package
-publication runs the full suite on every qualified stable family before publishing. See the
-[PyTorch Version Policy](./torch_version_policy.md) for the exact tiers.
+The smoke path covers a small `torch.export`/PT2/Circle conversion and a quantized CNN
+Circle export. These focused tests detect version-contract breakage without running
+the complete suite on every family for each pull request.
+
+A separate compatibility workflow runs `nightly-latest` smoke tests on six days each
+week and the complete supported/candidate/`nightly-latest` matrix on the remaining day.
+Manual dispatch also runs the complete matrix.
+It provides early warning without participating in PR branch protection. Official
+package publication builds the wheel once and runs the full suite on every qualified
+stable family before publishing; candidate and nightly selectors are outside that
+release-support gate. See the [PyTorch Version Policy](./torch_version_policy.md#ci-tiers)
+for the exact tiers.
 
 The conversion/size threshold benchmark is available through `./ccex test -p`.
 The full Circle O1 scheduler benchmark is invoked directly with a caller-provided

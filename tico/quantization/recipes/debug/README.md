@@ -21,15 +21,9 @@ points and the [recipe developer guide](../README.md) for package responsibiliti
 
 ## Current pattern
 
-```bash
-python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
-  --mode trace \
-  --interesting-modules model.language_model model.visual
-```
-
 `inspector.py` should stay thin. It should parse arguments, load a config, create a
-`RecipeContext`, and dispatch to a reusable debug function.
+`RecipeContext`, and dispatch to a reusable debug function. The
+[trace mode](#existing-trace-mode) below is the standard config-driven example.
 
 ## Existing trace mode
 
@@ -71,6 +65,19 @@ python -m tico.quantization.examples.inspector \
 
 Use trace mode without `--enable-quantization` when debugging wrapper parity.
 Use it with `--enable-quantization` when debugging fake-quantization error.
+
+The output separates the two traces from their per-module differences:
+
+```text
+=== FP trace ===
+[module.name] Tensor(shape=..., dtype=..., mean=..., min=..., max=..., std=...)
+
+=== PTQ trace ===
+[module.name] Tensor(shape=..., dtype=..., mean=..., min=..., max=..., std=...)
+
+=== Side-by-side diff ===
+module.name: mean|diff|=..., max|diff|=...
+```
 
 `--interesting-modules` accepts exact module names and parent module prefixes.
 For example, `--interesting-modules model.visual` traces `model.visual` and its
@@ -128,6 +135,16 @@ python -m tico.quantization.examples.compare_side_by_side \
   --set "pipeline.1.gptq.weight_bits=8"
 ```
 
+### Comparing nested outputs
+
+`tico.quantization.wrapq.utils.introspection.compare_outputs()` returns tensor
+difference statistics by default. With `full_tensor_diff=True`, it returns signed
+float32 tensor differences at every depth, including tensors nested in lists,
+tuples, dictionaries, and object fields. `compare_side_by_side()` requests these
+full differences for `interesting_modules`; other modules retain compact
+statistics. Use this API when a summary identifies a mismatch and the individual
+output elements need inspection.
+
 ## Static runtime token helpers
 
 `token_mask.py` owns the shared padded-text mask, padding-layout, position-ID,
@@ -146,25 +163,10 @@ Add a debug mode when the workflow is for developers rather than normal users:
 - shape or mask debugging
 - synthetic input smoke checks
 
-Do not add public scripts such as:
-
-```text
-trace_qwen.py
-quantize_vision_attention.py
-quantize_decoder_layer_prefill.py
-```
-
-Instead add:
-
-```text
-recipes/debug/<mode>.py
-```
-
-and expose it through:
-
-```text
-examples/inspector.py --mode <mode>
-```
+Add `recipes/debug/<mode>.py` and expose it through
+`examples/inspector.py --mode <mode>`. The
+[recipe responsibility map](../README.md#responsibility-boundaries) explains when
+to choose a debug mode, preset, adapter, or public entrypoint.
 
 ## Step-by-step: adding a new inspect mode
 

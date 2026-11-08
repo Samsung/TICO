@@ -103,29 +103,9 @@ option text and gold answer are never injected into the image-only prompt.
 
 ## Configuration
 
-```yaml
-evaluation:
-  max_seq_len: 2048  # Total input-plus-output capacity.
-  mmmu:
-    enabled: true
-    dataset: MMMU/MMMU_Pro
-    subjects: [vision]
-    n_shots: 0
-    n_samples: 1000
-    prompt_mode: strict_single_letter
-    max_new_tokens: 16
-    input_max_seq_len: null
-    output_jsonl: null
-    temperature: 0.0
-    verbose: false
-```
-
-| Option | Meaning |
-|---|---|
-| `prompt_mode` | `strict_single_letter` (default), `official_direct` or `official_cot`, for MMMU-Pro vision only. |
-| `max_new_tokens` | Positive integer; explicit values override the mode default. `null` selects the mode default. |
-| `input_max_seq_len` | Optional positive, fixed input cap, including text and image tokens. |
-| `output_jsonl` | Optional new output file. Existing files raise `FileExistsError`. |
+Use the [MMMU configuration reference](../../examples/configs/README.md#evaluationmmmu-for-mmmu-pro-multiple-choice-evaluation)
+for the complete YAML schema, field defaults, and override behavior. The rules
+below explain how input and output budgets affect the evaluation protocol.
 
 With a null input cap, existing automatic budgeting is preserved:
 `input_cap = max_seq_len - max_new_tokens`. The Qwen-style processor uses that

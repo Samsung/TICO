@@ -87,28 +87,6 @@ selecting a registered adapter variant. See the
 [config guide](./configs/README.md#extensions-optional) for the schema and the
 trust implications.
 
-Common usage patterns:
-
-```bash
-# Quantize LLaMA and save the configured checkpoint.
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_quantize.yaml
-```
-
-```bash
-# Evaluate a saved LLaMA checkpoint without running quantization again.
-python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/llama_eval_suite.yaml \
-  --checkpoint ./out/llama_quantized/quantized_model.pt
-```
-
-```bash
-# Export per-layer Circle artifacts from a saved LLaMA checkpoint.
-python -m tico.quantization.examples.export \
-  --config tico/quantization/examples/configs/llama_export.yaml \
-  --checkpoint ./out/llama_quantized/quantized_model.pt
-```
-
 ### LLaMA benchmark flow
 
 Use this three-step loop for the common LLaMA post-quantization benchmark flow.
@@ -180,13 +158,10 @@ writes static per-stage Circle files for the vision and text runtime.
 
 ### Quantize
 
-`quantize.py` is the command that executes the recipe pipeline. It runs the
-enabled stages under `pipeline` in the order they appear in the config.
-
-```bash
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_quantize.yaml
-```
+`quantize.py` executes enabled `pipeline` stages in config order. The
+[LLaMA](#llama-benchmark-flow) and [Gemma4](#gemma4-e2b-flow) quickstarts show
+complete quantize/evaluate/export flows. To select a different checkpoint of an
+existing model family, use `--model`:
 
 ```bash
 python -m tico.quantization.examples.quantize \
@@ -194,24 +169,18 @@ python -m tico.quantization.examples.quantize \
   --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
-Examples:
+Run a smaller calibration smoke without exporting artifacts:
 
 ```bash
-# Run the default LLaMA benchmark quantization and save a checkpoint.
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_quantize.yaml
-```
-
-```bash
-# Run a smaller calibration smoke without exporting artifacts.
 python -m tico.quantization.examples.quantize \
   --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set calibration.n_samples=1 \
   --set export.enabled=false
 ```
 
+Write the checkpoint to another output directory:
+
 ```bash
-# Run quantization and write the checkpoint to another output directory.
 python -m tico.quantization.examples.quantize \
   --config tico/quantization/examples/configs/llama_quantize.yaml \
   --output-dir ./out/llama
@@ -309,13 +278,9 @@ YAML file. The option does not replace benchmark details such as LM-Eval task
 names, VQA datasets, MMMU subjects, or sample limits. Configure those details
 in YAML or with `--set`.
 
-Canonical targets are model-family specific:
-
-| Model family | Supported `--tasks` values |
-|---|---|
-| LLaMA | `lm_eval`, `ppl` |
-| Qwen3-VL | `vqa`, `coco`, `llava_bench`, `videomme`, `mmlu`, `hellaswag`, `mmmu`, `ppl` |
-| Gemma4 | `vqa`, `coco`, `llava_bench`, `videomme`, `mmlu`, `hellaswag`, `mmmu`, `ppl`, `cached_nll` |
+Target names are canonical and model-family specific. See
+[Selecting top-level evaluation targets](configs/README.md#selecting-top-level-evaluation-targets)
+for the supported names, required benchmark details, and validation rules.
 
 Run only the configured LM-Eval suite:
 
@@ -353,10 +318,6 @@ python -m tico.quantization.examples.evaluate \
   --set 'evaluation.vlm_tasks=[textvqa]'
 ```
 
-Target names are canonical and have no aliases. For example,
-`--tasks lm_eval_tasks`, `--tasks vlm_tasks`, and `--tasks perplexity` are
-invalid. Use `lm_eval`, `vqa`, and `ppl`, respectively.
-
 ### Export
 
 `export.py` exports configured artifacts from a floating-point model or an
@@ -384,22 +345,11 @@ python -m tico.quantization.examples.export \
 ```
 
 Supported explicit embedding export is opt-in for Llama, Qwen3-VL and Gemma4.
-Add `--preserve-embedding-quantization` to the export command, or set the recipe
-YAML field:
-
-```yaml
-export:
-  preserve_embedding_quantization: true
-```
-
-Both default to `False`. Omission and explicit `False` retain the existing
-embedding export policy. The exporter forwards
-`CompileConfigV1(preserve_embedding_quantization=True)` to the production Circle
-conversion path. This selects supported embedding Q/DQ preservation; it does not
-change calibration, activation dtype or runtime execution mode. Explicit embedding
-examples and benchmarks that run compilation must opt in. See
+Add `--preserve-embedding-quantization` to the export command to enable it; the
+flag defaults to false. See the [export configuration](configs/README.md#export)
+for the equivalent YAML setting and
 [CPU embedding contracts](../../../docs/cpu_token_embedding.md) for supported
-paths and limitations.
+paths, compilation behavior, and limitations.
 
 Qwen3-VL uses the same generic `circle_per_layer` artifact key. The exporter
 keeps the fixed-grid vision model as one prefill stage and emits each text
@@ -411,28 +361,10 @@ python -m tico.quantization.examples.export \
   --checkpoint ./out/qwen3_vl_quantized/quantized_model.pt
 ```
 
-The fixed values under `model_args.vision` must match the values used when the
-checkpoint was wrapped and quantized. A default prefill/decode export writes:
-
-```text
-vision_prefill_t<T>_h<H>_w<W>.q.circle
-token_embedding.q.circle
-multimodal_embedding_prefill_t<T>_h<H>_w<W>.q.circle
-decoder_layer_prefill_<index>.q.circle
-deepstack_fusion_<index>_t<T>_h<H>_w<W>.q.circle
-decoder_layer_decode_<index>.q.circle
-lm_head.q.circle
-```
-
-`<T>`, `<H>`, and `<W>` are the configured vision grid dimensions. Graphs that
-depend on this grid carry the profile suffix; text-only stages keep shared
-names. See the [artifact naming contract](../recipes/export/README.md#artifact-naming).
-
-`token_embedding` has a dynamic sequence dimension and is shared by prefill
-and decode. The runtime owns mRoPE lookup, additive attention-mask
-construction, and KV cache storage/update. It passes those tensors to the
-exported decoder-layer graphs. Exporting with `--source model` writes the
-same artifact set with the `.f32.circle` suffix.
+The fixed values under `model_args.vision` must match those used when the
+checkpoint was wrapped and quantized. See the
+[artifact naming contract](../recipes/export/README.md#artifact-naming) for the
+Qwen3-VL filenames, vision profiles, and host/runtime input responsibilities.
 
 `llama_export.yaml` exports both prefill and decode layer artifacts by default.
 Use an override only when decode layer export is not needed:
@@ -642,16 +574,13 @@ regression checks, not for leaderboard-compatible LLaVA-Bench reporting.
 
 ### Inspect / debug
 
-See the [debug developer guide](../recipes/debug/README.md) for trace internals,
-CPU validation, and adding inspect modes. For `compare_side_by_side.py`, use the
-[multi-batch comparison guide](../recipes/debug/README.md#multi-batch-side-by-side-comparison).
+Use `inspector.py` for PTQ trace comparisons, static runtime checks, and synthetic
+wrapper checks. The [debug developer guide](../recipes/debug/README.md) owns trace
+internals, CPU validation, and new inspect modes. For `compare_side_by_side.py`,
+use the [multi-batch comparison guide](../recipes/debug/README.md#multi-batch-side-by-side-comparison).
 
-```bash
-python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
-  --mode trace \
-  --interesting-modules model.language_model model.visual
-```
+Run a static LLaMA runtime check or a tied-embedding smoke check with the matching
+preset:
 
 ```bash
 python -m tico.quantization.examples.inspector \
@@ -667,116 +596,33 @@ python -m tico.quantization.examples.inspector \
 
 #### Trace mode
 
-Trace mode compares a floating-point model with a PTQ-prepared copy of the same
-model. It is useful for finding the first module where PTQ wrapping,
-calibration, or fake quantization changes the model output.
-
-Basic Qwen3-VL trace:
-
-```bash
-python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
-  --mode trace
-```
-
-Trace only selected module subtrees:
-
-```bash
-python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
-  --mode trace \
-  --interesting-modules model.language_model model.visual
-```
-
-By default, trace mode does **not** call `convert()` on the PTQ-prepared model.
-This checks FP-vs-PTQ wrapper parity and should normally show very small
-differences. To inspect the numerical error introduced by fake quantization,
-enable conversion explicitly:
+Trace compares an FP model with a PTQ-prepared copy. By default it checks wrapper
+parity without conversion; add `--enable-quantization` to inspect fake-quantization
+error. Start with one calibration sample and selected module subtrees:
 
 ```bash
 python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace \
   --enable-quantization \
-  --interesting-modules model.language_model model.visual
+  --interesting-modules model.language_model model.visual \
+  --set calibration.n_samples=1
 ```
 
-Output sections:
-
-```text
-=== FP trace ===
-[module.name] Tensor(shape=..., dtype=..., mean=..., min=..., max=..., std=...)
-
-=== PTQ trace ===
-[module.name] Tensor(shape=..., dtype=..., mean=..., min=..., max=..., std=...)
-
-=== Side-by-side diff ===
-module.name: mean|diff|=..., max|diff|=...
-```
-
-`--interesting-modules` accepts module names or parent module prefixes. When it
-is omitted, trace mode records all named modules. Use a small calibration sample
-count before tracing large Qwen3-VL models.
+See [Existing trace mode](../recipes/debug/README.md#existing-trace-mode) for the
+PTQ-only preparation flow, module-prefix matching, and output interpretation.
 
 #### Wrapper smoke mode
 
-Wrapper smoke mode runs module-level sanity checks for quantization wrappers.
-It is useful when you want to quickly validate `prepare -> calibrate -> convert`,
-numerical parity, plotting, and optional Circle export for a single wrapped
-module.
-
-The [wrapper smoke reference](../recipes/debug/wrapper_smoke/README.md) describes
-the available cases, size profiles, and output artifacts.
-
-Static Llama, Qwen3-VL text, and Gemma4 decoder cases assemble the export adapter
-and its invocation together. Calibration, eager comparison, and export use explicit
-host-owned additive causal masks and `(cos, sin)` RoPE tensors; cache-aware paths
-also supply fixed-capacity past KV (or full shared KV for Gemma4 consumers). The
-runner binds and validates these tensor shapes before Circle tracing, without an
-extra model forward. These host inputs remain part of the exported graph ABI.
-
-List available wrapper smoke cases:
+Wrapper smoke validates `prepare -> calibrate -> convert`, numerical parity,
+and optional Circle export for synthetic modules. List the currently registered
+cases, then select a case:
 
 ```bash
 python -m tico.quantization.examples.inspector \
   --mode wrapper-smoke \
   --list-cases
 ```
-
-Example output:
-
-```text
-Available wrapper smoke cases:
-
-  nn_linear
-  nn_conv3d
-  nn_conv3d_special_case
-  nn_layernorm
-  nn_tied_embedding
-
-  llama_attention_prefill
-  llama_attention_decode
-  llama_mlp
-  llama_decoder_layer_prefill
-  llama_decoder_layer_decode
-
-  qwen3_vl_text_attention
-  qwen3_vl_text_mlp
-  qwen3_vl_text_decoder_layer
-  qwen3_vl_text_model
-  qwen3_vl_vision_attention
-```
-
-Run one case:
-
-```bash
-python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
-  --mode wrapper-smoke \
-  --case llama_attention_prefill
-```
-
-Run one case with Circle export:
 
 ```bash
 python -m tico.quantization.examples.inspector \
@@ -787,6 +633,11 @@ python -m tico.quantization.examples.inspector \
   --output-dir ./out/wrapper_smoke \
   --strict
 ```
+
+The [wrapper smoke reference](../recipes/debug/wrapper_smoke/README.md) owns case
+profiles, static decoder input contracts, plotting controls, and output/failure
+formats. Omit `--export circle` for a numerical check without export.
+
 ## CLI overrides
 
 The config-driven example CLIs accept `--set KEY=VALUE` for simple dotted
@@ -868,61 +719,9 @@ Convenience aliases are also available:
 
 ## GPTQ SMSE sensitivity
 
-When GPTQ uses sensitivity-aware MSE, set `pipeline.<index>.mse=smse` and
-configure sensitivity behavior with a nested `sensitivity` mapping under the
-GPTQ stage.
-
-Schema:
-
-```yaml
-pipeline:
-  - name: gptq
-    enabled: true
-    mse: smse
-    sensitivity:
-      mode: compute
-      path: null
-```
-
-Supported modes:
-
-| Mode | Behavior |
-|---|---|
-| `compute` | Compute sensitivity for the current run only. `path` must be `null`. |
-| `save` | Compute sensitivity, use it for this run, and save it to `path`. |
-| `load` | Load sensitivity from `path` and use it for this run. |
-| `cache` | Load from `path` if it exists; otherwise compute and save it. |
-
-Compute sensitivity without saving it:
-
-```bash
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_quantize.yaml \
-  --set pipeline.2.mse=smse \
-  --set pipeline.2.sensitivity.mode=compute
-```
-
-Compute and save sensitivity:
-
-```bash
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_quantize.yaml \
-  --set pipeline.2.mse=smse \
-  --set pipeline.2.sensitivity.mode=save \
-  --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
-```
-
-Load a saved sensitivity file:
-
-```bash
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_quantize.yaml \
-  --set pipeline.2.mse=smse \
-  --set pipeline.2.sensitivity.mode=load \
-  --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
-```
-
-Use a cache file when available, otherwise compute and save it:
+The [GPTQ sensitivity configuration](configs/README.md#gptq-smse-sensitivity)
+defines the schema and the `compute`, `save`, `load`, and `cache` modes. To reuse
+a cache when it exists and compute/save it otherwise:
 
 ```bash
 python -m tico.quantization.examples.quantize \
@@ -932,117 +731,35 @@ python -m tico.quantization.examples.quantize \
   --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
 ```
 
-For `qwen3_vl_quantize.yaml`, the GPTQ stage is also `pipeline.2`, so the same
-override pattern applies.
+The GPTQ stage is `pipeline.2` in both `llama_quantize.yaml` and
+`qwen3_vl_quantize.yaml`.
 
 ## Developer rule: do not add one script per model or algorithm
 
-Most new examples should be config files, not Python files.
-
-Add a config when:
-
-- the model family already has an adapter
-- the algorithm already has a stage
-- the workflow is a new combination of existing stages
-- the change is only calibration size, dtype, qscheme, evaluation, or export
-
-Examples:
-
-```text
-configs/llama_quantize.yaml
-configs/llama_eval_suite.yaml
-configs/llama_export.yaml
-configs/qwen3_vl_quantize.yaml
-configs/qwen3_vl_eval_suite.yaml
-configs/qwen3_vl_eval_suite_mx_override_polices.yaml
-configs/qwen3_vl_export.yaml
-```
-
-Do not add scripts like:
-
-```text
-quantize_llama_with_gptq.py
-quantize_qwen3_vl_with_gptq.py
-quantize_qwen3_vl_ptq_only.py
-quantize_vision_attention_debug.py
-```
-
-Use:
-
-```bash
-python -m tico.quantization.examples.quantize --config configs/<preset>.yaml
-python -m tico.quantization.examples.inspector --config configs/<preset>.yaml --mode <mode>
-```
+Add a YAML preset for a new combination of existing model, stage, calibration,
+evaluation, or export behavior. The recipe guide owns
+[preset-versus-entrypoint decisions](../recipes/README.md#choosing-a-preset-or-entrypoint)
+and the configuration reference owns [preset naming](configs/README.md#file-naming).
 
 ## When a new Python example is allowed
 
-A new file under `examples/` should be rare. It is acceptable only when it
-introduces a genuinely new user-facing top-level action that does not fit any of
-these commands:
-
-```text
-quantize.py
-evaluate.py
-export.py
-generate.py
-inspector.py
-```
-
-Before adding a new example script, check whether the feature should instead be:
-
-| Feature | Preferred location |
-|---|---|
-| New model family | `recipes/adapters/` |
-| New algorithm implementation | `quantization/algorithm/` with configuration under `quantization/config/` |
-| Recipe integration of an algorithm | `recipes/stages/` |
-| New config combination | `examples/configs/` |
-| New benchmark | `recipes/evaluation/` |
-| New export artifact | `recipes/export/` |
-| New debug trace/parity tool | `recipes/debug/` + `inspector.py` mode |
+A new script requires a new top-level user action. Check the
+[recipe responsibility map](../recipes/README.md#responsibility-boundaries) before
+choosing an implementation location; keep public entrypoints thin.
 
 ## Adding a new model-family example
 
-For a new family such as `gemma`, do this:
-
-1. Add `recipes/adapters/gemma.py`.
-2. Register it in `recipes/adapters/__init__.py`.
-3. Add `configs/gemma_ptq_only.yaml`.
-4. Optionally add `configs/gemma_gptq_ptq.yaml`.
-5. Add a smoke test.
-6. Document any model-specific config fields in `configs/README.md`.
-
-Then run:
-
-```bash
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/gemma_ptq_only.yaml
-```
-
-No new example script is needed.
+Follow the [adapter tutorial](../recipes/adapters/README.md#step-by-step-adding-a-new-model-family)
+for implementation, registration, presets, and tests. Document model-specific YAML
+fields in the [configuration reference](configs/README.md) and run the new preset
+through the existing commands above.
 
 ## Adding a new algorithm example
 
-For a new algorithm such as `awq`, do this:
-
-1. Implement and register the quantizer and its configuration following the
-   [quantization contribution guide](../README.md#contributing-adding-a-new-algorithm).
-2. Add the recipe orchestration in `recipes/stages/awq.py` and register it in
-   `recipes/stages/__init__.py`. The stage calls the algorithm implementation
-   and delegates model-family behavior to the adapter.
-3. Add the stage to an existing or new config preset:
-
-   ```yaml
-   pipeline:
-     - name: awq
-       enabled: true
-       weight_bits: 4
-     - name: ptq
-       enabled: true
-   ```
-
-4. Add a smoke test.
-
-No new example script is needed.
+Follow the [quantization contribution guide](../README.md#contributing-adding-a-new-algorithm)
+for the quantizer and its configuration, then the
+[stage tutorial](../recipes/stages/README.md#step-by-step-adding-a-new-algorithm-stage)
+for recipe orchestration, registration, YAML usage, and tests.
 
 ## Minimum smoke commands
 

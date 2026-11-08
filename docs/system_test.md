@@ -2,7 +2,9 @@
 
 This document describes how the current TICO repository validates conversion,
 serialization, runtime parity, quantization, Circle artifact transformations, package
-compatibility, and benchmark targets.
+compatibility, and benchmark targets. It owns test layers, harness behavior,
+correctness criteria, and validation traceability. Use the
+[Development Guide](development.md) for environment setup, commands, and CI details.
 
 It intentionally does not contain a copied test log or a fixed test count. The latest
 GitHub Actions run is the source of truth for current results.
@@ -266,102 +268,55 @@ shape.
 
 ## 6. Running tests
 
-All commands below run from the repository root.
+Choose coverage according to the [change-specific checklist](#13-adding-or-changing-tests).
+The Development Guide maintains executable commands and their options; the links below
+connect each validation task to that reference.
 
 ### Set up the environment
 
-```bash
-./ccex install
-./ccex configure test
-```
-
-`configure test` expects Torch and TICO to be installed already. It installs the matching
-TorchVision package and `test/requirements.txt`, then validates the package environment.
-`test/requirements_pre.txt` is kept for pre-release test dependencies and is currently
-empty; the optional `onert` runtime is installed manually (see the development guide).
+Follow [Create a development environment](development.md#create-a-development-environment)
+for installation order and test dependencies, and
+[Torch selection](development.md#torch-selection) for version choices.
 
 ### Default test suite
 
-```bash
-./ccex test
-# Equivalent explicit selection:
-./ccex test --all
-```
+Use the [default suite](development.md#default-suite) for model-independent discovery.
 
 ### Run a keyword-filtered subset
 
-```bash
-./ccex test -k add
-./ccex test -k passes
-./ccex test -k test_quantizer_registry
-```
-
-Special shorthands:
-
-```bash
-./ccex test -k op
-./ccex test -k net
-```
-
-These are expanded to generated module-test namespaces under `test.modules.op` and
-`test.modules.net`.
+Use [keyword filtering](development.md#keyword-filtering) for a focused subsystem or
+generated operator/network test namespace.
 
 ### Include internal-only tests
 
-```bash
-./ccex test -i
-```
-
-This sets `RUN_INTERNAL_TESTS=1` for the discovery run.
+See [Other test-runner options](development.md#other-test-runner-options) for explicit
+internal-test selection.
 
 ### Enable verbose TICO diagnostics
 
-```bash
-./ccex test -v -k add
-# Equivalent explicit environment setting:
-TICO_LOG=4 ./ccex test -k add
-```
+See [Log levels](development.md#log-levels) for debug logging and
+[Intermediate graph images](development.md#intermediate-graph-images) for pass snapshots.
 
 ### Select a runtime
 
-```bash
-./ccex test -r reference -k add            # default
-./ccex test -r circle-interpreter -k add   # optional ONE luci-interpreter
-./ccex test -r onert -k add                # optional onert package
-CCEX_RUNTIME=onert ./ccex test -k add
-```
+See [Runtime selection](development.md#runtime-selection) for the default reference
+runtime and explicit external-runtime installation and selection.
 
 ### Run a model test
 
-```bash
-pip install -r test/modules/model/<model_name>/requirements.txt
-./ccex test -m <model_name>
-./ccex test -m "Llama*"
-```
-
-The shell wildcard should be quoted.
+See [Model tests](development.md#model-tests) for per-model dependencies and quoted
+selection patterns.
 
 ### Run performance tests
 
-Run the configured conversion-time and serialized-size threshold benchmark:
-
-```bash
-./ccex test -p
-```
-
-Compare Circle O1 schedulers with a caller-provided full artifact:
-
-```bash
-python3 -m test.performance.benchmark_circle_optimizer \
-  model.circle \
-  --repeat 3
-```
+Use the commands in [Performance benchmarks](development.md#performance-benchmarks).
+The [performance criteria below](#9-performance-testing) explain what each benchmark
+measures and which results are thresholds.
 
 ### Option-combination constraints
 
-- `--all` and `--keyword` cannot be used together.
-- `--model` cannot be combined with `--keyword` or `--all`.
-- `--perf` selects the performance entry point rather than normal discovery.
+See [Other test-runner options](development.md#other-test-runner-options) for mutually
+exclusive selectors and the separate performance entry point.
 
 ## 7. Runtime selection and dynamic shapes
 
@@ -383,9 +338,9 @@ environment contains neither ONE nor `onert`.
 
 `circle-interpreter` (ONE luci-interpreter via CFFI) and `onert` remain available as
 explicitly selected compatibility runtimes. They are not installed by
-`./ccex configure test`; see the development guide for the manual installation
-commands. Comparing against them is additional validation, not a replacement for the
-default suite.
+`./ccex configure test`; the Development Guide owns their
+[installation and selection commands](development.md#runtime-selection). Comparing
+against them is additional validation, not a replacement for the default suite.
 
 ### Dynamic input rules
 
@@ -480,22 +435,12 @@ Both performance workflows are opt-in and are not in the current PR test matrix.
 ## 10. Circle artifact testing
 
 Tests under `test/unit_test/circle/` validate the post-serialization `tico.circle`
-layer. Depending on the change, coverage should include:
-
-- malformed-container and out-of-range index diagnostics
-- producer/consumer and undefined-input detection
-- duplicate and unused-resource warnings
-- signature and control-flow subgraph references
-- extraction boundary reconstruction
-- preservation or removal of constants
-- retained-subgraph/global-buffer compaction
-- dead-code elimination
-- tensor, buffer, operator, and opcode index remapping
-- verification before/after Circle passes
-- semantic pass taxonomy and canonical CLI-name coverage
-- atomic rewrite rollback and optimization-session cache invalidation
-- local worklist convergence and non-empty O1 idempotence
-- byte-equivalent `RESTART` and `UNTIL_NO_CHANGE` scheduler results
+layer. Assert structural validity, preservation of interfaces and observable behavior,
+and safe mutation of shared or indexed resources. Rewrite tests also need convergence,
+rollback, and scheduler-equivalence coverage when those mechanisms are affected.
+The [Circle testing checklist](../tico/circle/README.md#testing) maintains the detailed
+artifact-specific cases, including verification, extraction, pass registration, and
+reference-runtime oracles.
 
 Circle artifact tests should use in-memory synthetic Circle documents or the smallest
 possible fixture. Do not use OCR, graph screenshots, or external visualization as the
@@ -503,68 +448,52 @@ source of structural assertions.
 
 ## 11. Continuous integration
 
-PyTorch version selection is generated from
-`tico/utils/compat/torch_version_policy.py`; workflow YAML does not maintain a separate
-hard-coded family list.
+CI applies the same validation layers to different risk and release boundaries. The
+[Development Guide](development.md#pull-request-ci) owns job setup, commands, and the
+current matrix; the [PyTorch Version Policy](torch_version_policy.md#ci-tiers) owns
+qualification tiers and release gates.
 
 ### Pull-request workflow
 
-The pull-request workflow targets `main` and `rel/*`.
+The pull-request workflow combines contribution checks, package validation, and
+version compatibility checks before changes merge.
 
 #### Commit-message check
 
-For non-draft pull requests, at least one commit body must contain:
-
-```text
-TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>
-```
+The contribution gate checks the required DCO trailer. Its exact syntax and activation
+rule are in [Pull-request CI](development.md#pull-request-ci).
 
 #### Formatting and static analysis
 
-- `check-format` runs on Ubuntu 24.04 with Python 3.12. It configures the formatting
-  tools and runs lintrunner with `--take UFMT`, without installing PyTorch or waiting
-  for the package build.
-- `check-static` reuses the built wheel and the default Torch test environment. It
-  configures analysis tools, checks dependency consistency, and runs lintrunner with
-  `--take PYLINT,MYPY`.
-- `check-style` preserves the required **Check style** status by succeeding only when
-  both jobs succeed.
-
-These checks do not apply patches. See the
-[development guide](development.md#pull-request-ci) for the CI environment details.
+Formatting and static analysis validate source consistency separately from numerical
+tests. See [Formatting and static checks](development.md#formatting-and-static-checks)
+for local reproduction and [Pull-request CI](development.md#pull-request-ci) for job
+setup and the combined required status.
 
 #### Build package once
 
-The workflow builds one TICO wheel and uploads one short-lived artifact. All versioned
-test jobs download and reuse that wheel instead of rebuilding it for each Torch family.
+Versioned checks exercise the same built package. See
+[Build and install a wheel](development.md#build-and-install-a-wheel) for local package
+validation and [Pull-request CI](development.md#pull-request-ci) for artifact reuse.
 
 #### Versioned tests
 
-- The complete suite runs on the default qualified family, currently 2.13.
-- Blocking export and quantization smoke tests run on the oldest supported family,
-  currently 2.11.
-- The same smoke tests run non-blockingly on the qualification candidate, currently
-  2.14.
-
-The smoke path includes a small `torch.export`/PT2/Circle conversion and a quantized CNN
-Circle export. It is intended to detect version-contract breakage without multiplying
-the complete suite across every pull request.
+The complete default-family suite checks broad regressions; focused export and
+quantization smoke tests detect version-contract breakage on other selected families.
+The [CI matrix and smoke scope](development.md#pull-request-ci) distinguish blocking
+support checks from candidate signals.
 
 ### Scheduled compatibility workflow
 
-A separate workflow provides broader early warning without participating in PR branch
-protection:
-
-- daily: `nightly-latest` export and quantization smoke
-- weekly: complete suite on all qualified stable families, qualification candidates,
-  and `nightly-latest`
-- manual dispatch: complete matrix on demand
+Broader compatibility runs provide early warning across supported, candidate, and
+nightly families. See the [CI schedule](development.md#pull-request-ci) for cadence,
+manual dispatch, and its relationship to PR branch protection.
 
 ### Official release workflow
 
-Official package publication builds the wheel once and runs the complete suite on every
-qualified stable family before publishing. Candidate and nightly selectors are not
-part of the release-support gate.
+Publication is gated by complete-suite validation across the qualified stable support
+window. See the [release CI details](development.md#pull-request-ci) and
+[release-branch policy](torch_version_policy.md#release-branches).
 
 ## 12. Test-result reporting policy
 

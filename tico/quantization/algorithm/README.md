@@ -30,75 +30,31 @@ Both select the `universal` GPTQ stage variant; the configuration source documen
 
 ## Design Philosophy
 
-Algorithm implementations have defined responsibilities within TICO's quantization
-stack. They integrate with configuration classes, the quantizer registry, the public
-`prepare`/`convert` API, and shared WrapQ infrastructure while keeping recipe
-orchestration outside the algorithm implementation.
-
-### 1. External Dependencies
-
-Some algorithms or model-family integrations require optional libraries such as
-`transformers`. Keep those dependencies local to the paths that need them and document
-their installation requirements.
-
-### 2. Modular and Maintainable Code
-
-Each algorithm owns its numerical implementation and quantizer lifecycle. Shared
-wrapper infrastructure belongs in `wrapq/`, configuration belongs in `config/`, and
-pipeline orchestration belongs in `recipes/stages/`. These boundaries support focused
-testing and maintenance without duplicating shared behavior.
+Each algorithm guide owns its numerical method, supported inputs, configuration,
+and limitations. The [quantization overview](../README.md#directory-structure)
+describes the shared API and implementation layers; the
+[recipe responsibility map](../recipes/README.md#responsibility-boundaries)
+defines where pipeline integration belongs.
 
 ## Usage Guidelines
 
-### Integration Boundaries
-
-Use the public `prepare`/`convert` API and algorithm-specific configurations for model
-quantization. Framework code may import algorithm implementations and utilities through
-their owning modules: the quantizer registry resolves implementations, and recipe
-stages orchestrate their use. Algorithms should not depend on example entrypoints or
-recipe orchestration, which would introduce circular dependencies.
-
-### Dependency Isolation
-
-Install the dependencies required by the selected algorithm or model family. Avoid
-making optional algorithm dependencies mandatory for unrelated project components.
+Install the dependencies required by the selected algorithm or model family; for
+example, SmoothQuant lists them in [`smooth_quant.txt`](./smoothquant/smooth_quant.txt).
+Keep optional dependencies local to the paths that need them. Algorithms may use
+shared quantization infrastructure but must not import recipe orchestration or
+example entrypoints; see the [import rules](../recipes/README.md#import-rules).
 
 ## Example Use Case
 
-Algorithms are used through the public `prepare`/`convert` interface with their
-algorithm-specific config:
-
-```python
-from tico.quantization import prepare, convert
-from tico.quantization.config.gptq import GPTQConfig
-
-model = model.eval()
-
-# 1. Prepare for quantization
-quant_config = GPTQConfig()
-prepared_model = prepare(model, quant_config)
-
-# 2. Calibration
-for d in dataset:
-    prepared_model(d)
-
-# 3. Convert
-quantized_model = convert(prepared_model)
-```
-
-Some algorithms need extra dependencies; install them from the algorithm's requirements
-file first (e.g., `pip install -r smoothquant/smooth_quant.txt`). See each algorithm's
-README for its configuration class and usage details. Any output or data exchange
-between _algorithm_ and other modules should be done via well-defined interfaces.
+Start with the [public Python quickstart](../README.md#basic-usage), then follow
+the selected algorithm's guide above for its configuration and calibration
+requirements. For composed CLI workflows, use the
+[recipe examples](../examples/README.md).
 
 ## Contributing to the Module
 
-- Implement new algorithms in this package and expose their configurations through
-  the quantizer registry and public API.
-- Reuse shared infrastructure through defined interfaces and avoid circular imports.
-- Document any external dependencies clearly in the module's README or requirements
-  file.
-
-See also the top-level [quantization contribution guide](../README.md#contributing-adding-a-new-algorithm)
-and the [recipes developer guide](../recipes/README.md) for exposing an algorithm as a
-CLI pipeline stage.
+Follow the [quantization contribution guide](../README.md#contributing-adding-a-new-algorithm)
+for configuration classes, quantizer registration, and tests. Document the new
+method and its optional dependencies in its algorithm guide, and add it to this
+catalog. To expose it as a CLI stage, follow the
+[recipes developer guide](../recipes/README.md).

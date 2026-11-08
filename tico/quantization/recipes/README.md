@@ -8,7 +8,8 @@ many combinations of model families, quantization algorithms, calibration data,
 evaluation tasks, and export targets.
 
 For the public Python API, start with the [quantization overview](../README.md).
-For runnable commands and YAML settings, use the
+This guide owns extension routing and shared recipe development rules. For
+runnable commands and YAML settings, use the
 [CLI examples](../examples/README.md) and
 [configuration reference](../examples/configs/README.md).
 
@@ -123,18 +124,32 @@ for prompt and numeric-input examples.
 
 ## Responsibility boundaries
 
-| Need | Add or modify |
-|---|---|
-| New model family, tokenizer, processor, calibration input shape, model-specific PTQ config | `recipes/adapters/<family>.py` |
-| New quantization algorithm or preprocessing implementation | `algorithm/<algorithm>/`, with configuration under `config/` |
-| Integrating an algorithm or preprocessing step into a recipe pipeline | `recipes/stages/<algorithm>.py` |
-| New calibration dataset or synthetic data generator | `recipes/data/*.py` |
-| New benchmark or metric | `recipes/evaluation/*.py` |
-| New checkpoint, Circle, or artifact output | `recipes/export/*.py` |
-| Generation and cache composition from saved model-family artifacts | `recipes/runtime/<family>.py` |
-| New tensor trace, parity, or inspection mode | `recipes/debug/*.py` and `examples/inspector.py` |
-| New common command-line workflow | Usually a config file under `examples/configs/` |
-| New public top-level user action not covered by quantize/evaluate/inspector | A new script under `examples/`, only after design review |
+| Need | Add or modify | Implementation guide |
+|---|---|---|
+| New model family, tokenizer, processor, calibration input shape, model-specific PTQ config | `recipes/adapters/<family>.py` | [Model adapters](adapters/README.md) |
+| New quantization algorithm or preprocessing implementation | `algorithm/<algorithm>/`, with configuration under `config/` | [Quantization contribution guide](../README.md#contributing-adding-a-new-algorithm) |
+| Integrating an algorithm or preprocessing step into a recipe pipeline | `recipes/stages/<algorithm>.py` | [Pipeline stages](stages/README.md) |
+| New calibration dataset or synthetic data generator | `recipes/data/*.py` | [Data builders](data/README.md) |
+| New benchmark or metric | `recipes/evaluation/*.py` | [Evaluation helpers](evaluation/README.md) |
+| New checkpoint, Circle, or artifact output | `recipes/export/*.py` | [Export helpers](export/README.md) |
+| Generation and cache composition from saved model-family artifacts | `recipes/runtime/<family>.py` | [Saved LLaMA bundle contract](export/README.md#llama-circle-bundles) |
+| New tensor trace, parity, or inspection mode | `recipes/debug/*.py` and `examples/inspector.py` | [Debug and inspection](debug/README.md) |
+| New common command-line workflow | Usually a config file under `examples/configs/` | [Configuration reference](../examples/configs/README.md) |
+| New public top-level user action not covered by an existing command | A new script under `examples/`, only after design review | [Command selection](../examples/README.md#which-command-should-i-use) |
+
+### Choosing a preset or entrypoint
+
+Add a YAML preset when the model family already has an adapter and the algorithm
+already has a stage. This includes new combinations of existing stages and changes
+to calibration size, dtype, qscheme, evaluation, or export. Run the preset through
+the existing `quantize`, `evaluate`, `export`, or `inspector` command; document new
+config fields in the [configuration reference](../examples/configs/README.md).
+
+Avoid model/algorithm-specific scripts such as `quantize_llama_with_gptq.py`,
+`quantize_qwen3_vl_ptq_only.py`, or `quantize_vision_attention_debug.py`. Extend the
+owner in the table above first. A new Python entrypoint is appropriate only for a
+new user-facing top-level action that does not fit `quantize.py`, `evaluate.py`,
+`export.py`, `generate.py`, or `inspector.py`.
 
 ## Core abstractions
 
@@ -149,40 +164,15 @@ but they should not silently change unrelated config fields.
 
 ### `ModelAdapter`
 
-A model adapter owns model-family-specific behavior:
-
-```python
-class ModelAdapter(ABC):
-    family: str
-    evaluation_targets: frozenset[str]
-    evaluation_target_requirements: Mapping[str, str]
-
-    def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None: ...
-    def get_gptq_config_class(self) -> type[BaseConfig] | None: ...  # optional hook
-    def load_model(self, ctx: RecipeContext) -> RecipeContext: ...
-    def build_calibration_inputs(self, ctx: RecipeContext) -> list[Any]: ...
-    def forward_calibration(self, ctx, model, calibration_inputs, *, desc: str) -> None: ...
-    def calibrate_prepared_model(self, ctx, prepared_model, stage_cfg) -> None: ...
-    def build_ptq_config(self, ctx, stage_cfg): ...
-    def evaluate(self, ctx: RecipeContext) -> None: ...
-    def export(self, ctx: RecipeContext) -> None: ...
-```
-
-Adapters should be deterministic with respect to `runtime.seed` when possible.
-
-Adapters may also select the GPTQ config class for the default `gptq` variant
-through the optional `get_gptq_config_class()` hook; the stage resolves it with
-`resolve_gptq_config_class()` from `recipes/adapters/__init__.py` and falls
-back to the registered family adapter, then the generic `GPTQConfig`. See
-"GPTQ config class selection" in
-[`adapters/README.md`](adapters/README.md).
-
-Adapters also declare canonical top-level evaluation target names. When
-`evaluation.selected_tasks` is present, the common adapter validation treats it
-as an exclusive allow-list and rejects unsupported names before model loading.
-Benchmark details remain under their existing config keys, such as
-`evaluation.lm_eval_tasks`, `evaluation.vlm_tasks`, or
-`evaluation.mmmu.subjects`.
+A model adapter owns loading, calibration inputs and invocation, model-family
+PTQ configuration, evaluation, and export. Adapters should be deterministic with
+respect to `runtime.seed` when possible. The
+[adapter contract](adapters/README.md#adapter-contract) defines the methods;
+[GPTQ config class selection](adapters/README.md#gptq-config-class-selection) and
+the [evaluation target registry](adapters/README.md#evaluation-target-registry)
+define the optional GPTQ hook and evaluation declarations. User-facing target
+selection is documented in the
+[configuration reference](../examples/configs/README.md#selecting-top-level-evaluation-targets).
 
 #### Adapter registry and out-of-tree adapters
 
@@ -217,22 +207,17 @@ with a top-level `extensions` list of `package.module[:callable]` entries,
 which `load_recipe_extensions(cfg)` imports and invokes before adapter
 resolution in `quantize`, `evaluate`, `export`, and `inspector`. Loading runs
 trusted Python code from the environment; missing modules or callables raise
-instead of being skipped. See
-[`examples/configs/README.md`](../examples/configs/README.md) for the config
+instead of being skipped. See the
+[extension schema](../examples/configs/README.md#extensions-optional) for the config
 schema. Python callers can equivalently call the extension's activation
 function themselves before using the recipe APIs.
 
 ### `Stage`
 
-A stage orchestrates an algorithm or preprocessing step within the recipe pipeline:
-
-```python
-class Stage(ABC):
-    name: str
-
-    def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
-        ...
-```
+A stage orchestrates an algorithm or preprocessing step within the recipe pipeline.
+It receives the current `RecipeContext` and its own config block and returns the
+updated context. See the [stage contract](stages/README.md#stage-contract) for the
+interface and lifecycle example.
 
 Stages should be as model-agnostic as practical. If a stage needs a
 model-family-specific operation, delegate it to the adapter rather than adding
@@ -275,27 +260,8 @@ config file: qwen3_vl_quantize.yaml
 inspect mode: layer_parity
 ```
 
-Config presets should follow this pattern:
-
-```text
-<family>_<workflow>[_purpose].yaml
-```
-
-Examples:
-
-```text
-llama_quantize.yaml
-llama_eval_suite.yaml
-llama_export.yaml
-qwen3_vl_quantize.yaml
-qwen3_vl_eval_suite.yaml
-qwen3_vl_eval_suite_mx_override_polices.yaml
-qwen3_vl_export.yaml
-qwen3_vl_synthetic_smoke.yaml
-gemma4_quantize.yaml
-gemma4_eval_suite.yaml
-gemma4_export.yaml
-```
+Follow the [config file naming convention](../examples/configs/README.md#file-naming)
+for preset names and examples.
 
 ## Runtime and artifact conventions
 

@@ -58,6 +58,34 @@ guides for implementation contracts and development commands.
 
 ## Source-of-truth policy
 
+### Documentation ownership
+
+Maintain each detailed contract in its owning guide below. Entry guides may keep
+a short explanation or runnable example, then link to that guide for options,
+constraints, and maintenance rules. When consolidating overlapping text, preserve
+any unique conditions or examples in the owner before replacing the other copy
+with a link.
+
+| Topic | Owning guide |
+|---|---|
+| Public conversion API and first-use examples | [Getting Started](./getting_started.md) |
+| Source setup, test commands, formatting, and CI operations | [Development Guide](./development.md) |
+| PyTorch support tiers, version selection policy, and qualification | [PyTorch Version Policy](./torch_version_policy.md) |
+| Test layers, harness behavior, correctness criteria, and traceability | [System Test Guide](./system_test.md) |
+| Conversion architecture, pass order, and graph invariants | [System Design](./design.md) |
+| Circle artifact APIs, passes, and reference-runtime contracts | [Circle artifact tools](../tico/circle/README.md) |
+| Large-file layout and ownership; explicit embedding export policy | [Large Circle export](./large_circle_export.md) and [CPU token embedding](./cpu_token_embedding.md) |
+| Public quantization API and quantizer registration | [Quantization overview](../tico/quantization/README.md) |
+| Algorithm methods and limits; wrapper lifecycle and state | Individual [algorithm guides](../tico/quantization/algorithm/README.md) and [WrapQ](../tico/quantization/wrapq/README.md) |
+| Runnable CLI workflows; YAML fields and defaults | [CLI examples](../tico/quantization/examples/README.md) and [configuration reference](../tico/quantization/examples/configs/README.md) |
+| Extension routing, shared recipe rules, and adapter/stage boundaries | [Recipes developer guide](../tico/quantization/recipes/README.md) and its linked subsystem guides |
+| Trace workflows and APIs; wrapper cases and static profiles | [Debug guide](../tico/quantization/recipes/debug/README.md) and [wrapper smoke reference](../tico/quantization/recipes/debug/wrapper_smoke/README.md) |
+| Quality protocols; MMMU parsing and diagnostics | [Recipe evaluation](../tico/quantization/recipes/evaluation/README.md) and [MMMU reference](../tico/quantization/recipes/evaluation/MMMU.md) |
+| Export helpers and common artifact rules; Gemma4 artifact contracts | [Export guide](../tico/quantization/recipes/export/README.md) and [Gemma4 artifacts](../tico/quantization/recipes/export/gemma4_artifacts.md) |
+| Application-specific commands, deployment profiles, and reports | The application's guide, such as the [hand-model example](../examples/hand_detector/README.md) |
+
+### Implementation references
+
 The current guides describe repository behavior for the selected branch or tag;
 the implementation remains the source of truth for version-sensitive details:
 
