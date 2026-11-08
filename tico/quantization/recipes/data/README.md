@@ -30,14 +30,15 @@ A data builder should not:
 ```text
 recipes/data/
 ├── README.md
-├── llm.py        # text-only calibration input builders
-└── vlm.py        # vision-language calibration input builders
+├── dataset_config.py # calibration dataset configuration normalization
+├── dataset_usage.py  # dataset roles, provenance, and benchmark overlap policy
+├── llm.py            # text-only calibration input builders
+└── vlm.py            # vision-language calibration input builders
 ```
 
-The split is by **input modality**, not by model name. For example, a future
-Gemma or Mistral text model should usually reuse `llm.py` unless it needs a
-different input shape. A future image-text model should usually reuse or extend
-`vlm.py`.
+The input builders are grouped by **input modality**. A new text-model adapter
+should usually reuse `llm.py` unless it needs a different input shape. A new
+image-text adapter should usually reuse or extend `vlm.py`.
 
 ## Input format conventions
 

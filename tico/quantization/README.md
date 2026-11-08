@@ -5,10 +5,11 @@
 ## Overview
 
 The _quantization_ module provides the public `prepare` / `convert` API for neural
-networks, including LLMs and VLMs. This guide owns the shared API and quantizer
-registration contract. Algorithm-specific options and numerical behavior are
-documented in the [algorithm guides](./algorithm/README.md); wrapper lifecycle and
-frozen-state contracts are documented in [WrapQ](./wrapq/README.md).
+networks, including LLMs and VLMs. This guide owns the shared API, Python PTQ
+configuration, and quantizer registration contract. Algorithm-specific options
+and numerical behavior are documented in the
+[algorithm guides](./algorithm/README.md); wrapper lifecycle and frozen-state
+contracts are documented in [WrapQ](./wrapq/README.md).
 
 - Public Interface
   - `prepare(model, quant_config, args, kwargs, inplace)`
@@ -40,37 +41,219 @@ If conversion fails, the original prepared model retains the handle for retry.
 Retaining the handle does not roll back arbitrary in-place algorithm mutations.
 For algorithms supporting `convert(prepared_model, inplace=False)`, the converted
 copy has no handle and the original prepared model keeps its handle even after
-success. GPTQ continues to require `inplace=True`.
+success. The classic `GPTQQuantizer` requires `inplace=True`.
 
 ## Basic Usage
 
+This small CPU example runs wrapper-based PTQ without a model download or an
+external calibration dataset:
+
 ```python
-from tico.quantization import prepare, convert
-from tico.quantization.config.gptq import GPTQConfig
 import torch
-import torch.nn as nn
+from torch import nn
 
-class LinearModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear = nn.Linear(8, 8)
+from tico.quantization import prepare, convert
+from tico.quantization.config import PTQConfig
 
-    def forward(self, x):
-        return self.linear(x)
+torch.manual_seed(0)
+model = nn.Linear(8, 4, bias=False).eval()
+prepared_model = prepare(model, PTQConfig(), inplace=False).eval()
 
-model = LinearModel().eval()
+with torch.no_grad():
+    # Replace these synthetic batches with representative inputs for a real model.
+    for _ in range(4):
+        prepared_model(torch.randn(2, 8))
+    quantized_model = convert(prepared_model)
+    example_input = torch.randn(2, 8)
+    output = quantized_model(example_input)
 
-# 1. Prepare for quantization
-quant_config = GPTQConfig()
-prepared_model = prepare(model, quant_config)
-
-# 2. Calibration
-for d in dataset:
-    prepared_model(d)
-
-# 3. Apply GPTQ
-quantized_model = convert(prepared_model)
+assert output.shape == (2, 4)
+assert torch.isfinite(output).all()
+assert not hasattr(quantized_model, "tico_quantizer")
 ```
+
+PTQ `prepare()` enables calibration; forward calls collect activation statistics.
+`convert()` freezes the required observers and switches the wrappers to fake
+quantization. Calibration must cover the execution paths used after conversion;
+see [WrapQ freezing and checkpoints](./wrapq/README.md#freezing-and-checkpoints)
+for readiness and failure behavior. For weight reconstruction with GPTQ, use the
+[GPTQ guide](./algorithm/gptq/README.md).
+
+### Quantization conversion and Circle export
+
+The two `convert` functions have different inputs and results:
+
+| API | Result |
+|---|---|
+| `tico.quantization.convert(prepared_model)` | A PyTorch module. For PTQ, its wrappers execute fake quantization with frozen qparams. This does not serialize a Circle file. |
+| `tico.convert(quantized_model, example_args)` | A `CircleModel` containing the exported and lowered Circle binary. It requires example inputs and supports the operators and quantization policies handled by the converter. |
+
+Continue the example above to export and save its Circle artifact:
+
+```python
+import tico
+
+circle_model = tico.convert(quantized_model, (example_input,))
+circle_model.save("linear.circle")
+```
+
+Exported input/output dtypes can differ from the PyTorch module's floating-point
+interface. The [numerical evaluation API](./evaluation/README.md) handles
+comparisons with Circle; the [export guide](./recipes/export/README.md) covers
+model-specific export stages and artifacts.
+
+## Python PTQ configuration
+
+Import the public configuration types and helpers from
+[`tico.quantization.config`](./config/__init__.py). They describe the policies
+resolved when `prepare(model, config)` constructs wrappers. Finish configuring
+the object before preparation; changing it later does not rebuild existing
+observers. YAML recipes and selector-based policies are documented separately in
+the [configuration reference](./examples/configs/README.md) and
+[PTQ override policies](./examples/configs/ptq_override_policies.md).
+
+### Quantization specifications and roles
+
+`QuantSpec(observer, dtype=None, qscheme=None, kwargs={})` is the policy unit for a
+logical observer. Prefer its helpers for common policies:
+
+| Helper | Policy |
+|---|---|
+| `affine(dtype, *, qscheme=None, observer=MinMaxObserver, **kwargs)` | Affine integer quantization. Pass a `DType` such as `DType.uint(8)` or `DType.int(16)`, an optional `QScheme`, and observer-specific constructor kwargs. In Python, `observer` is a class, not a YAML registry string. |
+| `mx(elem_format="int8", *, axis=-1, shared_exp_method="max", round="nearest")` | An `MXObserver` policy with a shared exponent along the selected axis. The helper does not use affine `dtype`/`qscheme` fields. |
+| `no_quant()` | An `IdentityObserver` policy that participates in the wrapper lifecycle but collects no statistics and leaves values unchanged. |
+
+`DType` and `QScheme` are imported from
+[`wrapq.dtypes`](./wrapq/dtypes.py) and [`wrapq.qscheme`](./wrapq/qscheme.py).
+For example, a weight-only PTQ configuration is:
+
+```python
+from tico.quantization.config import PTQConfig, affine, no_quant
+from tico.quantization.wrapq.dtypes import DType
+
+weight_only = PTQConfig(
+    activation=no_quant(),
+    weight=affine(DType.uint(8)),
+)
+```
+
+`PTQConfig.activation` supplies the role policy for activation-like observer names,
+including `act_in` and `act_out`; `weight` supplies it for the exact local names
+`weight` and `bias`. A role policy affects only observers implemented by a
+wrapper: it does not add a bias observer where none exists. Bare `PTQConfig()`
+uses `affine(DType.uint(8))` for both roles, with `MinMaxObserver`.
+
+When no higher-priority scheme is supplied, affine inference uses per-tensor
+symmetric quantization for signed dtypes, per-channel asymmetric quantization
+for unsigned `weight`, and per-tensor asymmetric quantization for other unsigned
+observers. Wrappers may supply their own scheme and channel axis. For example,
+`QuantLinear` supplies per-channel asymmetric weights with `channel_axis=0`.
+An unsigned dtype with a symmetric scheme is rejected. Use an explicit
+observer-level override when a particular site's scheme must win over wrapper
+defaults.
+
+MX eager execution, Circle serialization, and the chosen Circle runtime have
+separate format and operator support. Selecting an MX policy does not by itself
+establish that the whole model can be exported or executed on a target backend.
+
+### Observer overrides and precedence
+
+Override paths follow the wrapped model's child scopes and end in a logical
+observer name. They do not use internal `wrapped`/`module` attribute prefixes.
+For an `nn.Sequential` whose first child is an `nn.Linear`, these two forms
+select the same weight observer:
+
+```python
+from tico.quantization.config import PTQConfig, affine, no_quant
+from tico.quantization.wrapq.dtypes import DType
+
+by_path = PTQConfig(overrides={"0.weight": affine(DType.uint(4))})
+by_tree = PTQConfig(overrides={"0": {"weight": affine(DType.uint(4))}})
+
+# Add another site before prepare(); a sequence of path components also works.
+by_path.set_override("0.act_out", no_quant())
+```
+
+Use the observer names declared by the relevant
+[wrapper](./wrapq/README.md#3-wrapper-design), such as `act_in`, `act_out`, and
+`weight`. A path for one wrapper family is not automatically valid for another.
+These are exact hierarchical paths; Python `PTQConfig.overrides` does not expand
+the recipe layer's glob, regex, or semantic selectors.
+
+For each observer field, the precedence is **explicit observer override > wrapper
+defaults > role policy**. The override leaf determines how the role participates:
+
+- A `QuantSpec` leaf replaces the role policy entirely. For example,
+  `overrides={"0.act_out": mx("int8")}` discards the activation role's affine
+  dtype, scheme, and kwargs. Wrapper defaults may still fill omitted fields.
+  Use `affine()`, `mx()`, or `no_quant()` when replacing an observer policy.
+- A raw kwargs mapping merges with the role and wrapper defaults. For example,
+  if the role uses `affine(..., observer=EMAObserver, momentum=0.1)`, then
+  `overrides={"0.act_out": {"momentum": 0.2}}` retains the EMA observer and dtype
+  while changing its momentum. Merely changing `observer` in a raw mapping does
+  not remove incompatible inherited kwargs.
+
+Affine override leaves that specify a dtype also resolve an omitted qscheme
+during configuration normalization. Such a resolved scheme is part of the
+explicit override; role-level omitted schemes instead allow wrapper defaults
+to participate. See [`PTQConfig`](./config/ptq.py) and
+[`QuantModuleBase`](./wrapq/wrappers/quant_module_base.py) for the resolution code.
+
+### Wrapping and model metadata
+
+`strict_wrap=True` is the default. A missing wrapper at a boundary selected by
+the wrapping helper raises `NotImplementedError`. With `strict_wrap=False`, the
+helper can leave unsupported modules in place and recurse into their children.
+Errors constructing a registered wrapper still propagate. Strict wrapping
+checks wrapper availability at those boundaries; it does not mean every
+operation inside a model is quantized or exportable.
+
+`model_args` is a mapping of model-specific metadata read by wrappers, such as an
+execution profile or attention geometry. It is separate from both the example
+`args`/`kwargs` accepted by the public `prepare()` API and the arguments passed
+to the model's `forward()`. The PTQ implementation does not run a forward pass
+from `prepare(args=..., kwargs=...)`; call the prepared model with calibration
+inputs, as in [Basic Usage](#basic-usage). `attention_mask_fill_value` defaults to
+`-120.0` for wrappers that use it to fill masked attention scores.
+
+### Model-specific configuration builders
+
+The public builders return `PTQConfig` objects with generated per-module
+overrides. They do not load a model or perform calibration:
+
+| Builder | Required model information | Additional policies |
+|---|---|---|
+| `build_llm_ptq_config` | `model_type="llama"` and `num_hidden_layers`. Other model types currently raise `NotImplementedError`. | Shared `linear_weight`, `embedding_weight`, `lm_head_weight`, `spin_rotation_weight`, `norm`, and `norm_weight`; `profile` is stored in `model_args`. |
+| `build_qwen3_vl_ptq_config` | `num_vision_blocks`, `num_text_layers`, `num_deepstack_mergers`, and `model_args`. | The shared policies plus `text_linear_weight`, `vision_linear_weight`, and `vision_patch_embed_weight`. Text/vision linear policies fall back to `linear_weight` when omitted. |
+
+Both builders default **activation and weight to `affine(DType.int(16))`**,
+unlike the unsigned 8-bit defaults of `PTQConfig()` itself. Pass role specs
+explicitly when that distinction matters. `norm` selects norm activation
+observers; `norm_weight` selects norm parameters. Optional policy arguments set
+to `None` leave the inherited/fallback policy in effect; use `no_quant()` for an
+explicit bypass. Both builders accept `strict_wrap`.
+
+For example, this constructs the policy for a two-layer Llama model:
+
+```python
+from tico.quantization.config import affine, build_llm_ptq_config
+from tico.quantization.wrapq.dtypes import DType
+
+llama_config = build_llm_ptq_config(
+    model_type="llama",
+    num_hidden_layers=2,
+    activation=affine(DType.int(16)),
+    weight=affine(DType.uint(8)),
+    linear_weight=affine(DType.uint(4)),
+)
+```
+
+Supply counts and metadata from the actual model being prepared. The generated
+paths target the supported wrapper hierarchy; a builder is not an architecture
+discovery step or a guarantee that conflicting policies for tied parameters are
+compatible. See the [builder implementation](./config/builders.py) for the exact
+generated sites and the [WrapQ guide](./wrapq/README.md) for model and frozen-state
+contracts.
 
 ## Directory Structure
 
@@ -118,6 +301,7 @@ On top of these, two layers make the toolkit usable end-to-end from the command 
 | Task | Guide |
 |---|---|
 | Use the Python `prepare` / `convert` API | [Basic usage](#basic-usage) |
+| Configure Python PTQ roles, observers, overrides, and model builders | [Python PTQ configuration](#python-ptq-configuration) |
 | Choose a quantization algorithm or model-specific implementation | [Algorithm catalog](./algorithm/README.md#available-algorithms) |
 | Quantize weights with GPTQ | [GPTQ guide](./algorithm/gptq/README.md) |
 | Apply smoothing, rotations, or equalization | [SmoothQuant](./algorithm/smoothquant/README.md), [SpinQuant](./algorithm/spinquant/README.md), and [CLE](./algorithm/cle/README.md) |
