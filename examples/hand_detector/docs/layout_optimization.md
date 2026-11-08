@@ -13,6 +13,7 @@ the NHWC Circle input tensor.
 After serialization, the example runs this Circle-to-Circle pipeline:
 
 ```text
+FuseActivationFunctionPass
 EliminateTransposeBoundedLayoutRegionPass
 SimplifyViewOpsPass
 DeadCodeEliminationPass
@@ -23,13 +24,16 @@ The pass manager uses `CirclePassStrategy.RESTART`. A rewrite can expose a new
 inverse Transpose pair or dead object, and restart scheduling allows the earlier
 passes to run again until the complete sequence reaches a fixed point.
 
-`EliminateTransposeBoundedLayoutRegionPass` finds connected Circle regions made
-only of layout-convertible operators:
+`EliminateTransposeBoundedLayoutRegionPass` finds connected Circle regions of
+supported layout-convertible operators. The detector's regions use:
 
 ```text
 ADD
 PAD with a constant rank-by-two padding tensor
 ```
+
+The full supported operator set is documented in the
+[Circle optimization reference](../../../tico/circle/README.md#optimize).
 
 Every external data input to a candidate region must enter through the same
 Transpose permutation. Every external data output must leave through the
@@ -93,20 +97,21 @@ to this activation-layout transformation.
 Floating-point export:
 
 ```bash
-python examples/hand_detector/export_float_circle.py \
+python -m examples.hand_detector.export float \
   --output examples/hand_detector/exported/hand_detector_float.circle
 ```
 
 Quantized export:
 
 ```bash
-python examples/hand_detector/export_quantized_circle.py \
+python -m examples.hand_detector.export quantized \
   --calibration-dir /path/to/calibration_npy \
   --bits 8 16 \
   --output-dir examples/hand_detector/exported
 ```
 
-Calibration and evaluation arrays are normalized to NHWC by `input_data.py`.
+Calibration and evaluation arrays are normalized to NHWC by
+[`_support/data.py`](../_support/data.py).
 The accepted source shapes remain:
 
 ```text
@@ -119,7 +124,7 @@ The accepted source shapes remain:
 ## Verify the exported graph
 
 ```bash
-python examples/hand_detector/verify_circle_layout.py \
+python -m examples.hand_detector.verify circle \
   examples/hand_detector/exported/hand_detector_float.circle
 ```
 
@@ -128,7 +133,9 @@ The verifier checks:
 - one Circle input with shape `[1, 192, 192, 3]`;
 - no consecutive inverse Transpose pair;
 - no remaining Transpose-ADD-Transpose round trip;
-- exactly zero Circle Transpose operators by default.
+- exactly zero Circle Transpose operators;
+- two `RESIZE_BILINEAR` operators with `align_corners=False` and
+  `half_pixel_centers=True` by default.
 
 ## Use the Circle pass from the CLI
 

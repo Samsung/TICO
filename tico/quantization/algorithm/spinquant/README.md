@@ -24,15 +24,19 @@ It does **not** implement the full SpinQuant pipeline.
 
 ### Configuration
 
-The `SpinQuantConfig` object holds the parameters required for SpinQuant offline fusion.
-When using the public interface functions, pass an instance of `SpinQuantConfig` so that
-the framework dispatches the request to the SpinQuant-specific implementation.
+The `SpinQuantConfig` object holds the parameters for the LLaMA offline-fusion path
+shown below. Pass this configuration to the public interface to select
+`SpinQuantQuantizer`. Qwen3-VL uses a separate configuration and quantizer, described
+under [Model assumptions and current support](#model-assumptions-and-current-support).
 
 ```python
-class SpinQuantConfig(
-    init_method: Literal["random", "hadamard", "external"] = "random",
-    r1: Optional[torch.Tensor] = None,
-    r2_map: Optional[Dict[str, torch.Tensor]] = None,
+from tico.quantization.config.spinquant import SpinQuantConfig
+
+SpinQuantConfig(
+    init_method="random",
+    r1=None,
+    r2_map=None,
+    show_progress=True,
 )
 ```
 
@@ -57,6 +61,9 @@ class SpinQuantConfig(
   ```python
   "model.layers.0.self_attn.R2"
   ```
+
+- **show_progress**
+  Whether to show a progress bar while applying rotations (default: `True`).
 
 ### How to use SpinQuantQuantizer
 
@@ -136,8 +143,8 @@ model = convert(model)
 
 ### Model assumptions and current support
 
-SpinQuantQuantizer currently assumes a Hugging Face LLaMA causal language model
-structure and validates that:
+`SpinQuantQuantizer`, selected by `SpinQuantConfig`, assumes a Hugging Face LLaMA
+causal language model structure and validates that:
 
 - the config is a Hugging Face PretrainedConfig
 - config.model_type == "llama"
@@ -145,12 +152,20 @@ structure and validates that:
   - model
   - lm_head
 
-The current implementation is designed around the custom SpinLlamaForCausalLM
+This LLaMA implementation is designed around the custom `SpinLlamaForCausalLM`
 conversion path and LLaMA-style decoder blocks.
+
+The package also provides [`Qwen3VLSpinQuantQuantizer`](qwen3_vl_quantizer.py), selected
+by [`Qwen3VLSpinQuantConfig`](../../config/qwen3_vl_spinquant.py). That path supports
+tied Qwen3-VL word embeddings, text-side R1/R2 rotations, DeepStack output rotation
+fusion, and optional vision-tower rotations. Vision R1 requires LayerNorm affine
+folding and a rotation that preserves the all-ones direction; see the configuration
+for its controls and validation requirements.
 
 ### Precautions and limitations
 
-- This implementation is currently limited to **LLaMA** models.
+The following notes apply to the LLaMA examples above:
+
 - It is an **offline fusion / preprocessing** step, not a complete standalone low-bit 
 quantization algorithm.
 - Embedding-side and LM-head-side rotations are intentionally **not** fused into the

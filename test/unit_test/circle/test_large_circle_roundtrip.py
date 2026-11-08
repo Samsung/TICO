@@ -699,11 +699,12 @@ class LargeCircleConversionTest(unittest.TestCase):
     def test_small_external_embedding_executes_with_one(self):
         import tico
         import torch
+        from tico.utils.model import CircleModel
 
         module, args = self._module_and_inputs()
         with patch.object(binary, "_FLATBUFFER_LIMIT", 4096):
             result = tico.convert(module, args)
-        actual = result(*args)
+        actual = CircleModel(result.circle_binary, runtime="circle-interpreter")(*args)
         if isinstance(actual, (tuple, list)):
             actual = actual[0]
         torch.testing.assert_close(torch.as_tensor(actual), module(*args))

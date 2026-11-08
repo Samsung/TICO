@@ -1,8 +1,9 @@
 # algorithm
 
-The _algorithm_ module provides a collection of state-of-the-art quantization algorithms
-for deep learning. These methods rewrite target graphs prior to the actual quantization
-step, ensuring minimal performance loss and improved quantization accuracy.
+The _algorithm_ module implements quantization algorithms and preprocessing methods
+for deep learning. Some methods transform model weights before a later quantization
+stage, while others quantize weights or reconstruct activation quantization parameters.
+They are not all graph rewrites or preprocessing steps.
 
 ## Available Algorithms
 
@@ -19,33 +20,38 @@ step, ensuring minimal performance loss and improved quantization accuracy.
 
 ## Design Philosophy
 
-This module is designed to be **self-contained** and **independent** of other components
-in the codebase. The primary reasons for this design are:
+Algorithm implementations have defined responsibilities within TICO's quantization
+stack. They integrate with configuration classes, the quantizer registry, the public
+`prepare`/`convert` API, and shared WrapQ infrastructure while keeping recipe
+orchestration outside the algorithm implementation.
 
 ### 1. External Dependencies
 
-The _algorithm_ module relies on external libraries such as `transformers`, which may not
-be compatible with the minimal dependencies required by other parts of the project.
+Some algorithms or model-family integrations require optional libraries such as
+`transformers`. Keep those dependencies local to the paths that need them and document
+their installation requirements.
 
 ### 2. Modular and Maintainable Code
 
-Each algorithm in this module is implemented as a standalone component to:
-- Avoid tight coupling with internal project code.
-- Ensure ease of testing, maintenance, and future updates.
+Each algorithm owns its numerical implementation and quantizer lifecycle. Shared
+wrapper infrastructure belongs in `wrapq/`, configuration belongs in `config/`, and
+pipeline orchestration belongs in `recipes/stages/`. These boundaries support focused
+testing and maintenance without duplicating shared behavior.
 
 ## Usage Guidelines
 
-### Do not Cross-Integrate
+### Integration Boundaries
 
-The _algorithm_ module should not be directly referenced by other modules or components
-within the _TICO_ codebase. Instead, this module is designed to be used independently
-for quantization and other algorithm-specific tasks.
+Use the public `prepare`/`convert` API and algorithm-specific configurations for model
+quantization. Framework code may import algorithm implementations and utilities through
+their owning modules: the quantizer registry resolves implementations, and recipe
+stages orchestrate their use. Algorithms should not depend on example entrypoints or
+recipe orchestration, which would introduce circular dependencies.
 
 ### Dependency Isolation
 
-Ensure that any code or scripts utilizing this module explicitly install the required
-dependencies, such as `transformers`. Dependencies for this module should not be
-propagated to other project components.
+Install the dependencies required by the selected algorithm or model family. Avoid
+making optional algorithm dependencies mandatory for unrelated project components.
 
 ## Example Use Case
 
@@ -77,10 +83,9 @@ between _algorithm_ and other modules should be done via well-defined interfaces
 
 ## Contributing to the Module
 
-- New algorithms should be implemented as standalone modules with minimal
-  interdependencies.
-- Avoid introducing code that requires circular imports or tight integration with
-  internal project components.
+- Implement new algorithms in this package and expose their configurations through
+  the quantizer registry and public API.
+- Reuse shared infrastructure through defined interfaces and avoid circular imports.
 - Document any external dependencies clearly in the module's README or requirements
   file.
 

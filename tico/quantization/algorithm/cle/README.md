@@ -38,7 +38,14 @@ CLE rescales two consecutive layers:
 - First layer output channels are **scaled up/down**
 - Second layer input channels are **scaled inversely**
 
-This keeps the overall function unchanged while making weights more uniform across channels.
+This preserves the model's function algebraically only when the positive channel scales can
+be moved through the operations between the two layers. For a diagonal scale `S`, an
+intervening operation `f` must satisfy `f(Sx) = S f(x)`. ReLU satisfies this condition;
+SiLU and GELU generally do not. The first layer's bias must also be scaled when it is
+nonzero. Any other consumers of the scaled output need corresponding compensation.
+
+The implementation checks layer types and channel counts, not these graph conditions.
+Choose pairs whose complete dataflow satisfies them before applying CLE.
 
 ---
 
@@ -72,7 +79,8 @@ cle_config = CLEConfig(
   Number of times to apply CLE (usually 1 is sufficient)
 
 - **equalize_bias**  
-  Whether to scale bias along with weights
+  Whether to scale the first layer's bias along with its weights (default: `True`).
+  Disabling it with a nonzero bias generally breaks function preservation.
 
 ---
 
@@ -166,8 +174,11 @@ Measures full dynamic range of each channel.
 - Only supports **Conv2d and Linear layers**
 - Requires matching channels:
   ```
-  first.out_channels == second.in_channels
+  first.weight.shape[0] == second.weight.shape[1]
   ```
+- Does not validate that the selected layers are connected, that intervening
+  operations commute with channel scaling, or that every branch consuming the
+  first layer's output is compensated. Those checks are the caller's responsibility.
 - Does not handle:
   - Group convolution (yet)
   - BatchNorm folding explicitly

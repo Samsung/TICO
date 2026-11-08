@@ -128,8 +128,9 @@ def _build_llama_config(*, size_profile: str, max_seq: int) -> "LlamaConfig":
     The large profiles copy the target model's channel, MLP, and attention-head
     dimensions while retaining one synthetic layer. ``max_position_embeddings``
     intentionally follows the smoke/runtime capacity instead of the checkpoint's
-    131,072-token training limit because the quantized wrapper materializes a
-    static causal-mask template from this value.
+    131,072-token context limit to keep the synthetic and export workloads bounded.
+    Eager attention builds masks from the actual query and cached-key lengths;
+    static export inputs are prepared explicitly for the selected capacity.
     """
     from transformers.models.llama.configuration_llama import LlamaConfig
 

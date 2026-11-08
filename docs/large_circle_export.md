@@ -382,11 +382,13 @@ The reproducible memory measurement is described in
 [`test/performance/README.md`](../test/performance/README.md#circle-extraction-memory-benchmark).
 
 A separate optional ONE check executes a small model whose data is forced into
-appended storage. It requires a working ONE interpreter installation:
+appended storage. It explicitly selects `runtime="circle-interpreter"` and requires
+a working ONE interpreter installation; the default `reference` runtime does not
+validate ONE compatibility:
 
 ```bash
 TICO_RUN_ONE_LARGE_CIRCLE=1 python -m unittest -v \
-  test.unit_test.circle.test_large_circle_roundtrip.LargeCircleConversionTest
+  test.unit_test.circle.test_large_circle_roundtrip.LargeCircleConversionTest.test_small_external_embedding_executes_with_one
 ```
 
 Before merging, also run the existing serializer and Circle suites, the full
@@ -399,8 +401,9 @@ non-model suite, and repository formatting:
 ./ccex format --no-apply-patches
 ```
 
-The delivery's `VALIDATION.md` distinguishes executed checks from tests that were
-only added. Do not treat the existence of an opt-in test as evidence it was run.
+Record the commands, results, and skipped checks in the change's validation report
+or pull-request description. Do not treat the existence of an opt-in test as
+evidence it was run.
 
 ## Format references
 
