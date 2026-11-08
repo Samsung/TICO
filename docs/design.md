@@ -7,7 +7,10 @@ quantized graphs, and serializes each remaining operator through a registered Ci
 visitor.
 
 This document describes the behavior implemented on the current `main` branch. It is
-not a future architecture proposal.
+the reference for conversion architecture and exported-graph invariants. The
+[Development Guide](development.md) owns operational commands, and
+[Circle artifact tools](../tico/circle/README.md) owns serialized-artifact APIs,
+rewrites, and runtime contracts.
 
 ## Contents
 
@@ -697,48 +700,29 @@ shape, and control values are excluded. An intentional CPU float island instead
 uses real FLOAT32 tensors without qparams, with explicit conversion operators at
 its integer boundaries; it must not use fabricated qparams to satisfy NPU checks.
 
-The compile option `preserve_embedding_quantization` defaults to `False`; omission
-and explicit `False` retain the existing embedding export policy. Only explicit
-`True` inserts `PreserveEmbeddingQuantization` immediately before `FoldQuantOps`,
-without changing the following pass order. For supported constant UINT8 rank-two
-row-wise embedding tables (axis 0), this retains the canonical Circle
-representation:
+Explicit embedding preservation is an opt-in export policy:
+`preserve_embedding_quantization=True` inserts `PreserveEmbeddingQuantization`
+immediately before `FoldQuantOps`; omission or `False` retains the existing policy
+and following pass order. It keeps the supported lookup's float region and explicit
+Q/DQ boundaries while preserving shared integer weights and the output ABI.
+GATHER remains a selection operation and does not requantize codes across domains.
 
-```text
-Wq [row qparams] -> DEQUANTIZE -> GATHER(float, integer IDs) -> Q_A
-  -> DQ_A -> MUL(float, fake-quantized scale) -> Q_B [original integer ABI]
-```
-
-The optional MUL continuation keeps each intermediate Q/DQ boundary. The shared
-weight is not scaled or modified, and FC consumers keep its original integer
-codes and qparams. GATHER remains a selection operation, with no implicit
-weight-to-activation domain conversion. Explicitly marked float tensors and
-semantic operands are checked separately from quantized NPU data tensors.
-
-The built-in reference CPU runtime prepares the serialized constant-DQ/GATHER
-pattern once, gathering integer rows and corresponding row qparams before restoring
-only the selected FP32 values. The full-table DQ is virtual at execution, including
-tracing. Existing Q/DQ/MUL kernels still execute on selected tensors and preserve
-rounding/clipping. Default O1 and explicit HEAVY constant folding keep this dynamic
-lookup table compressed. Unsupported target plans receive a diagnostic rather
-than a hidden full-table restoration.
-
-The option does not change calibration, observer configuration, activation dtype
-or runtime execution mode, and is never enabled from model or device detection.
-Runtime planning and constant-folding protection follow the serialized graph,
-independently of the compile option. Other quantized export policies are unchanged.
-In particular, legacy embedding artifacts with distinct integer input/output
-domains are not proof of native reference support: GATHER does not requantize codes. Structural verification,
-native reference execution, fake-quant evaluation, and external backend validation
-remain separate checks. See [CPU embedding design and contracts](cpu_token_embedding.md)
-and [reference execution modes](../tico/circle/README.md#quantized-models).
+The [CPU embedding guide](cpu_token_embedding.md) owns the
+[export policy](cpu_token_embedding.md#select-the-export-policy),
+[numerical and storage contracts](cpu_token_embedding.md#numerical-and-storage-contracts),
+[pass invariants](cpu_token_embedding.md#export-pass-invariants), and
+[selected-row execution pattern](cpu_token_embedding.md#supported-execution-pattern).
+Runtime planning follows the serialized graph independently of the compile option.
+Structural verification, native reference execution, fake-quant evaluation, and
+external backend validation remain separate checks; see
+[reference execution modes](../tico/circle/README.md#quantized-models).
 
 ### 10.3 Recipe architecture
 
 The recipe layer keeps end-to-end model workflows separate by responsibility:
 
 - model-family behavior: `recipes/adapters/`
-- algorithm stages: `recipes/stages/`
+- algorithm orchestration stages: `recipes/stages/`
 - calibration data: `recipes/data/`
 - evaluation: `recipes/evaluation/`
 - artifact export: `recipes/export/`
@@ -753,59 +737,25 @@ for the current package contracts.
 
 `tico.circle` operates on Circle object-model documents and is independent from
 the exported-graph pass pipeline. Documents may come from serialized bytes or
-the file converter's metadata-only schema round trip.
+the file converter's metadata-only schema round trip. The same document layer supports
+inspection, verification, extraction, and Circle-to-Circle transformations.
 
-```text
-Circle bytes
-    -> CircleDocument
-        ├── inspect summaries
-        ├── static verification
-        ├── operator/tensor-boundary extraction
-        └── CirclePassPipeline
-              ├── compatibility   optional legacy custom-op recovery
-              ├── legalize        optional dynamic-FC lowering
-              ├── optimize        round-based generic and pattern rewrites
-              │     ├── canonicalize
-              │     ├── simplify
-              │     ├── fold
-              │     ├── fuse
-              │     ├── CSE
-              │     └── DCE
-              └── compact         one-shot index compaction
-```
+The built-in O1 pipeline completes ordered optimization rounds until no pass changes
+the document, then compacts indices once. This artifact-level fixed point is separate
+from the PyTorch-IR scheduling described in [Pass manager and graph invariants](#6-pass-manager-and-graph-invariants).
+Static verification, numerical parity, and target-backend support are distinct
+validation claims.
 
-Circle transformations are grouped by semantic responsibility under
-`tico/circle/passes/optimization/`: `canonicalize`, `simplify`, `fold`, `fuse`,
-`legalize`, and `compatibility`. Global CSE remains separate, while dead-code
-elimination and index compaction live under `passes/cleanup/`.
+The Circle guide owns the detailed contracts:
 
-The built-in O1 pipeline uses `CirclePassStrategy.UNTIL_NO_CHANGE` for the optimize
-phase: all optimization passes complete one ordered round, and another round starts
-only if at least one pass changed the document. Legacy custom-op recovery and dynamic
-FullyConnected legalization create optional one-shot phases before optimization.
-The compatibility-owned FC-GELU-FC recognizer is instead scheduled inside the
-optimization phase at its pattern-sensitive position. `CompactIndicesPass` runs
-exactly once in the final `compact` phase. The legacy `RESTART` scheduler remains available
-for explicit custom pipelines and scheduler-comparison benchmarks.
-
-A `CirclePassContext` owns a model-scoped optimization session. The session caches
-producer/consumer analyses by subgraph revision and shares a canonical constant pool.
-Local rewrite rules run through a deterministic neighborhood worklist and an atomic
-mutation transaction, so failed rewrites roll back appended objects and watched
-state. Direct Object API passes remain supported, but must report modifications
-accurately so cached analyses are invalidated.
-
-The artifact verifier checks structural and referential consistency, including
-containers, indices, dataflow, tensor interfaces, signatures, and control-flow
-subgraph references. Dead-code elimination preserves signature-bound and caller-owned
-inputs and treats stateful, non-deterministic, custom, variable, and
-subgraph-referencing operators as observable roots.
-
-Verification does not execute inference or validate numerical parity or target-backend
-support. The reference runtime (`tico/circle/runtime/`) provides in-process execution
-with per-operator contract validation and a fake-quantize mode for quantized models;
-backend-specific integer arithmetic is out of scope and is rejected explicitly. See the
-"Reference runtime" section of `tico/circle/README.md`.
+| Concern | Reference |
+| --- | --- |
+| Document API and extraction | [Python API](../tico/circle/README.md#python-api) and [CLI](../tico/circle/README.md#command-line-interface) |
+| Pass responsibilities and O1 phases | [Pass taxonomy](../tico/circle/README.md#pass-taxonomy) and [scheduling](../tico/circle/README.md#rule-and-pipeline-scheduling) |
+| Analysis caches, local rules, and rollback | [Optimization sessions and atomic rewrites](../tico/circle/README.md#optimization-sessions-and-atomic-rewrites) |
+| Structural validation and indexed resources | [Verification](../tico/circle/README.md#what-verification-means) and [graph/index handling](../tico/circle/README.md#graph-and-index-handling) |
+| Observable roots and protected inputs | [Optimization and dead-code elimination](../tico/circle/README.md#optimize) |
+| Serialized execution and quantized modes | [Reference runtime](../tico/circle/README.md#reference-runtime) |
 
 ## 12. Validation, errors, and diagnostics
 
@@ -828,11 +778,9 @@ dimensions.
 
 ### Debugging
 
-- `TICO_LOG=4` enables debug logs and instrumented graph/constant diffs.
-- `TICO_GRAPH_DUMP=1` writes post-decomposition, post-legalization, and
-  post-quantization FX graph PNGs under `.tico_tmp/session_<timestamp>/`.
-- `tico-circle inspect` shows serialized tensor/operator interfaces.
-- `tico-circle verify` checks static Circle consistency.
+Pass diagnostics expose graph and constant changes; serialized-artifact inspection
+then checks the resulting interfaces and structural consistency. The Development Guide
+maintains the [logging, graph-image, and Circle inspection commands](development.md#debug-conversion).
 
 ## 13. Extension points
 
@@ -856,29 +804,20 @@ dimensions.
 
 ### Add a quantizer or quantization workflow
 
-1. Define an algorithm configuration derived from the quantization `BaseConfig`.
-2. Implement and register the `BaseQuantizer`.
-3. Preserve the public `prepare`/statistics/`convert` lifecycle.
-4. Put model-specific behavior in recipe adapters and algorithm behavior in stages.
-5. Add deterministic unit coverage and the smallest useful recipe smoke test.
+Preserve the public `prepare`/statistics/`convert` lifecycle. The quantization guide
+owns [algorithm configuration and registration](../tico/quantization/README.md#contributing-adding-a-new-algorithm);
+the recipe guide owns [adapter, stage, and algorithm responsibility boundaries](../tico/quantization/recipes/README.md#responsibility-boundaries).
+Use the [quantization testing criteria](system_test.md#for-quantization) and
+[recipe testing checklist](../tico/quantization/recipes/README.md#testing-checklist)
+for deterministic unit coverage and the smallest useful workflow smoke test.
 
 ### Add a Circle-to-Circle pass
 
-1. Put the transformation in the semantic package that owns its responsibility:
-   `canonicalize`, `simplify`, `fold`, `fuse`, `legalize`, `compatibility`, or
-   `cleanup`.
-2. Use `CircleRewriteRule` and the shared mutation/session infrastructure for local
-   rewrites; reserve a direct `CirclePass` for graph-global algorithms.
-3. Preserve tensor contracts, signatures, subgraph references, shared buffers, and
-   observable effects.
-4. Register a canonical CLI name in `tico/circle/cli/main.py` when the pass is
-   user-selectable, and add it to `tico/circle/passes/presets.py` only when a built-in
-   preset should schedule it.
-5. Add focused positive and close non-matching tests, plus multi-subgraph or
-   global-resource coverage when applicable.
-
-See [`tico/circle/README.md`](../tico/circle/README.md#writing-a-new-circle-pass) for
-the detailed rewrite and testing contract.
+Circle passes extend the serialized-artifact layer. Follow
+[Writing a new Circle pass](../tico/circle/README.md#writing-a-new-circle-pass) for
+semantic placement, mutation and invariant requirements, and CLI/preset registration.
+The [Circle testing checklist](../tico/circle/README.md#testing) covers positive and
+non-matching rewrites, shared resources, rollback, and fixed-point behavior.
 
 ## 14. Current limitations
 

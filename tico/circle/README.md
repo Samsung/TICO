@@ -7,6 +7,10 @@
  on a normalized Circle document before final file serialization. See
  [Direct file conversion](../../docs/large_circle_export.md#direct-file-conversion).
 
+This guide owns the serialized-artifact API, CLI, rewrite contracts, and reference
+runtime behavior. The [system design](../../docs/design.md) describes the conversion
+pipeline and its exported-graph invariants.
+
 ## Contents
 
 - [Architecture](#architecture)
@@ -45,7 +49,7 @@ CircleDocument
             ├── compatibility     optional legacy custom-op recovery
             ├── legalize          optional dynamic-FC lowering
             ├── optimize          generic passes plus optional pattern fusions
-            └── finalize          one-shot index compaction
+            └── compact           one-shot index compaction
 ```
 
 ## What verification means
@@ -313,8 +317,14 @@ sweep validates that no non-local match was missed.
 
 O1 uses `CirclePassStrategy.UNTIL_NO_CHANGE`: every optimization pass runs in
 order for a complete round, and another round starts only when at least one
-pass changed the document. The legacy `RESTART` strategy remains available for
-explicitly custom pipelines and for scheduler comparison benchmarks.
+pass changed the document. Optional legacy custom-op recovery and dynamic
+FullyConnected legalization run once in separate phases before optimization.
+The compatibility-owned FC-GELU-FC recognizer runs inside the optimization phase
+at its pattern-sensitive position, after generic canonicalization and simplification;
+moving it into the earlier compatibility phase would change the decompositions it
+can observe. `CompactIndicesPass` runs exactly once in the final `compact` phase.
+The legacy `RESTART` strategy remains available for explicitly custom pipelines and
+for scheduler comparison benchmarks.
 
 ## Command-line interface
 
@@ -639,14 +649,16 @@ Pass requirements:
 - mutate only the supplied `CircleDocument` and report `modified=True` only when model
   state changed
 - use `CircleRewriteRule` for local patterns so the shared worklist, optimization
-  session, and atomic mutation transaction can manage invalidation and rollback
+  session, and atomic mutation transaction can manage invalidation and rollback;
+  reserve a direct `CirclePass` for graph-global algorithms
 - use `CircleGraph` or the session graph cache instead of rebuilding producer and
   consumer maps independently
 - preserve Circle structural invariants at pass boundaries unless verification is
-  explicitly disabled by the caller
+  explicitly disabled by the caller; preserve tensor contracts, signatures, subgraph
+  references, shared buffers, and observable effects
 - use the helpers in `rewrite.py` whenever deleting or remapping indexed objects
-- register one canonical CLI name when the pass is user-selectable, and update
-  `presets.py` only when a built-in pipeline should schedule it
+- register one canonical CLI name in `cli/main.py` when the pass is user-selectable,
+  and update `passes/presets.py` only when a built-in pipeline should schedule it
 - add positive and close non-matching tests; include multi-subgraph, shared-buffer,
   effect, signature, rollback, and fixed-point cases when applicable
 
@@ -669,12 +681,15 @@ The tests include a schema-independent Object API fixture so graph, selection, r
 
 Important test scenarios include:
 
+- malformed containers, undefined dataflow, and duplicate or unused-resource diagnostics
 - graph producer and consumer indexing
-- operator and tensor-boundary selection
+- operator and tensor-boundary selection, extraction boundary reconstruction, and
+  preservation or removal of constants
 - redundant Reshape and inverse Transpose elimination
 - dead branch elimination
 - signature tensor-map remapping
 - shared buffer preservation across two subgraphs
+- retained-subgraph/global-buffer compaction and indexed-object remapping
 - single-subgraph extraction from a multi-subgraph model
 - compatible and incompatible signature handling
 - invalid buffer, tensor, operator-code, signature, and subgraph references
@@ -687,8 +702,10 @@ Important test scenarios include:
 - no-op removal with graph-output and signature remapping
 - identity and chained view simplification with malformed-pattern rejection
 - generated Circle round-trip value preservation for representative semantic rewrites
+- verification before and after passes, semantic taxonomy, and canonical CLI names
 - atomic mutation rollback and optimization-session invalidation
-- non-empty O1 idempotence and scheduler-equivalence coverage
+- local worklist convergence, non-empty O1 idempotence, and byte-equivalent
+  `RESTART`/`UNTIL_NO_CHANGE` scheduler results
 
 ## Reference runtime
 
@@ -828,6 +845,9 @@ execution mode instead of by guessing backend arithmetic:
   of an integer backend. Differences from ONE's pass: ONE applied it only to the
   operators it listed and rejected the others; the runtime classifies every supported
   operator as either value-preserving or requantizing.
+
+Legacy embedding artifacts with distinct integer input/output domains are not proof
+of native reference support: GATHER does not requantize codes.
 
 To retain supported explicit embedding boundaries during PyTorch-to-Circle export,
 set `CompileConfigV1(preserve_embedding_quantization=True)` (default: `False`).

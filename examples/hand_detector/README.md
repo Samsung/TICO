@@ -575,10 +575,11 @@ candidate checkpoint histories, acceptance metrics, and the committed winner.
 
 ## Validation-aware AdaRound
 
-AdaRound optimizes hard floor/ceil choices for calibrated Conv2d weights while
-keeping per-output-channel weight scale/zero-point and all activation qparams
-fixed. It uses the same train/selection/acceptance split and E:internal-full
-end-to-end guards as block reconstruction.
+[AdaRound](../../tico/quantization/algorithm/adaround/README.md) optimizes hard
+floor/ceil choices for calibrated Conv2d weights while keeping per-output-channel
+weight scale/zero-point and all activation qparams fixed. It uses the same
+train/selection/acceptance split and E:internal-full end-to-end guards as block
+reconstruction.
 
 Replay an accepted activation-reconstruction report before weight rounding:
 
@@ -609,3 +610,22 @@ python -m examples.hand_detector.analyze adaround \
 The activation report is optional. When omitted, AdaRound starts from the global
 percentile-calibrated W8A8 model. Only Conv2d rounding decisions are optimized;
 weight qparams, PReLU slopes, biases, and activation qparams remain fixed.
+
+### AdaRound Circle export
+
+The AdaRound CLI can export the selected model in the same process so accepted
+hard-rounded weights and replayed activation qparams are not lost. Circle export
+always enables every fake-quant site, including graph outputs, and therefore uses
+the `D:full` deployment profile. The numerical AdaRound table continues to report
+`E:internal-full`, which excludes graph-output fake quantization for diagnostics.
+
+Add `--export-circle` to the analysis command above to select the output path:
+
+```text
+--export-circle examples/hand_detector/exported/hand_detector_uint8.circle
+```
+
+Unless verification is skipped, export validates UINT8/INT16 graph I/O, per-channel
+Conv2d weights, quantized biases, the absence of `DEQUANTIZE`, and the optimized NHWC
+layout. A sidecar manifest records both E and D evaluation metrics, accepted AdaRound
+windows, the artifact SHA-256, and verification summaries.

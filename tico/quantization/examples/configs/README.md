@@ -483,6 +483,36 @@ pipeline:
     enabled: true
 ```
 
+### GPTQ SMSE sensitivity
+
+When GPTQ uses sensitivity-aware MSE, set `pipeline.<index>.mse: smse` and
+configure sensitivity under that GPTQ stage:
+
+```yaml
+pipeline:
+  - name: gptq
+    enabled: true
+    mse: smse
+    sensitivity:
+      mode: compute
+      path: null
+```
+
+Omitting `sensitivity` or its `mode` selects `compute`. Mode names are
+case-insensitive.
+
+| Mode | Behavior | `path` |
+|---|---|---|
+| `compute` | Compute sensitivity for the current run only. | Must be omitted or `null`. |
+| `save` | Compute sensitivity, use it for this run, and save it, replacing an existing file. | Required, non-empty path. |
+| `load` | Load sensitivity for this run; a missing file raises `FileNotFoundError`. | Required, non-empty path. |
+| `cache` | Load if the file exists; otherwise compute, use, and save sensitivity. | Required, non-empty path. |
+
+Saving creates missing parent directories. Loaded files must contain a
+dictionary of sensitivity tensors. In `llama_quantize.yaml` and
+`qwen3_vl_quantize.yaml`, GPTQ is `pipeline.2`; use that index for CLI overrides.
+See the [SMSE CLI example](../README.md#gptq-smse-sensitivity) for a cache run.
+
 ### GPTQ-to-PTQ weight qparam reuse
 
 When GPTQ runs before PTQ, it updates the model weights and attaches the
@@ -725,14 +755,9 @@ python -m tico.quantization.examples.evaluate \
 
 ## `evaluation.llava_bench` for judge-based LLaVA-Bench scoring
 
-`qwen3_vl_eval_suite.yaml` uses the standard example entry point:
-
-```bash
-python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml
-```
-
-It uses this schema under `evaluation`:
+The Qwen3-VL evaluation preset uses this schema under `evaluation`. For the
+generation and judging commands, see the
+[LLaVA-Bench CLI workflow](../README.md#llava-bench-judge-evaluation).
 
 ```yaml
 evaluation:
@@ -804,56 +829,45 @@ evaluation:
     dataset: MMMU/MMMU_Pro
     subjects: [vision]
     n_shots: 0
+    n_samples: 1000
     prompt_mode: strict_single_letter
     max_new_tokens: 16
     input_max_seq_len: null
     output_jsonl: null
     temperature: 0.0
+    verbose: false
 ```
 
-Rules:
+| Field under `evaluation.mmmu` | Configuration contract |
+|---|---|
+| `enabled` | Enables MMMU under normal target selection; an explicit `selected_tasks` list controls selection instead. |
+| `dataset` | Required explicitly: `MMMU/MMMU_Pro`. The original mixed `MMMU/MMMU` benchmark is unsupported. |
+| `subjects` | MMMU-Pro configurations: `vision`, `standard (4 options)`, and `standard (10 options)`. |
+| `n_shots` | Few-shot count for the standard configurations; the image-only `vision` path ignores shots. The recipe default is 5; the vision presets set 0. |
+| `n_samples` | Sample limit per configuration; the recipe default `-1` evaluates all samples. |
+| `prompt_mode` | Vision only: `strict_single_letter` (default), `official_direct`, or `official_cot`. |
+| `max_new_tokens` | Positive integer; explicit values override mode defaults. Omitted/`null` selects 16 for strict vision and standard configurations, 256 for direct vision; CoT requires an explicit value. |
+| `input_max_seq_len` | Optional positive, fixed input cap including text and image tokens. Omitted/`null` uses automatic budgeting. |
+| `output_jsonl` | Optional new diagnostic output file; omitted/`null` disables diagnostics. An existing file raises `FileExistsError`. |
+| `temperature` | Generation temperature; defaults to `0.0`. |
+| `verbose` | Overrides the evaluation's verbose setting when supplied. |
 
-- `strict_single_letter` is the default MMMU-Pro vision protocol; its default
-  budget is 16 tokens. `official_direct` (default 256 tokens) and
-  `official_cot` (explicit `max_new_tokens` required) stay available as
-  explicit experiment options. The per-mode defaults are defined once in the
-  evaluator, not in the adapters or presets.
-- An explicit `max_new_tokens` always wins. Switching a preset that states
-  `max_new_tokens: 16` to `prompt_mode: official_direct` keeps 16 tokens; set
-  `max_new_tokens` to `256` or `null` as well when the mode default is wanted.
-- The strict prompt's allowed range follows the sample's actual option count
-  (ten options reproduce the historical `A to J` text; other counts differ from
-  older TICO versions). Multiple-choice samples with 1-26 options and exactly
-  one valid gold label are supported; others fail before generation with the
-  sample ID. Open-ended scoring is not supported and has no legacy fallback.
-- Supported evaluation configurations are `MMMU/MMMU_Pro` / `vision`,
-  `standard (4 options)` and `standard (10 options)`. `MMMU/MMMU` is rejected
-  before loading data, creating a log or generating; Qwen3-VL/Gemma4 recipe
-  preflight rejects a selected mixed-dataset request before model loading.
-  No questions are silently filtered and no benchmark is substituted.
-- The existing vision presets need no changes. An unselected/disabled MMMU
-  target does not block LLaVA-Bench or other evaluation targets. Free-form
-  answer evaluation remains in the separate LLaVA-Bench path.
-- New logs use schema version 2 without `open_parser_version`; evaluated rows
-  always use `scoring_policy: multiple_choice`. Old result files are unchanged.
-- Multiple-choice answer parsing uses parser version `tico-mmmu-v4`. Compare
-  FP and quantized models only under the same `prompt_mode`, `max_new_tokens`
-  and parser version.
-- Using an official prompt string does not reproduce the official benchmark
-  protocol, and the strict default is not a claim that it is optimal for every
-  model.
+An explicit budget in a preset still wins when overriding `prompt_mode`; set
+`max_new_tokens` as well, or use `null` to request the mode default. The total
+input-plus-output capacity comes from `evaluation.max_seq_len`.
 
-See the [MMMU evaluation guide](../../recipes/evaluation/MMMU.md) for the parser
-grammar, the diagnostic JSONL contract and fixed-input comparisons.
+The [MMMU protocol guide](../../recipes/evaluation/MMMU.md) owns supported-scope
+validation, prompt migration, versioned answer parsing, and the diagnostic JSONL
+contract. Its [budgeting rules](../../recipes/evaluation/MMMU.md#configuration)
+and [fixed-input comparison](../../recipes/evaluation/MMMU.md#fixed-input-output-budget-comparison)
+explain how these fields affect comparable FP/Quant runs.
 
 ## `export`
 
-`preserve_embedding_quantization` defaults to `false`. Set it to `true` to preserve
-explicit quantization boundaries in supported Llama, Qwen3-VL and Gemma4 embedding
-export paths. Omission and explicit `false` retain the existing embedding export
-policy. The export CLI also accepts `--preserve-embedding-quantization`. This
-compile policy does not change calibration, activation dtype or runtime settings;
-see [CPU embedding contracts](../../../../docs/cpu_token_embedding.md).
+`preserve_embedding_quantization` is a boolean and defaults to `false`; the CLI
+equivalent is `--preserve-embedding-quantization`. See
+[CPU embedding contracts](../../../../docs/cpu_token_embedding.md) for supported
+paths and the exact export policy.
 
 ```yaml
 export:

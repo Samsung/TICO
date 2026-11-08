@@ -48,18 +48,8 @@ repreparing and recalibrating the original float model. Frozen state-dict loads
 restore wrapper mode and capability readiness without another freeze.
 
 Constants generated for a static export profile have separate local observers
-finalized through the common validator. Gemma4 pooler profiles own independent
-small observers: activation sites install exact source frozen snapshots, and the
-generated pooling matrix derives its own grid. Source observers and calibration
-reservoirs are not copied or shared with another quantization owner.
-
-All pooler observer execution policies are captured when constructing the profile.
-In particular, generating a new matrix preserves the source's enabled/disabled
-fake-quant policy without reusing another matrix's grid or lock. Rebuild a profile
-to capture subsequent source-policy changes. Capability and captured-mode guards
-continue to check the live source owner. Constructing or exporting a profile must
-not change source snapshots; prepared vision models remain valid for refreeze and
-checkpointing with equivalent export-profile topology.
+finalized through the common validator. Model-specific ownership rules belong
+with the artifact contract; see [Gemma4 static vision profiles](gemma4_artifacts.md#static-vision-profile-ownership).
 
 For LLaMA, Qwen3-VL, and Gemma4, `export.max_seq_len` owns static text capacity.
 It defaults independently to `min(2048, model context)` and never reads
@@ -164,7 +154,13 @@ For example, `grid_thw: [1, 54, 72]` produces
 `vision_prefill_t1_h54_w72.q.circle`. The vision profile is baked into the
 vision, multimodal-embedding, and DeepStack graph shapes. The vision NPU graph
 accepts only `pixel_values`; `image_grid_thw` remains a CPU-runtime value used
-to select the matching profile-specific artifacts.
+to select the matching profile-specific artifacts. The fixed
+`model_args.vision` settings must match the wrapped/quantized checkpoint.
+
+`token_embedding` has a dynamic sequence dimension and is shared by prefill
+and decode. The runtime owns mRoPE lookup, additive attention masks, and KV
+storage/update, and passes the required tensors to the decoder graphs. Exporting
+with `--source model` produces the same artifact set with `.f32.circle` tags.
 
 The output directory should come from `export.output_dir`.
 
@@ -237,107 +233,23 @@ A file-by-file description of a complete Gemma4 E2B quantized export is kept in
 
 ### Gemma4 external-embedding text logits
 
-`Gemma4TextLogitsPrefillExportAdapter` composes the existing static prefill
-adapters for every text decoder layer, the final norm, LM head and the original
-top-level logit softcapping. It accepts host-prepared `inputs_embeds`, optional
-projected `per_layer_inputs`, and mask/RoPE dictionaries, and returns all token
-logits. Token lookup, vision/fusion and PLE lookup/projection remain separate
-host or staged operations. Shared-KV models use the existing per-layer staged
-export rather than this composite adapter.
-
-The adapter requires the actual external-embedding and cache paths to have been
-calibrated before conversion. Its live capability/mode guards preserve frozen
-source state; constructing or exporting it does not collect statistics. The two
-Gemma4 top-level wrapper smoke cases use this text-logits scope, including the
-conditional model's text-only route. They do not claim to export its vision
-pipeline in the same artifact.
+The composite text-logits adapter consumes external embeddings and keeps
+vision, fusion, and PLE preparation separate. See the
+[external-embedding contract](gemma4_artifacts.md#external-embedding-text-logits)
+for its inputs, calibration requirements, and shared-KV limitation.
 
 ### Gemma4 Per-Layer Embedding (PLE) artifacts
 
-When the text config sets `hidden_size_per_layer_input > 0`, the Gemma4
-`circle_per_layer` export adds three PLE stages alongside the existing
-`token_embedding`, `multimodal_fusion_*`, decoder-layer, and `lm_head` graphs:
-
-```text
-ple_embedding.<tag>.circle            # shared CPU lookup, dynamic 1 <= S <= max_seq_len
-ple_embedding.<tag>.pt                # ...or the host table selected by the recipe's auto policy
-ple_projection_prefill.<tag>.circle   # NPU projection/combine, S = max_seq_len
-ple_projection_decode.<tag>.circle    # NPU projection/combine, S = 1
-ple_pipeline.json                     # chosen format, shapes, and observer boundaries
-```
-
-- `ple_embedding` takes `input_ids` `[1, S]` (int64) and returns
-  `per_layer_token_inputs` `[1, S, num_hidden_layers, hidden_size_per_layer_input]`.
-  It follows the same dynamic-sequence contract as `token_embedding`
-  (`make_token_embedding_dynamic_shapes`) and is the only artifact that
-  contains the large `embed_tokens_per_layer` table. Prefill runs it with
-  `S = max_seq_len`, decode with `S = 1`.
-- `export.ple_embedding_format` selects the lookup artifact: `auto` (default)
-  retains the recipe's 2 GiB estimated-size threshold and writes
-  `ple_embedding.<tag>.pt` at or above that threshold; `circle` and `pt`
-  force one format. The E2B table (262144 x 35 x 256 elements) is 9.4 GB in
-  float32 and 2.35 GB at 8-bit weights, so `auto` selects `.pt` for both
-  `f32` and `q` tags. This format policy is separate from the serializer's
-  appended-payload support: explicitly selecting `circle` can write larger
-  tables through the shared serializer. See
-  [recipe format policies](../../../../docs/large_circle_export.md#recipe-format-policies).
-- The `.pt` artifact stores the complete stage contract: the float table (or
-  the integer table with its per-row weight qparams), `embed_scale`, the packed
-  geometry, and the frozen `embedding`, `embed_scale`, `act_out`, and
-  `per_layer_token_inputs` observers. `Gemma4PLEEmbeddingHostTable.from_artifact`
-  replays the stage on the host bit-exactly against the export adapter.
-- `ple_projection_*` take `inputs_embeds` `[1, S, hidden_size]` (the
-  `mm_fusion` output for prefill, the token embedding for decode) and
-  `per_layer_token_inputs`, and return packed `per_layer_inputs`
-  `[1, S, num_hidden_layers, hidden_size_per_layer_input]`. The runtime feeds
-  decoder layer `i` the slice `per_layer_inputs[:, :, i, :]`.
-- Observer ownership: `ple_embedding` output and `ple_projection_*` input use
-  the text-model `per_layer_token_inputs` observer, the normalized projection
-  uses `per_layer_projection`, and the packed output plus every decoder-layer
-  `per_layer_input` boundary use `per_layer_inputs`.
-
-With `export.prefill_decode: false` the exporter writes only the unsuffixed
-prefill-shaped `ple_projection.<tag>.circle`. Models without PLE emit no PLE
-artifacts.
+Gemma4 models with PLE export a token lookup plus projection/combine stages.
+The [PLE artifact contract](gemma4_artifacts.md#per-layer-embedding-ple-contract)
+owns the format policy, tensor shapes, frozen observer boundaries, and the
+prefill-only variant.
 
 ### Gemma4 split vision artifacts
 
-Gemma4 keeps the existing `vision_prefill.<tag>.circle` artifact by default.
-Configure `export.vision.granularity` to control the vision export layout:
-
-```yaml
-export:
-  artifacts:
-    - circle_per_layer
-  vision:
-    granularity: both       # monolithic | layer | both
-```
-
-`monolithic` writes only the existing whole-tower graph. `layer` writes the
-split pipeline, and `both` writes both forms so numerical or compiler results
-can be compared. Every vision encoder layer is emitted as one Circle artifact.
-
-The split pipeline is emitted in this order:
-
-```text
-vision_patch_embedder.<tag>.circle
-vision_encoder_layer_00.<tag>.circle
-...
-vision_pooler.<tag>.circle
-vision_post_projection.<tag>.circle
-```
-
-The exporter also writes:
-
-- `vision_context.pt`, containing the shared raw attention mask and RoPE tensors;
-- `vision_pipeline.json`, containing stage order, tensor shapes,
-  layer indices, and boundary observer/qparam contracts;
-- `vision_profile.json`, containing the existing static geometry contract.
-
-The attention mask and RoPE tensors are runtime inputs of every encoder Circle.
-They are saved once instead of being embedded repeatedly in every layer file.
-Producer and consumer stages use the same frozen observer at each split boundary
-so the generated quantized artifacts are directly chainable.
+`export.vision.granularity` selects monolithic, per-layer, or both vision forms.
+See the [vision artifact contract](gemma4_artifacts.md#circle_layers-vision-pipeline)
+for the stage files, runtime context, manifest, and profile ownership rules.
 
 ## Function shape
 

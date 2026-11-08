@@ -178,22 +178,10 @@ decides **how** to evaluate a task.
 all model adapters and dataset preflight. Both use the same selector validation
 and diagnostics.
 
-`evaluation.selected_tasks` is either:
-
-- absent or `null`, which preserves each adapter's existing enabled behavior;
-- a list of canonical top-level target names, which becomes an exclusive
-  allow-list;
-- an empty list, which intentionally runs no evaluation targets.
-
-The `evaluate.py --tasks` option populates this field. It selects evaluators,
-not their benchmark-specific details. For example:
-
-```text
-lm_eval -> evaluation.lm_eval_tasks
-vqa     -> evaluation.vlm_tasks
-mmmu    -> evaluation.mmmu.*
-ppl     -> evaluation.perplexity.* or evaluation.ppl.*
-```
+The [target-selection configuration reference](../../examples/configs/README.md#selecting-top-level-evaluation-targets)
+owns `evaluation.selected_tasks` values, precedence, and supported target names.
+The `evaluate.py --tasks` option populates this field; adapters resolve each
+selected target's benchmark details from its existing configuration section.
 
 Each adapter declares `evaluation_targets`. A selected name that is not in that
 registry must fail before model loading. Do not add aliases for config key names

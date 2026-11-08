@@ -2,23 +2,28 @@
 
 [Quantization overview](../README.md) · [Documentation index](../../../docs/README.md)
 
+This guide owns wrapper behavior, observer state, calibration, freezing, and
+checkpoint contracts. For a first PTQ run, start with
+[Simple API usage](#4-simple-api-usage); the shared public API and quantizer
+registration rules live in the [quantization overview](../README.md).
+
 ## Contents
 
 - [Design philosophy](#1-design-philosophy)
 - [Quantization flow](#2-quantization-flow)
 - [Wrapper design](#3-wrapper-design)
+- [LLaMA attention and cache](#llama-attention-and-cache)
+- [Gemma4 grouped attention boundaries](#gemma4-grouped-attention-boundaries)
 - [Simple API usage](#4-simple-api-usage)
 - [Extensibility](#5-extensibility)
-- [Summary](#6-summary)
 - [Related guides](#related-guides)
 
 ## 1. Design Philosophy
 
-**WrapQ** is a module for wrapper-based post-training quantization. The module is designed to provide 
- a **lightweight, composable, and algorithm-agnostic quantization framework** that sits between model
- definition and export. Rather than enforcing a monolithic quantization flow, it focuses on
-**fine-grained control**, **explicit calibration**, and **pluggable wrappers** that allow different model 
-families (e.g., `nn`, `LLaMA`) to be quantized with consistent semantics.
+**WrapQ** supplies reusable wrappers and observers between model definition and
+export. Configuration selects quantization sites and policies; calibration
+collects statistics; freezing validates and commits the state used by quantized
+execution.
 
 This design assumes the user understands their model’s computational structure and is willing to decide:
 
@@ -26,32 +31,23 @@ This design assumes the user understands their model’s computational structure
 - _How to calibrate_ (data, order, and statistics)
 - _When to finalize_ (convert/export timing)
 
-The guiding principles are:
-
-1. **Transparency** — Quantization logic is explicit and inspectable.
-2. **Orthogonality** — Quantization config, calibration, and algorithm are independent layers.
-3. **Composability** — Wrappers can be reused or mixed with different algorithms (e.g., GPTQ).
-4. **Determinism** — Once calibrated, all quantization parameters are fixed and reproducible.
-
 ---
 
 ## 2. Quantization Flow
 
 A typical workflow consists of three conceptual stages:
 
-1. **Prepare**
-
-Modules are replaced with quantized wrappers that simulate quantization behavior and collect calibration statistics.
-
-2. **Calibrate**
-
-Run representative data through the model to estimate dynamic ranges for activations.
+1. **Prepare:** replace supported modules with wrappers that simulate quantization
+   behavior and collect calibration statistics.
+2. **Calibrate:** run representative data through the model to estimate activation
+   ranges.
+3. **Convert:** validate and freeze the collected state for quantized execution.
 
 `EMAObserver` owns independent min/max buffers, including for one-dimensional
 per-channel inputs and parameters. Mutating an input after collection does not
 change saved statistics; resetting the observer does not modify the observed tensor.
 
-3. **Convert**
+### Freezing and checkpoints
 
 The common lifecycle coordinator enumerates active sites once through arbitrary
 module containers and aliases. Observers derive validated candidates without
@@ -84,6 +80,8 @@ reject with migration guidance. Exporters read `require_frozen()` snapshots;
 profile-generated constants use separate local observers. They never recalibrate
 source-model sites.
 
+### Conditional capabilities
+
 Conditional subtree declarations identify owner-relative registration paths, for
 example `{"token_embeddings": ("embed_tokens",)}` or
 `{"vision": ("stages.0.vision",)}`. A gate applies only when that path's registration
@@ -103,12 +101,7 @@ with a captured export mode must be rebuilt if the owner changes mode; an explic
 float mode cannot bypass a quantized owner's capability or producer observer.
 Plain floating stages require an explicit `Mode.NO_QUANT` contract.
 
-`QuantConvTranspose2d` preserves the native optional `output_size` argument in
-floating, calibration, and quantized modes. The wrapped ConvTranspose2d resolves
-spatial or full output sizes, including unbatched inputs, and rejects unreachable
-targets. An omitted target retains the module's configured `output_padding`.
-Static targets are resolved before Circle export and preserve the requested
-output shape in the artifact.
+### Imported qparams and execution
 
 An empty imported per-channel tensor can establish rank and channel extent even
 though it contributes no numerical statistics. Locked grids are validated against
@@ -162,6 +155,15 @@ same calibration and conversion routines while maintaining per-family specializa
 Each wrapper is registered automatically and discovered dynamically through the PTQ registry, 
 so extending PTQ for a new model family simply requires subclassing and registration.
 
+### Native module semantics and dispatch
+
+`QuantConvTranspose2d` preserves the native optional `output_size` argument in
+floating, calibration, and quantized modes. The wrapped ConvTranspose2d resolves
+spatial or full output sizes, including unbatched inputs, and rejects unreachable
+targets. An omitted target retains the module's configured `output_padding`.
+Static targets are resolved before Circle export and preserve the requested
+output shape in the artifact.
+
 The registered `nn.Conv3d` wrapper decomposes convolution into temporal slices,
 Conv2d operations and accumulation while preserving `padding_mode` (`zeros`,
 `reflect`, `replicate`, or `circular`), including asymmetric `padding="same"`.
@@ -198,40 +200,7 @@ policy; do not reinterpret old head-local row grids as grouped grids. Frozen
 scalar affine grids remain pointwise compatible. Eager support for a policy
 alone does not establish its Circle or target-backend support.
 
----
-
-## 4. Simple API Usage
-
-WrapQ provides a unified entry point for quantizing any model:
-
-```python
-from tico.quantization import prepare, convert
-from tico.quantization.config import PTQConfig
-
-# Step 1: Prepare the model
-model = prepare(model, PTQConfig())
-
-# Step 2: Calibrate
-for batch in calibration_dataloader:
-    model(batch)
-
-# Step 3: Convert to quantized form
-quantized_model = convert(model)
-```
-
-This minimal interface abstracts away the details of module wrapping, registry lookup, 
- and quantizer instantiation. Advanced users can override the configuration to control 
-dtype, scheme, or per-module granularity.
-
-**Ready-to-run examples** for PTQ and wrapper usage can be found in the [examples/](./examples/) folder,
-including quantization flows for nn.Linear, LLaMA MLPs, and full decoder layers.
-
-For output debugging, `utils.introspection.compare_outputs(..., full_tensor_diff=True)`
-returns signed float32 tensor differences at every depth, including tensors in lists,
-tuples, dictionaries, and object fields. The default returns tensor difference
-statistics. `compare_side_by_side()` uses full differences for `interesting_modules`.
-See the [side-by-side comparison guide](../recipes/debug/README.md#multi-batch-side-by-side-comparison)
-for the CLI workflow.
+### LLaMA attention and cache
 
 LLaMA attention, decoder-layer, and model wrappers interpret boolean and integer
 (`uint8`, `int8`, `int16`, `int32`, `int64`) attention masks as keep masks: zero
@@ -262,28 +231,46 @@ enabled. Obsolete past statistics are never reused as storage or compute qparams
 
 ---
 
-## 5. Extensibility
+## 4. Simple API Usage
 
-WrapQ acts as the shared quantization backend for different algorithms.
+Use the public API with `PTQConfig` to quantize supported modules:
 
-Through shared base interfaces and quantizer abstractions, users can:
+```python
+from tico.quantization import prepare, convert
+from tico.quantization.config import PTQConfig
 
-- Compose multiple algorithms for hybrid quantization.
-- Reuse calibration artifacts between different methods.
-- Introduce custom quantizers by extending a single registry entry.
+# Step 1: Prepare the model
+model = prepare(model, PTQConfig())
 
-This modular structure ensures that adding a new quantization algorithm or wrapper 
- never breaks existing flows.
+# Step 2: Calibrate
+for batch in calibration_dataloader:
+    model(batch)
+
+# Step 3: Convert to quantized form
+quantized_model = convert(model)
+```
+
+The [public API guide](../README.md#overview) defines dispatch, `inplace` behavior,
+and conversion-handle ownership. PTQ configuration selects dtype, scheme, and
+per-module granularity.
+
+**Ready-to-run examples** for PTQ and wrapper usage can be found in the [examples/](./examples/) folder,
+including quantization flows for nn.Linear, LLaMA MLPs, and full decoder layers.
+
+See the [nested-output comparison API](../recipes/debug/README.md#comparing-nested-outputs)
+and [side-by-side CLI workflow](../recipes/debug/README.md#multi-batch-side-by-side-comparison)
+for output debugging.
 
 ---
 
-## 6. Summary
+## 5. Extensibility
 
-WrapQ offers a balance between **explicit control** and **simple APIs**. It is meant for 
- developers who want deterministic, reproducible quantization without opaque automation.
-By decoupling configuration, calibration, and algorithm logic, it allows seamless 
-integration across diverse models and backends while maintaining transparency and 
-reliability in quantized inference.
+New wrappers follow the [wrapper design](#3-wrapper-design) and
+[freezing/checkpoint contracts](#freezing-and-checkpoints) in this guide.
+For a new quantizer, follow the
+[algorithm contribution guide](../README.md#contributing-adding-a-new-algorithm).
+For composing algorithms in a pipeline, use the
+[recipe stage guide](../recipes/stages/README.md).
 
 ## Related guides
 
