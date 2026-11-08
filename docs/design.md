@@ -273,6 +273,11 @@ not automatically schedule it. It must be inserted into this explicit pipeline.
 needed before either reusing it for equal shapes or expanding it to the destination
 shape. The cast does not change other users of the source tensor.
 
+`RemoveRedundantReshapePattern1` removes a leading singleton around a rank-three
+permute and multiplication only when every unchanged tensor multiplier has rank at
+most three. A rank-four multiplier can restore that axis through broadcasting, so
+the original final reshape must remain to preserve the graph's output rank.
+
 `LowerPow2ToMul` squares in the original power's exported result dtype. If scalar
 promotion changes the base dtype, it casts before multiplying: integer `x.pow(2.0)`
 and boolean `x.pow(2)` retain their floating and integer result types respectively.
