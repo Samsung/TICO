@@ -22,16 +22,22 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from itertools import product
 from pathlib import Path
 
 
 class CcexCoverageTest(unittest.TestCase):
     def _run_coverage(
-        self, mode: str, *, test_fails: bool = False, report_status: int = 0
+        self,
+        mode: str,
+        *,
+        project_name: str,
+        test_fails: bool = False,
+        report_status: int = 0,
     ) -> subprocess.CompletedProcess[str]:
         project_root = Path(__file__).resolve().parents[3]
         with tempfile.TemporaryDirectory() as temp_dir:
-            fixture_root = Path(temp_dir)
+            fixture_root = Path(temp_dir) / project_name
             for relative_path in (
                 "ccex",
                 "infra/command/coverage",
@@ -118,27 +124,45 @@ class CcexCoverageTest(unittest.TestCase):
             return completed
 
     def test_successful_tests_and_reports_return_zero(self) -> None:
-        for mode in ("terminal", "txt", "xml"):
-            with self.subTest(mode=mode):
-                completed = self._run_coverage(mode)
+        for mode, project_name in product(
+            ("terminal", "txt", "xml"),
+            ("project", "project with spaces", "project [draft]"),
+        ):
+            with self.subTest(mode=mode, project_name=project_name):
+                completed = self._run_coverage(mode, project_name=project_name)
                 self.assertEqual(completed.returncode, 0)
 
     def test_failed_tests_keep_reports_and_return_test_status(self) -> None:
-        for mode in ("terminal", "txt", "xml"):
-            with self.subTest(mode=mode):
-                completed = self._run_coverage(mode, test_fails=True)
+        for mode, project_name in product(
+            ("terminal", "txt", "xml"),
+            ("project", "project with spaces", "project [draft]"),
+        ):
+            with self.subTest(mode=mode, project_name=project_name):
+                completed = self._run_coverage(
+                    mode, project_name=project_name, test_fails=True
+                )
                 self.assertEqual(completed.returncode, 1)
 
     def test_failed_report_returns_report_status(self) -> None:
-        for mode in ("terminal", "txt", "xml"):
-            with self.subTest(mode=mode):
-                completed = self._run_coverage(mode, report_status=17)
+        for mode, project_name in product(
+            ("terminal", "txt", "xml"),
+            ("project", "project with spaces", "project [draft]"),
+        ):
+            with self.subTest(mode=mode, project_name=project_name):
+                completed = self._run_coverage(
+                    mode, project_name=project_name, report_status=17
+                )
                 self.assertEqual(completed.returncode, 17)
 
     def test_failed_test_status_takes_precedence_over_report_failure(self) -> None:
-        for mode in ("terminal", "txt", "xml"):
-            with self.subTest(mode=mode):
-                completed = self._run_coverage(mode, test_fails=True, report_status=17)
+        for mode, project_name in product(
+            ("terminal", "txt", "xml"),
+            ("project", "project with spaces", "project [draft]"),
+        ):
+            with self.subTest(mode=mode, project_name=project_name):
+                completed = self._run_coverage(
+                    mode, project_name=project_name, test_fails=True, report_status=17
+                )
                 self.assertEqual(completed.returncode, 1)
 
 
