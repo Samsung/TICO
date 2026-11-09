@@ -101,8 +101,10 @@ variant never changes the default.
 
 `extensions` is a top-level list of `package.module` or
 `package.module:callable` entries. Each entry is imported (and the callable
-invoked without arguments) by `quantize`, `evaluate`, `export`, and
-`inspector` before adapter resolution, model loading, and checkpoint loading.
+invoked without arguments) by `quantize`, `evaluate`, `export`,
+`compare_side_by_side`, and `inspector --mode trace` before adapter
+resolution, model loading, and checkpoint loading. Other inspector
+smoke/static-runtime modes do not load extensions or resolve a recipe adapter.
 Extensions register additional adapters, quantizers, or wrappers through the
 public registration APIs.
 
@@ -116,8 +118,8 @@ Rules:
 - Loading an extension executes trusted Python code installed in the current
   environment. It is an explicit opt-in per config and not a sandbox.
 - A missing module or callable fails the run; nothing is skipped silently.
-- Every process that consumes the config loads the entries again. An import
-  performed by another process is not activation.
+- Each invocation of these entrypoints loads the entries in its own process.
+  An import performed by another process is not activation.
 - Repeated loading must be safe; registration APIs treat re-registering the
   same object as a no-op and reject conflicting registrations.
 
@@ -512,6 +514,28 @@ Saving creates missing parent directories. Loaded files must contain a
 dictionary of sensitivity tensors. In `llama_quantize.yaml` and
 `qwen3_vl_quantize.yaml`, GPTQ is `pipeline.2`; use that index for CLI overrides.
 See the [SMSE CLI example](../README.md#gptq-smse-sensitivity) for a cache run.
+
+### Qwen3-VL GPTQv2 and FP input caching
+
+For the built-in Qwen3-VL adapter, the default GPTQ stage variant selects
+`Qwen3VLGPTQConfig`. To enable GPTQv2 with a disk cache, add these fields to the
+existing GPTQ stage while retaining its weight policies and subsequent PTQ stage:
+
+```yaml
+# Inside the existing pipeline entry with name: gptq
+variant: default
+gptq_v2: true
+fp_inputs_cache_path: ./out/qwen3_vl/fp_inputs_cache
+```
+
+`fp_inputs_cache_path` names a directory; its default `null` collects FP inputs
+without a disk cache. The [Qwen3-VL GPTQv2 guide](../../algorithm/qwen3_vl_gptq/README.md#gptqv2-and-fp-input-caching)
+owns memory behavior, cache publication, and reuse validation.
+
+These options apply to the model-specific default variant. `variant: universal`
+selects `UniversalGPTQConfig` instead; use its
+[core and native-input settings](../../algorithm/gptq/README.md#choosing-the-gptq-core-and-precision)
+to configure GPTQv2 through Universal GPTQ.
 
 ### GPTQ-to-PTQ weight qparam reuse
 

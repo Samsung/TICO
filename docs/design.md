@@ -610,8 +610,8 @@ prepare(model, quant_config, args, kwargs)
 
 `prepare()` chooses a quantizer through the quantizer registry and stores it on the
 prepared model. `convert()` retrieves that quantizer; it does not accept the
-configuration again. GPTQ currently requires in-place conversion because deep copying
-would break its calibration catcher restoration.
+configuration again. The classic `GPTQQuantizer` requires in-place conversion
+because deep copying would break its calibration catcher restoration.
 
 ### 10.2 Conversion-time quantized-graph legalization
 

@@ -118,6 +118,8 @@ raises `CircleIOError` if a stream reports no progress or a write fails. File pa
 use atomic replacement by default; a failed atomic write preserves the existing file.
 
 ```python
+from tico.circle.operations import extract_by_operator_indices
+
 with CircleDocument.load_mapped("model.circle") as mapped:
     result = extract_by_operator_indices(mapped, range(20, 65))
 result.document.save("attention.circle")  # Independent of the released mapping.
@@ -766,9 +768,11 @@ package. The selection never changes based on which packages are installed.
 
 ### Supported operators
 
-FLOAT32 activations are supported for every operator below; integer dtypes are
-supported where TFLite defines integer semantics and the operator is not a quantized
-arithmetic operator (see the next section).
+Supported dtypes depend on the operator and operand. Floating-point arithmetic
+and neural-network activations support FLOAT32. `LOGICAL_AND` and `LOGICAL_NOT`
+require BOOL inputs; index and shape operands use the integer types required by
+their kernels. Integer arithmetic support is kernel-specific and subject to the
+quantized execution modes described in the next section.
 
 Integer `DIV` preserves the full input precision, including INT64 and UINT64, and
 truncates valid quotients toward zero. Division by zero and signed minimum divided

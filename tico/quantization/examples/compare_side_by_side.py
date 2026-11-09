@@ -32,8 +32,7 @@ Usage:
 
 Example:
     python -m tico.quantization.examples.compare_side_by_side \
-        --config tico/quantization/examples/configs/llama_universal_gptq_quantize.yaml \
-        --set "pipeline.1.gptq.weight_bits=8"
+        --config tico/quantization/examples/configs/llama_universal_gptq_quantize.yaml
 
 The script requires:
     - A recipe YAML config with model, calibration, and pipeline settings

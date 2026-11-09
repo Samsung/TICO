@@ -102,6 +102,84 @@ receive more regularization than text layers. During factorization, auto mode ma
 retry a numerically unstable layer with higher damping up to
 `auto_percdamp_retry_max`; it does not silently fall back to a pseudo-inverse.
 
+### GPTQv2 and FP input caching
+
+`Qwen3VLGPTQConfig(gptq_v2=True)` enables input-error compensation in this
+stage-wise Qwen3-VL quantizer. During conversion it pairs inputs from the model
+being quantized with native inputs from the model state at entry to GPTQ. In a
+recipe, these settings belong to the Qwen3-VL GPTQ stage with `variant: default`.
+The [Universal GPTQ path](../gptq/README.md#universal-gptq) has its own factory and
+native-input controls.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `gptq_v2` | `False` | Collect or load native FP inputs for the GPTQv2 correction. |
+| `gptq_v2_alpha` | `0.25` | Strength of that correction; zero disables the correction. |
+| `normalize_H` | `True` | Use running normalized statistics; `False` accumulates sums. |
+| `hessian_dtype` | `torch.float32` | Storage/accumulation dtype for the Hessian and cross-term, and Hessian factorization dtype. |
+| `inp_dtype` | `torch.float32` | Dtype of input Gram and GPTQv2 cross-term products. |
+| `fp_inputs_cache_path` | `None` | Optional **directory** for native-input stage shards and `manifest.json`. Used with `gptq_v2=True`. |
+| `calibration_dataset_spec` | `None` | Optional provenance string checked when reusing the FP input cache. Recipes populate it from calibration/runtime settings. |
+
+Both precision fields accept only `torch.float32` or `torch.float64`; they do not
+change the model's weight dtype. See the
+[shared core description](../gptq/README.md#choosing-the-gptq-core-and-precision)
+for the numerical roles of these settings.
+
+For example, replace the configuration construction in the workflow below with:
+
+```python
+import torch
+
+from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
+
+config = Qwen3VLGPTQConfig(
+    weight_bits=4,
+    gptq_v2=True,
+    fp_inputs_cache_path="./out/qwen3_vl/fp_inputs_cache",
+    move_cache_to_cpu=True,
+    hessian_dtype=torch.float64,
+    inp_dtype=torch.float32,
+)
+config.validate()
+```
+
+The cache lifecycle is:
+
+- **No disk path:** conversion collects native inputs from an additional copy of
+  the model. No persistent FP input cache is written.
+- **Directory without a manifest:** conversion collects native inputs, deduplicates
+  shared inputs such as q/k/v, and writes stage shards as they become available.
+  It publishes the manifest atomically only after the enabled stages succeed.
+  A failed collection may leave shards, but does not publish a completed cache.
+- **Directory with a valid manifest:** conversion loads stage shards on demand
+  and avoids the additional model copy used for native-input collection. The
+  ordinary `prepare()` and calibration-input recording steps are still required;
+  use the same calibration batches and order.
+- **Existing invalid or incompatible cache:** an unreadable/incomplete manifest,
+  a fingerprint mismatch, or a missing/invalid requested shard raises an error.
+  Select a fresh directory or remove the stale cache explicitly before rerunning.
+  A single-file path is rejected.
+
+Use a dedicated directory: fresh collection removes leftover files in its
+`shards/` subdirectory, and publication removes unreferenced shards.
+
+The fingerprint includes the model identifier, a sampled weight-state signature
+captured **before this GPTQ run changes weights**, calibration provenance, and
+`cache_dtype`. Thus upstream transformations such as SpinQuant affect the model
+state used for reuse checks. Quantization settings such as `weight_bits` and
+`percdamp` are intentionally excluded, allowing sweeps over those settings with
+the same native inputs.
+
+These checks have limits: the weight signature samples parameter values, and the
+provenance is metadata rather than a hash of every calibration tensor. Python
+callers leaving `calibration_dataset_spec=None` do not get that provenance check;
+fingerprint fields missing on either side are skipped. Legacy manifests without
+a fingerprint load with a warning. Regenerate those caches to enable the current
+checks. See the [implementation](./quantizer.py) for the manifest and shard schema,
+and the [recipe configuration guide](../../examples/configs/README.md#pipeline)
+for YAML stage configuration.
+
 ### How to use Qwen3VLGPTQQuantizer
 
 ```python

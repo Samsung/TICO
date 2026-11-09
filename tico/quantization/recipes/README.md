@@ -205,9 +205,11 @@ Registry rules:
 Registration must happen in the process that runs the recipe. Configs opt in
 with a top-level `extensions` list of `package.module[:callable]` entries,
 which `load_recipe_extensions(cfg)` imports and invokes before adapter
-resolution in `quantize`, `evaluate`, `export`, and `inspector`. Loading runs
-trusted Python code from the environment; missing modules or callables raise
-instead of being skipped. See the
+resolution in `quantize`, `evaluate`, `export`, `compare_side_by_side`, and
+`inspector --mode trace`. The other inspector smoke/static-runtime modes do not
+load extensions or resolve a recipe adapter. Loading runs trusted Python code
+from the environment; missing modules or callables raise instead of being
+skipped by these entrypoints. See the
 [extension schema](../examples/configs/README.md#extensions-optional) for the config
 schema. Python callers can equivalently call the extension's activation
 function themselves before using the recipe APIs.

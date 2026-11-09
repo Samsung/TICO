@@ -131,8 +131,7 @@ calibration-input preparation, then calls the debug-owned `trace_parity()`:
 
 ```bash
 python -m tico.quantization.examples.compare_side_by_side \
-  --config tico/quantization/examples/configs/llama_universal_gptq_quantize.yaml \
-  --set "pipeline.1.gptq.weight_bits=8"
+  --config tico/quantization/examples/configs/llama_universal_gptq_quantize.yaml
 ```
 
 ### Comparing nested outputs

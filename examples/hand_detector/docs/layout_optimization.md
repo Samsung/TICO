@@ -10,7 +10,10 @@ the NHWC Circle input tensor.
 
 ## Circle optimization pipeline
 
-After serialization, the example runs this Circle-to-Circle pipeline:
+`tico.convert()` enables Circle O1 by default through
+`CompileConfigV1.circle_optimize=True`; O1 already includes
+`EliminateTransposeBoundedLayoutRegionPass`. After conversion, the hand-detector
+example applies this additional Circle-to-Circle pipeline:
 
 ```text
 FuseActivationFunctionPass
@@ -20,9 +23,11 @@ DeadCodeEliminationPass
 CompactIndicesPass
 ```
 
-The pass manager uses `CirclePassStrategy.RESTART`. A rewrite can expose a new
-inverse Transpose pair or dead object, and restart scheduling allows the earlier
-passes to run again until the complete sequence reaches a fixed point.
+The example's post-processing pass manager uses `CirclePassStrategy.RESTART`.
+A rewrite can expose a new inverse Transpose pair or dead object, and restart
+scheduling allows the earlier passes to run again until the complete sequence
+reaches a fixed point. The converter's O1 pipeline uses separate
+[complete-round scheduling](../../../tico/circle/README.md#rule-and-pipeline-scheduling).
 
 `EliminateTransposeBoundedLayoutRegionPass` finds connected Circle regions of
 supported layout-convertible operators. The detector's regions use:
@@ -139,7 +144,7 @@ The verifier checks:
 
 ## Use the Circle pass from the CLI
 
-The pass is opt-in and does not change the default `tico.convert` pipeline:
+To run the same pass explicitly on an existing Circle artifact:
 
 ```bash
 tico-circle optimize input.circle \
