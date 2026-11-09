@@ -15,7 +15,6 @@
 """Smoke tests migrated from the Qwen3-VL vision MLP quantization example."""
 
 import copy
-import os
 import unittest
 
 import torch
@@ -28,8 +27,6 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_mlp import (
     QuantQwen3VLVisionMLP,
 )
-
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 skip_msg = (
     "required transformers not installed — skipping Qwen3-VL vision MLP example tests"
@@ -72,9 +69,6 @@ def _make_tiny_qwen3vl_model():
     return Qwen3VLModel(cfg).eval()
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQwenVisionMLPExample(unittest.TestCase):
     """Exercise the example flow for one Qwen3-VL vision MLP module."""

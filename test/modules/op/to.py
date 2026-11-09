@@ -19,12 +19,12 @@ from test.modules.base import TestModuleBase
 from test.support import tag
 
 
-@tag.skip(reason="Not Support Operator")
+@tag.skip(
+    reason="Circle dtype mapping does not support this test's torch.float64 output "
+    "(tico/serialize/circle_mapping.py)"
+)
 class ToWithMemoryFormat(TestModuleBase):
-    """
-    TODO
-    Not supported operators: aten._to_copy.default
-    """
+    """Convert memory format and dtype to float64, unsupported by TICO mapping."""
 
     def __init__(self):
         super().__init__()

@@ -15,7 +15,6 @@
 """Smoke tests migrated from the Llama decoder-layer prefill quantization example."""
 
 import copy
-import os
 import unittest
 
 import torch
@@ -26,14 +25,9 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
-
 skip_msg = "required transformers not installed — skipping Llama decoder example tests"
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 @unittest.skipUnless(has_transformers_for("llama"), skip_msg)
 class TestLlamaDecoderLayerPrefillExample(unittest.TestCase):
     """Exercise the example flow for one full Llama decoder layer."""

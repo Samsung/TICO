@@ -15,7 +15,6 @@
 """Smoke tests migrated from the LayerNorm quantization example."""
 
 import copy
-import os
 import unittest
 
 import tico.quantization
@@ -26,12 +25,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
-
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 class TestNNLayerNormExample(unittest.TestCase):
     """Exercise the old LayerNorm PTQ example."""
 

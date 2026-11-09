@@ -46,7 +46,8 @@ class TwoLinear(torch.nn.Module):
 class EvaluateTest(unittest.TestCase):
     # This test needs triv24-toolchain package.
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "Requires TRIV24 compiler and simulator at /usr/share/one/backends/triv24/bin; use --include-internal",
     )
     def test_evaluate_simple_linear(self):
         q_m: Any = TwoLinear().eval()

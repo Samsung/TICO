@@ -15,7 +15,6 @@
 """Smoke tests for QuantGemma4ForConditionalGeneration wrapper."""
 
 import copy
-import os
 import unittest
 from unittest import mock
 
@@ -24,12 +23,8 @@ import torch
 from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
-    QuantGemma4ForConditionalGeneration,
-)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 
@@ -140,10 +135,6 @@ def _make_gemma4_for_conditional_generation():
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST,
-    "Internal smoke test — set RUN_INTERNAL_TESTS=1 to enable it.",
-)
 @unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
 class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
     """Exercise QuantGemma4ForConditionalGeneration wrapper parity and PTQ flow."""
@@ -176,6 +167,11 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
 
     def test_prepare_returns_correct_wrapper(self):
         """prepare() should return a PTQWrapper wrapping QuantGemma4ForConditionalGeneration."""
+
+        from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
+            QuantGemma4ForConditionalGeneration,
+        )
+
         qmodel = prepare(self.fp_model, self.qcfg)
         self.assertIsInstance(qmodel, PTQWrapper)
         self.assertIsInstance(qmodel.wrapped, QuantGemma4ForConditionalGeneration)
@@ -252,6 +248,11 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
 
     def test_prepare_convert_flow(self):
         """Full prepare → calibrate → convert flow should succeed."""
+
+        from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
+            QuantGemma4ForConditionalGeneration,
+        )
+
         qmodel = prepare(self.fp_model, self.qcfg)
         self.assertIsInstance(qmodel, PTQWrapper)
         self.assertIsInstance(qmodel.wrapped, QuantGemma4ForConditionalGeneration)
@@ -296,10 +297,6 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST,
-    "Internal smoke test — set RUN_INTERNAL_TESTS=1 to enable it.",
-)
 @unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
 class TestQuantGemma4ForConditionalGenerationGeneration(unittest.TestCase):
     """Exercise GenerationMixin support added to QuantGemma4ForConditionalGeneration."""
@@ -390,6 +387,11 @@ class TestQuantGemma4ConditionalGenerationContract(unittest.TestCase):
 
     def setUp(self):
         """Build a tiny floating-point model and its quantized wrapper."""
+
+        from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
+            QuantGemma4ForConditionalGeneration,
+        )
+
         torch.manual_seed(2026)
         self.fp_model = _make_gemma4_for_conditional_generation()
         self.wrapper = QuantGemma4ForConditionalGeneration(

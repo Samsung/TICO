@@ -189,6 +189,40 @@ selects the performance entry point instead of normal discovery. For example,
 `./ccex test -v -k add` combines verbose diagnostics with a focused test; setting
 `TICO_LOG=4` explicitly has the same effect (see [Log levels](#log-levels)).
 
+### Opt-in test requirements
+
+Small local CPU wrapper tests run in the default suite; their Transformers version
+or model-class availability guards still apply. `--include-internal` is reserved for
+external dependencies and costly CPU integration checks. It does not install their
+prerequisites. Prefer selecting one test rather than enabling every internal test:
+
+```bash
+# Downloads Maykeye/TinyLLama-v0 and Salesforce/wikitext (wikitext-2-raw-v1).
+# Requires the configured Transformers/datasets packages and Hugging Face access
+# or an explicitly prepared local cache.
+./ccex test --include-internal -k SmoothQuantTest.test_value
+
+# Local CPU integration: large calibration tensors and Hessians; allow extra
+# CPU time and RAM. This does not need a checkpoint or dataset download.
+./ccex test --include-internal -k GPTQTest.test_net_on_zero_inputs
+
+# Requires triv24-compile and triv24-ssinfer from the TRIV24 toolchain under
+# /usr/share/one/backends/triv24/bin (separate from the reference runtime).
+./ccex test --include-internal -k EvaluateTest.test_evaluate_simple_linear
+```
+
+The GPTQ `test_model` and introspection `TestSmoothQuantPTQDiff` checks use the same
+remote model and dataset as the SmoothQuant example above. Other retained GPTQ/FPIGPTQ
+CPU integration skips describe their calibration/Hessian costs in the test reason.
+Model-directory tests keep their separate [model selection](#model-tests) path.
+Local Gemma4 assistant integration requires `GEMMA4_ASSISTANT_PATH` (and
+`GEMMA4_TARGET_PATH` for verification); run
+`python3 -m unittest -v test.quantization.recipes.integration.test_gemma4_assistant_integration`
+with those checkpoint directories set. CUDA observer checks require a CUDA-enabled
+Torch build and a working GPU. The [large Circle tests](large_circle_export.md#tests)
+document their independent memory/disk and ONE opt-ins. External runtimes keep the
+explicit [runtime selection](#runtime-selection) requirements.
+
 ### Performance benchmarks
 
 `./ccex test -p` runs the configured conversion-time and serialized-size threshold
@@ -433,7 +467,9 @@ central policy module rather than duplicated in workflow YAML.
      central policy, including CPU Torch, matching TorchVision, TICO, and test
      dependencies.
    - Configures the analysis tools, checks package dependency consistency, records
-     installed versions, and runs lintrunner with `--take PYLINT,MYPY` without applying
+     installed versions, runs the Transformers/Pylint infrastructure regression tests
+     (`python3 -m unittest -v infra.style.tests.test_transformers_config_pylint`),
+     and runs lintrunner with `--take PYLINT,MYPY` without applying
      patches.
    - The existing **Check style** status (`check-style`) succeeds only when both
      formatting and static analysis succeed, preserving existing required-check settings.

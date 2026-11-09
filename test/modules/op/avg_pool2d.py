@@ -206,7 +206,11 @@ class AvgPoolWithNoPaddingNoCountIncludePad(TestModuleBase):
         return (torch.randn(1, 3, 56, 56),), {}
 
 
-@skip(reason="Not supported yet")
+@skip(
+    reason="AvgPool2d padding [1, 1] with count_include_pad=False is neither "
+    "VALID nor SAME and is unsupported by AvgPool2DVisitor "
+    "(tico/serialize/operators/op_avg_pool2d.py)"
+)
 class AvgPoolWithNoSamePaddingNoCountIncludePad(TestModuleBase):
     def __init__(self):
         super().__init__()

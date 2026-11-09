@@ -15,7 +15,6 @@
 """Smoke tests migrated from the Qwen3-VL text MLP quantization example."""
 
 import math
-import os
 import unittest
 
 import torch
@@ -30,14 +29,9 @@ from test.quantization.wrapq.wrappers.qwen_vl.text_mlp_fixture import (
     make_text_mlp_fixture,
 )
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
-
 skip_msg = "required transformers not installed — skipping Qwen3-VL text MLP tests"
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQwenTextMLPExample(unittest.TestCase):
     """Exercise the prepare-calibrate-convert flow for Qwen text MLP."""

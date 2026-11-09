@@ -136,7 +136,8 @@ class SmoothQuantObserverLayoutTest(unittest.TestCase):
 
 class SmoothQuantTest(unittest.TestCase):
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "Requires Maykeye/TinyLLama-v0 checkpoint/tokenizer and Salesforce/wikitext; use --include-internal",
     )
     @torch.inference_mode()
     def test_value(self):

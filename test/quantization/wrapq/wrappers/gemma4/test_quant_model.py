@@ -15,7 +15,6 @@
 """Smoke tests for QuantGemma4Model wrapper and _get_placeholder_mask helper."""
 
 import copy
-import os
 import unittest
 
 import torch
@@ -29,7 +28,6 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_model import (
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 
@@ -196,10 +194,6 @@ class TestGetPlaceholderMask(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST,
-    "Internal smoke test — set RUN_INTERNAL_TESTS=1 to enable it.",
-)
 @unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
 class TestQuantGemma4ModelValidation(unittest.TestCase):
     """Test input validation in QuantGemma4Model.forward."""
@@ -243,10 +237,6 @@ class TestQuantGemma4ModelValidation(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST,
-    "Internal smoke test — set RUN_INTERNAL_TESTS=1 to enable it.",
-)
 @unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
 class TestQuantGemma4ModelSmoke(unittest.TestCase):
     """Exercise QuantGemma4Model wrapper parity and PTQ flow."""

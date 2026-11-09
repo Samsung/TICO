@@ -378,7 +378,8 @@ class GPTQTest(unittest.TestCase):
         self.assertEqual(getattr(q_m, "quantizers")["m.2"].maxq.item(), 15)
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "Requires Maykeye/TinyLLama-v0 checkpoint/tokenizer and Salesforce/wikitext; use --include-internal",
     )
     @torch.inference_mode()
     def test_model(self):
@@ -413,7 +414,8 @@ class GPTQTest(unittest.TestCase):
         # https://github.com/pytorch/pytorch/issues/148171
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "Requires TRIV24 compiler and simulator at /usr/share/one/backends/triv24/bin; use --include-internal",
     )
     def test_net(self):
         q_m = BigLinear()
@@ -452,7 +454,8 @@ class GPTQTest(unittest.TestCase):
         ), f"PEIR exceeds tolerance. PEIR:{results['peir'][0]}%, tolerance: {tolerance}%"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 128-channel convolutions and large Hessians; use --include-internal",
     )
     def test_normconv2d(self):
         q_m = NormConv2D()
@@ -476,7 +479,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 128-channel convolutions and large Hessians; use --include-internal",
     )
     def test_normconv2d_with_logits_mse_for_gptq(self):
         q_m = NormConv2DWithLogits()
@@ -510,7 +514,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 128-channel convolutions and large Hessians; use --include-internal",
     )
     def test_normconv2d_with_logits_smse_for_gptq(self):
         q_m = NormConv2DWithLogits()
@@ -548,7 +553,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: sensitivity/grid-search quantization over 30 calibration batches; use --include-internal",
     )
     def test_normconv1d_with_logits_mse_for_gptq(self):
         q_m = NormConv1DWithLogits()
@@ -582,7 +588,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: sensitivity/grid-search quantization over 30 calibration batches; use --include-internal",
     )
     def test_normconv1d_with_logits_smse_for_gptq(self):
         q_m = NormConv1DWithLogits()
@@ -620,7 +627,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: sensitivity/grid-search quantization over 30 calibration batches; use --include-internal",
     )
     def test_transposed_conv2d_with_logits_mse_for_gptq(self):
         q_m = TransposedConv2DGeneralWithLogits()
@@ -654,7 +662,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: sensitivity/grid-search quantization over 30 calibration batches; use --include-internal",
     )
     def test_transposed_conv2d_with_logits_smse_for_gptq(self):
         q_m = TransposedConv2DGeneralWithLogits()
@@ -692,7 +701,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 5x16x17x19x35 volumes; use --include-internal",
     )
     def test_normconv3d_with_logits_mse_for_gptq(self):
         q_m = NormConv3DWithLogits()
@@ -726,7 +736,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 5x16x17x19x35 volumes; use --include-internal",
     )
     def test_normconv3d_with_logits_smse_for_gptq(self):
         q_m = NormConv3DWithLogits()
@@ -789,7 +800,8 @@ class GPTQTest(unittest.TestCase):
             ), f"PEIR exceeds tolerance. PEIR:{results['peir'][0]}%, tolerance: {tolerance}%"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 128-channel convolutions and large Hessians; use --include-internal",
     )
     def test_normconv2d_with_logits(self):
         q_m = NormConv2DWithLogits()
@@ -827,7 +839,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 1x128x32x32 convolution inputs; use --include-internal",
     )
     def test_paddednormconv2d(self):
         q_m = PaddedNormConv2D()
@@ -848,7 +861,8 @@ class GPTQTest(unittest.TestCase):
         ), "first conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: four 2048x2048 linear layers and Hessians; use --include-internal",
     )
     def test_net_on_zero_inputs(self):
         q_m = BigLinear()
@@ -865,7 +879,8 @@ class GPTQTest(unittest.TestCase):
         assert torch.sum(q_m.m[0].weight != 0) > 0, "weights should not be all zeros"  # type: ignore[arg-type]
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 128-channel convolutions and large Hessians; use --include-internal",
     )
     def test_normconv2d_on_zero_inputs(self):
         q_m = NormConv2D()
@@ -880,9 +895,6 @@ class GPTQTest(unittest.TestCase):
         convert(q_m, inplace=True)
         assert torch.sum(q_m.m[0].weight != 0) > 0, "weights should not be all zeros"  # type: ignore[arg-type]
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_groupwise_conv2d(self):
         q_m = GroupwiseConv2D()
         q_m.eval()
@@ -906,9 +918,6 @@ class GPTQTest(unittest.TestCase):
 
         # TODO add quantization (right now it can't be evaluated on backend)
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_normconv1d(self):
         q_m = NormConv1D()
         q_m.eval()
@@ -932,9 +941,6 @@ class GPTQTest(unittest.TestCase):
 
         # TODO add quantization
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_groupwise_conv1d(self):
         q_m = GroupwiseConv1D()
         q_m.eval()
@@ -959,7 +965,8 @@ class GPTQTest(unittest.TestCase):
         # TODO add quantization (right now it can't be evaluated on backend)
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: sensitivity/grid-search quantization over 30 calibration batches; use --include-internal",
     )
     def test_normconv1d_with_logits(self):
         q_m = NormConv1DWithLogits()
@@ -998,9 +1005,6 @@ class GPTQTest(unittest.TestCase):
 
         # TODO add quantization
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_transposed_conv2d(self):
         q_m = TransposedConv2DGeneral()
         q_m.eval()
@@ -1025,7 +1029,8 @@ class GPTQTest(unittest.TestCase):
         # TODO add quantization
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: sensitivity/grid-search quantization over 30 calibration batches; use --include-internal",
     )
     def test_transposed_conv2d_with_logits(self):
         q_m = TransposedConv2DGeneralWithLogits()
@@ -1065,7 +1070,8 @@ class GPTQTest(unittest.TestCase):
         # TODO add quantization
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 5x16x17x19x35 volumes; use --include-internal",
     )
     def test_normconv3d(self):
         q_m = NormConv3D()
@@ -1089,7 +1095,8 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 5x16x17x19x35 volumes; use --include-internal",
     )
     def test_normconv3d_on_zero_inputs(self):
         q_m = NormConv3D()
@@ -1105,7 +1112,8 @@ class GPTQTest(unittest.TestCase):
         assert torch.sum(q_m.m[0].weight != 0) > 0, "weights should not be all zeros"  # type: ignore[arg-type]
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 5x16x17x19x35 volumes; use --include-internal",
     )
     def test_paddednormconv3d(self):
         q_m = PaddedNormConv3D()
@@ -1126,7 +1134,8 @@ class GPTQTest(unittest.TestCase):
         ), "first conv node is not quantized"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 5x16x17x19x35 volumes; use --include-internal",
     )
     def test_normconv3d_with_logits(self):
         q_m = NormConv3DWithLogits()

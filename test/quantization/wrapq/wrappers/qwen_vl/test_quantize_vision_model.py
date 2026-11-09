@@ -15,7 +15,6 @@
 """Smoke tests migrated from the Qwen3-VL vision model quantization example."""
 
 import copy
-import os
 import unittest
 
 import tico.quantization
@@ -26,14 +25,9 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
-
 skip_msg = "required transformers not installed — skipping Qwen3-VL vision model tests"
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQwenVisionModelExample(unittest.TestCase):
     """Exercise the vision-model PTQ flow with a tiny static grid."""

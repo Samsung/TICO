@@ -33,7 +33,9 @@ class SimpleConvTranspose(TestModuleBase):
 
 
 @skip(
-    reason="luci-interpreter does not support dynamic shape yet && onert does not support TransposeConv yet"
+    reason="TransposeConvVisitor serializes dynamic batch as 1 in TRANSPOSE_CONV "
+    "output_shape: [1, 101, 201, 33] conflicts with runtime batch 4 "
+    "(tico/serialize/operators/op_transpose_conv.py)"
 )
 @use_onert
 class SimpleConvTransposeDynamicShape(TestModuleBase):
