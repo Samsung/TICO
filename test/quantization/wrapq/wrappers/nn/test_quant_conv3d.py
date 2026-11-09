@@ -27,9 +27,6 @@ from tico.quantization.wrapq.wrappers.nn.quant_conv3d import QuantConv3d
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
 
-@unittest.skip(
-    "This test is skipped becuse QuantConv3d is not currently used to wrap Conv3d"
-)
 class TestQuantConv3d(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
@@ -266,6 +263,10 @@ class TestQuantConv3d(unittest.TestCase):
         assert fp32_with_bias.bias is not None
         self.assertTrue(torch.equal(q_conv.module.bias, fp32_with_bias.bias))
 
+    @unittest.skip(
+        "Legacy QuantConv3d registration is disabled; nn.Conv3d intentionally uses "
+        "QuantConv3dDecomposed (tico/quantization/wrapq/wrappers/nn/quant_conv3d_decomposed.py)"
+    )
     def test_registration_in_registry(self):
         """
         Test that nn.Conv3d is properly registered in the wrapper registry.

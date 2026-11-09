@@ -14,7 +14,6 @@
 
 """Smoke tests migrated from the tied-embedding quantization example."""
 
-import os
 import unittest
 
 import torch
@@ -27,12 +26,7 @@ from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
-
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 class TiedEmbeddingLM(nn.Module):
     """Tiny language-model-like module with tied token embedding and LM-head weights."""
 

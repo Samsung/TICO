@@ -15,7 +15,6 @@
 """Smoke tests migrated from the Qwen3-VL model quantization examples."""
 
 import copy
-import os
 import unittest
 from typing import Tuple
 
@@ -26,8 +25,6 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
-
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 skip_msg = "required transformers not installed — skipping Qwen3-VL model example tests"
 
@@ -230,9 +227,6 @@ def _run_calibration(prepared: torch.nn.Module, calibration_data: list[dict]) ->
             prepared(**calibration_input)
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQwenModelExample(unittest.TestCase):
     """Exercise the old quantize_model.py flow with a tiny synthetic model."""

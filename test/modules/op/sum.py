@@ -55,10 +55,11 @@ class SimpleSumDim2Keepdim(TestModuleBase):
         return (torch.randn(2, 5, 2),), {}
 
 
-# Sum with int type is not supported by luci-interpreter.
-# Therefore, the following test case should be skipped.
-# It will be enabled once it is supported.
-@skip(reason="Not supported yet")
+@skip(
+    reason="SUM on int32 input produces int32, but PyTorch promotes the output to "
+    "int64 and the serialized tensor requires INT64 "
+    "(tico/circle/runtime/kernels/reduction.py)"
+)
 class SimpleSumDim2Int(TestModuleBase):
     def __init__(self):
         super().__init__()

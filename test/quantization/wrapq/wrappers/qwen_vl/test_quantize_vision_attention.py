@@ -15,7 +15,6 @@
 """Smoke tests migrated from the Qwen3-VL vision attention quantization example."""
 
 import copy
-import os
 import unittest
 
 import torch
@@ -31,8 +30,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_attention import (
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
     QuantQwen3VLVisionModel,
 )
-
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 skip_msg = "required transformers not installed — skipping Qwen3-VL vision attention example tests"
 
@@ -98,9 +95,6 @@ def _get_cu_seqlens(grid_thw: torch.Tensor):
     return torch.nn.functional.pad(cu_seqlens, (1, 0), value=0)
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQwenVisionAttentionExample(unittest.TestCase):
     """Exercise the example flow for one Qwen3-VL vision attention module."""

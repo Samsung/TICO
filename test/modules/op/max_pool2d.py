@@ -118,7 +118,10 @@ class MaxPoolNonSquareWindow(TestModuleBase):
         return (torch.randn(2, 4, 8, 16),), {}
 
 
-@tag.skip(reason="Not Support Operator")
+@tag.skip(
+    reason="MaxPool2d return_indices=True is unsupported by TICO lowering "
+    "(tico/passes/legalize_predefined_layout_operators.py)"
+)
 class MaxPoolReturningIndices(TestModuleBase):
     def __init__(self):
         super().__init__()

@@ -15,7 +15,6 @@
 """Smoke tests migrated from the Llama MLP quantization example."""
 
 import copy
-import os
 import unittest
 
 import torch
@@ -30,14 +29,9 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
-
 skip_msg = "required transformers not installed — skipping Llama MLP example tests"
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-)
 @unittest.skipUnless(has_transformers_for("llama"), skip_msg)
 class TestLlamaMLPExample(unittest.TestCase):
     """Exercise the old Llama MLP prepare-calibrate-convert flow."""

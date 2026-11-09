@@ -15,7 +15,6 @@
 """Smoke tests for Gemma4 vision model prepare-calibrate-convert flow."""
 
 import copy
-import os
 import unittest
 
 import torch
@@ -25,7 +24,6 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 _SKIP_MSG = "required transformers Gemma4 vision modules are not installed"
 
 
@@ -82,10 +80,6 @@ def _vision_position_ids(batch_size: int, num_patches: int) -> torch.Tensor:
     return xy.unsqueeze(0).expand(batch_size, -1, -1).long()
 
 
-@unittest.skipIf(
-    not IS_INTERNAL_TEST,
-    "Internal smoke test — set RUN_INTERNAL_TESTS=1 to enable it.",
-)
 @unittest.skipUnless(_has_gemma4_vision(), _SKIP_MSG)
 class TestGemma4VisionModelSmoke(unittest.TestCase):
     """Exercise Gemma4 vision model wrapper parity and PTQ flow."""

@@ -87,6 +87,9 @@ jobs:
           python3 -m pip check
           python3 -m pip list --format=freeze
 
+      - name: Run analysis infrastructure regression tests
+        run: python3 -m unittest -v infra.style.tests.test_transformers_config_pylint
+
       - name: Run static analysis
         run: lintrunner --force-color --all-files --take PYLINT,MYPY --config .lintrunner.toml
 

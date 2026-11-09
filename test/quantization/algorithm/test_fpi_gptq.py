@@ -139,7 +139,8 @@ class TransposedConv2DGeneral(torch.nn.Module):
 
 class FPIGPTQTest(unittest.TestCase):
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "Requires TRIV24 compiler and simulator at /usr/share/one/backends/triv24/bin; use --include-internal",
     )
     def test_net(self):
         q_m = BigLinear()
@@ -178,7 +179,8 @@ class FPIGPTQTest(unittest.TestCase):
         ), f"PEIR exceeds tolerance. PEIR:{results['peir'][0]}%, tolerance: {tolerance}%"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 128-channel convolutions and large Hessians; use --include-internal",
     )
     def test_normconv2d(self):
         q_m = NormConv2D()
@@ -227,7 +229,8 @@ class FPIGPTQTest(unittest.TestCase):
             ), f"PEIR exceeds tolerance. PEIR:{results['peir'][0]}%, tolerance: {tolerance}%"
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: four 2048x2048 linear layers and Hessians; use --include-internal",
     )
     def test_net_on_zero_inputs(self):
         q_m = BigLinear()
@@ -244,7 +247,8 @@ class FPIGPTQTest(unittest.TestCase):
         assert torch.sum(q_m.m[0].weight != 0) > 0, "weights should not be all zeros"  # type: ignore[arg-type]
 
     @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+        not IS_INTERNAL_TEST,
+        "CPU integration: 30 calibration batches of 128-channel convolutions and large Hessians; use --include-internal",
     )
     def test_normconv2d_on_zero_inputs(self):
         q_m = NormConv2D()
@@ -259,9 +263,6 @@ class FPIGPTQTest(unittest.TestCase):
         convert(q_m, inplace=True)
         assert torch.sum(q_m.m[0].weight != 0) > 0, "weights should not be all zeros"  # type: ignore[arg-type]
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_groupwise_conv2d(self):
         q_m = GroupwiseConv2D()
         q_m.eval()
@@ -285,9 +286,6 @@ class FPIGPTQTest(unittest.TestCase):
 
         # TODO add quantization (currently it can't be evaluated on backend)
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_normconv1d(self):
         q_m = NormConv1D()
         q_m.eval()
@@ -310,9 +308,6 @@ class FPIGPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
         # TODO add quantization
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_groupwise_conv1d(self):
         q_m = GroupwiseConv1D()
         q_m.eval()
@@ -336,9 +331,6 @@ class FPIGPTQTest(unittest.TestCase):
 
         # TODO add quantization (right now it can't be evaluated on backend)
 
-    @unittest.skipIf(
-        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
-    )
     def test_transposed_conv2d(self):
         q_m = TransposedConv2DGeneral()
         q_m.eval()

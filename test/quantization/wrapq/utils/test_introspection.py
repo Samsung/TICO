@@ -156,7 +156,8 @@ class TestBuildFqnMap(unittest.TestCase):
 
 
 @unittest.skipIf(
-    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    not IS_INTERNAL_TEST,
+    "Requires Maykeye/TinyLLama-v0 checkpoint/tokenizer and Salesforce/wikitext; use --include-internal",
 )
 class TestSmoothQuantPTQDiff(unittest.TestCase):
     """
