@@ -112,32 +112,41 @@ class TestEvaluateFunctions(unittest.TestCase):
         self.assertIn("Invalid backend", str(context.exception))
 
     @patch("tico.quantization.evaluation.evaluate.get_graph_input_output")
-    @patch("tico.quantization.evaluation.evaluate.BACKEND_TO_EXECUTOR")
-    def test_evaluate_invalid_mode(self, mock_backend_executor, mock_get_io):
-        """Test evaluate with invalid mode"""
-        # Setup mocks to avoid Circle model parsing and executor issues
-        mock_circle_inputs = [Mock()]
-        mock_circle_inputs[0].ShapeAsNumpy.return_value = np.array([2, 3])
-        mock_circle_outputs = [Mock()]
-        mock_get_io.return_value = (mock_circle_inputs, mock_circle_outputs)
-
-        # Mock executor to avoid actual execution
-        mock_executor = Mock()
-        mock_executor.compile.return_value = None
-        mock_executor.run_inference.return_value = [np.array([1.0, 2.0])]
-        # Make BACKEND_TO_EXECUTOR behave like a dictionary
-        mock_backend_dict = {BACKEND.CIRCLE: mock_executor}
-        mock_backend_executor.return_value = mock_backend_dict
-
-        with self.assertRaises(RuntimeError) as context:
-            evaluate(
-                nn.Linear(3, 2),
-                Mock(spec=CircleModel, circle_binary=b"mock_binary"),
-                BACKEND.CIRCLE,
-                mode="invalid_mode",
+    def test_evaluate_invalid_mode(self, mock_get_io):
+        """A valid execution fixture must reach the mode diagnostic."""
+        mock_get_io.return_value = ([Mock()], [Mock()])
+        circle_model = Mock(spec=CircleModel, circle_binary=b"mock_binary")
+        torch_module = nn.Identity().eval()
+        input_data = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+        executor = Mock(spec=["compile", "run_inference"])
+        executor.run_inference.return_value = [
+            np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        ]
+        executor_factory = Mock(return_value=executor)
+        # evaluate indexes the mapping and then constructs the executor.
+        with patch(
+            "tico.quantization.evaluation.evaluate.BACKEND_TO_EXECUTOR",
+            {BACKEND.CIRCLE: executor_factory},
+        ):
+            results = evaluate(
+                torch_module, circle_model, BACKEND.CIRCLE, input_data, mode="return"
             )
-        # The actual error might be different, so just check that some error is raised
-        self.assertTrue(len(str(context.exception)) > 0)
+            self.assertEqual(
+                results,
+                {"diff": [0.0], "max_abs_diff": [0.0], "peir": [0.0], "mse": [0.0]},
+            )
+            with self.assertRaisesRegex(RuntimeError, r"^Invalid mode\.$"):
+                evaluate(
+                    torch_module,
+                    circle_model,
+                    BACKEND.CIRCLE,
+                    input_data,
+                    mode="invalid_mode",
+                )
+
+        self.assertEqual(executor_factory.call_count, 2)
+        executor.compile.assert_has_calls([call(circle_model), call(circle_model)])
+        self.assertEqual(executor.run_inference.call_count, 2)
 
 
 class TestEvaluationUtils(unittest.TestCase):

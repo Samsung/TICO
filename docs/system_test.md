@@ -222,9 +222,9 @@ a specific unsupported or invalid contract, not merely accept any unrelated fail
 The default result validator checks:
 
 1. Number of outputs
-2. Shape of every output
-3. Dtype of every output
-4. Values through `torch.testing.assert_close()`
+2. Shape and dtype of every Tensor output
+3. Exact equality for integer and bool values
+4. Floating-point values through `torch.testing.assert_close()`
 
 Default tolerances are currently:
 
@@ -233,9 +233,16 @@ rtol = 1e-5
 atol = 1e-5
 ```
 
-A module can override them. The override must be justified by the operation, dtype, and
-expected numerical behavior. Do not globally relax tolerance because one regression
-fails.
+A module can override floating-point tolerances; integer and bool values remain exact.
+The override must be justified by the operation, dtype, and expected numerical behavior.
+Do not globally relax tolerance because one regression fails.
+
+Python scalars accept scalar or single-element Circle outputs of the same kind: bool,
+signed/unsigned integer, or floating point. Integer values are compared without casting
+the reference to the output dtype or passing through floating point. Python floats use
+the floating-point tolerance, allowing normal float32 rounding without hiding overflow.
+Matching NaNs and same-sign infinities are accepted; nonmatching nonfinite values are
+rejected.
 
 ### Graph rewrite contract
 
