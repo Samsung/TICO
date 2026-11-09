@@ -251,8 +251,10 @@ quantized_model = convert(model)
 ```
 
 The [public API guide](../README.md#overview) defines dispatch, `inplace` behavior,
-and conversion-handle ownership. PTQ configuration selects dtype, scheme, and
-per-module granularity.
+and conversion-handle ownership. Its
+[Python PTQ configuration guide](../README.md#python-ptq-configuration) defines
+role defaults, observer overrides, and model-specific builders; start with its
+[self-contained CPU example](../README.md#basic-usage) for a complete calibration run.
 
 **Ready-to-run examples** for PTQ and wrapper usage can be found in the [examples/](./examples/) folder,
 including quantization flows for nn.Linear, LLaMA MLPs, and full decoder layers.

@@ -12,7 +12,7 @@ They are not all graph rewrites or preprocessing steps.
 | Algorithm | Reference | Description |
 |---|---|---|
 | GPTQ | [`gptq/`](./gptq/README.md) | Accurate post-training weight quantization |
-| Universal GPTQ | [Configuration source](../config/gptq.py), [implementation](./universal_gptq/quantizer.py) | Replay-based GPTQ with configurable module caching and GPTQ core |
+| Universal GPTQ | [Universal GPTQ guide](./gptq/README.md#universal-gptq) | Replay-based GPTQ with configurable module caching and GPTQ core |
 | FPI-GPTQ | [`fpi_gptq/`](./fpi_gptq/README.md) | Fixed-point-iteration GPTQ variant |
 | Qwen3-VL GPTQ | [`qwen3_vl_gptq/`](./qwen3_vl_gptq/README.md) | GPTQ specialization for Qwen3-VL models |
 | Gemma4 GPTQ | [`gemma4_gptq/`](./gemma4_gptq/README.md) | Stage-wise GPTQ for Gemma4 vision and text components |
@@ -25,8 +25,9 @@ They are not all graph rewrites or preprocessing steps.
 For Universal GPTQ recipe examples, see the
 [LLaMA preset](../examples/configs/llama_universal_gptq_quantize.yaml) and
 [Qwen3-VL preset](../examples/configs/qwen3_vl_universal_gptq_quantize.yaml).
-Both select the `universal` GPTQ stage variant; the configuration source documents
-`UniversalGPTQConfig` and its `gptq_factory` selection.
+Both select the `universal` GPTQ stage variant. The
+[Universal GPTQ reference](./gptq/README.md#universal-gptq) explains the replay
+lifecycle, cache configuration, and GPTQ core selection.
 
 ## Design Philosophy
 

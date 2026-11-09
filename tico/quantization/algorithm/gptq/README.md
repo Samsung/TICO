@@ -3,13 +3,14 @@
 GPTQ is a post-training, weight-only quantization algorithm. It quantizes weights
 column-by-column using second-order (Hessian) information collected from calibration
 data, compensating the not-yet-quantized columns for the error introduced at each
-step. Activations are left untouched, so the model's memory footprint shrinks while
-accuracy is largely preserved.
+step. Activations are left untouched. The updated weights remain floating-point
+tensors; see [Precautions](#precautions) for the subsequent quantization step.
 
-This implementation supports `nn.Linear`, `nn.Conv1d`, `nn.Conv2d`, `nn.Conv3d`,
+The classic `GPTQQuantizer` supports `nn.Linear`, `nn.Conv1d`, `nn.Conv2d`, `nn.Conv3d`,
 and `nn.ConvTranspose2d` modules, and targets LLaMA-like decoder architectures
 (models exposing `model.layers` as an `nn.ModuleList`). Models without that
-structure are treated as a single layer (fallback).
+structure are treated as a single layer (fallback). For replay and caching without
+that decoder layout, see [Universal GPTQ](#universal-gptq).
 
 ### How it works
 
@@ -94,8 +95,8 @@ convert(model, inplace=True)
 print(model.quantizers.keys())
 ```
 
-> **Note** GPTQ only supports `inplace=True` in `convert()`. A rejected
-> `convert(model, inplace=False)` call preserves the prepared quantizer and cached
+> **Note** The classic `GPTQQuantizer` only supports `inplace=True` in `convert()`.
+> A rejected `convert(model, inplace=False)` call preserves the prepared quantizer and cached
 > calibration inputs, so you can retry with `inplace=True` without recalibrating.
 
 Mixed precision via overrides:
@@ -109,6 +110,160 @@ gptq_config = GPTQConfig(
     },
 )
 ```
+
+### Universal GPTQ
+
+`UniversalGPTQConfig` selects the replay and caching implementation in
+[`universal_gptq/quantizer.py`](../universal_gptq/quantizer.py). It discovers module
+execution order from calibration inputs instead of requiring a `model.layers`
+decoder layout. **Universal describes this orchestration, not a different GPTQ
+numerical core:** the default still uses classic GPTQ v1; a compatible factory can
+select the GPTQv2 core.
+
+#### Lifecycle and a small CPU example
+
+1. `prepare(model, config)` returns the prepared model and replaces its root
+   `forward` with an input recorder. No model execution or Hessian accumulation
+   happens at this point.
+2. Call the prepared model with representative batches. Each call records its
+   positional and keyword arguments on CPU and **returns `None`**. The optional
+   `args` / `kwargs` passed to `prepare()` do not populate this cache; collect at
+   least one batch by calling the prepared model.
+3. `convert(prepared)` restores the root forward, analyzes calls on the cached
+   inputs, and repeatedly replays the model. It collects inputs for modules whose
+   predecessors are ready, accumulates their Hessians, quantizes their weights,
+   and optionally caches outputs for later replay. Statistics are therefore
+   collected during conversion, not during the input-recording calls.
+
+This example uses only synthetic data and runs on CPU:
+
+```python
+import torch
+from torch import nn
+
+from tico.quantization import convert, prepare
+from tico.quantization.config.gptq import UniversalGPTQConfig
+
+
+class TinyMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = nn.Sequential(nn.Linear(8, 8), nn.ReLU(), nn.Linear(8, 4))
+
+    def forward(self, x):
+        return self.block(x)
+
+
+torch.manual_seed(0)
+model = TinyMLP().eval()
+config = UniversalGPTQConfig(
+    weight_bits=4,
+    cacheable_modules=[r"block"],
+    show_progress=False,
+)
+
+with torch.no_grad():
+    prepared = prepare(model, config, inplace=True)
+    for _ in range(4):
+        assert prepared(torch.randn(16, 8)) is None
+    quantized = convert(prepared, inplace=True)
+    output = quantized(torch.randn(2, 8))
+
+assert output.shape == (2, 4) and torch.isfinite(output).all()
+assert set(quantized.quantizers) == {"block.0", "block.2"}
+assert quantized.block[0].weight.is_floating_point()
+assert not hasattr(quantized, "tico_quantizer")
+```
+
+Successful conversion restores module forwards and attaches `model.quantizers`,
+keyed by full module name. With `debug_mode=False`, it also removes the internal
+module replay state and its buffers. As with classic GPTQ, weights remain float
+values on a quantization grid; a later PTQ stage can reuse the qparams. See the
+[GPTQ-to-PTQ handoff](../../examples/configs/README.md#gptq-to-ptq-weight-qparam-reuse).
+
+#### Replay and caching options
+
+These fields extend the [shared GPTQ options](#configuration-gptqconfig):
+
+| Field | Default | Universal behavior |
+|---|---|---|
+| `cacheable_modules` | `[]` | Regexes matched with `fullmatch` against non-root names from `model.named_modules()`. For example, `r"model\.layers\.[0-9]+"` selects whole decoder blocks. Cached outputs are kept on CPU to avoid recomputing those modules during replay. |
+| `allow_calls_between_cacheable_modules` | `True` | Allows a cacheable parent to call cacheable descendants; completed parent caches can release descendant caches. Calls to a cacheable module outside the caller's subtree are still rejected. With `False`, all cacheable-to-cacheable calls are rejected, including nested parent/child calls. |
+| `ignore_multi_call_modules` | `True` | Excludes a module from GPTQ when calibration analysis observes it being called more than once within any single batch. With `False`, shared modules participate, but dependency cycles can force quantization from only the inputs collected so far; verify the result for the model. A later PTQ stage may quantize skipped modules. |
+| `debug_mode` | `False` | Retains `gptq_data`, including module replay buffers, after conversion when enabled. This is for inspection and can retain substantial memory. |
+| `collect_native_inputs` | `False` | Adds paired native and quantized replay for a GPTQv2-compatible core. It requires a compatible explicit factory and `allow_calls_between_cacheable_modules=True`, and forces caching of quantizable modules. |
+
+Inherited options have a few Universal-specific details:
+
+- `use_orig_model_inference=True` is rejected. Native replay for GPTQv2 is
+  controlled by `collect_native_inputs`, not by this classic GPTQ option.
+- `weight_bits_overrides` first checks the exact full name, then its final path
+  component (for example `o_proj`), then dot-delimited suffixes. The last matching
+  suffix in mapping order wins. Sensitivity dictionaries use exact full names.
+- `quantize_lm_head=False` excludes full paths matching `lm_head.*`, such as
+  `lm_head` and `lm_head.proj`; this is not a filter for every nested head name.
+  Check shared embedding/head weights before enabling head quantization.
+
+#### Choosing the GPTQ core and precision
+
+`gptq_factory` accepts three forms:
+
+| Value | Core construction |
+|---|---|
+| `None` (default) | Constructs classic `gptq.gptq.GPTQ(layer)`. It does not consume the optional precision, normalization, or GPTQv2 constructor settings below. |
+| Dotted class-path string | Imports the class and passes `layer`, plus any explicitly accepted constructor parameters among `normalize_H`, `hessian_dtype`, `inp_dtype`, and `gptq_v2_alpha`. |
+| Callable | Calls the factory with `layer`. The callable is used unchanged, so it must pass any desired constructor options itself. |
+
+For the existing GPTQv2 core, use the following configuration in place of `config`
+in the CPU example, before `prepare()`:
+
+```python
+config = UniversalGPTQConfig(
+    weight_bits=4,
+    gptq_factory="tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ",
+    collect_native_inputs=True,
+    allow_calls_between_cacheable_modules=True,
+    cacheable_modules=[r"block"],
+    hessian_dtype=torch.float64,
+    inp_dtype=torch.float32,
+    show_progress=False,
+)
+```
+
+The class path selects the per-layer numerical core; it does not select the
+Qwen3-VL model-specific quantizer. Selecting that class without
+`collect_native_inputs=True` does not supply the native-input difference needed
+for its GPTQv2 correction. Conversely, enabling native inputs with the default or
+classic GPTQ v1 factory fails validation. A custom compatible factory must expose
+`native_inp` on the core it returns and support the tiny CPU `nn.Linear` probe
+used by configuration validation.
+
+For cores accepting these constructor settings, `inp_dtype` controls the input
+Gram products and GPTQv2 cross-term products, while `hessian_dtype` controls Hessian
+and cross-term storage/accumulation and Hessian factorization. Both default to
+`torch.float32` and accept only `torch.float32` or `torch.float64`; they do not set
+model weight dtype. The existing GPTQv2 core defaults to `normalize_H=True`
+(running normalized statistics) and `gptq_v2_alpha=0.25` (correction strength);
+`normalize_H=False` uses sums and an alpha of zero disables the correction.
+
+#### Scope and recipe presets
+
+The current dispatcher selects exact `nn.Linear`, `nn.Conv1d`, `nn.Conv2d`,
+`nn.Conv3d`, and `nn.ConvTranspose2d` types. Custom subclasses and functional
+weight operations are not automatically quantized. Quantizable modules must
+receive their tensor input as the first positional argument, even though the
+root model's input recorder accepts keyword arguments. Use evaluation mode and
+inputs whose repeated execution is stable; caches, shared modules, and
+data-dependent execution must be checked against the model's actual call graph.
+The name Universal does not guarantee support for every PyTorch model.
+
+For complete CLI workflows, reuse the
+[LLaMA Universal GPTQ preset](../../examples/configs/llama_universal_gptq_quantize.yaml)
+or [Qwen3-VL Universal GPTQ preset](../../examples/configs/qwen3_vl_universal_gptq_quantize.yaml)
+with the [configuration reference](../../examples/configs/README.md). These presets
+select recipe `variant: universal` and include a subsequent PTQ stage. Their
+model paths and cache patterns are examples for those model families, not generic
+defaults; `variant: universal` alone does not enable GPTQv2.
 
 ### `MSE`
 
@@ -193,7 +348,7 @@ empirical Fisher information (see the `SensitivityCalibrator` util class).
   e.g. using `wrapq` or the PTQ stage — must be applied afterwards. If the weight
   quantization applied later differs from GPTQ's internal grid, the benefit of
   GPTQ may be diminished; use `model.quantizers` to keep them consistent.
-- **Memory.** Cached first-layer inputs are kept on CPU, but `convert()` moves
+- **Memory.** Classic GPTQ keeps cached first-layer inputs on CPU, but `convert()` moves
   each batch to the model device per layer. For deep/large models consider
   `use_orig_model_inference=True` for stability, keeping the extra memory cost
   in mind.
