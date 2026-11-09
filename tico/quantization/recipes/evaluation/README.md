@@ -192,13 +192,18 @@ or legacy spellings.
 ```text
 recipes/evaluation/
 ├── README.md
-├── eager.py             # common eager policy and protocol metadata
-├── selection.py         # top-level target parsing and allow-list helpers
-├── llm.py               # perplexity and text-only LM benchmark helpers
-├── vlm.py               # VQA / COCO-style VLM benchmark helpers
-├── llava_bench_judge.py # judge-based LLaVA-Bench evaluator wrapper
-├── llava_bench.py       # shared llava_bench target selection and mode routing
-└── mmlu.py              # MMLU wrapper helpers
+├── mmmu_pro.md           # MMMU-Pro protocol and diagnostics
+├── eager.py              # common eager policy and protocol metadata
+├── selection.py          # top-level target parsing and allow-list helpers
+├── llm.py                # perplexity and text-only LM benchmark helpers
+├── cached_nll.py         # fixed-chunk NLL with prefill and cached decode
+├── vlm.py                # VQA / COCO-style VLM benchmark helpers
+├── llava_bench_judge.py   # judge-based LLaVA-Bench evaluator wrapper
+├── llava_bench.py         # shared llava_bench target selection and mode routing
+├── mmlu.py               # MMLU wrapper helpers
+├── mmmu.py               # MMMU-Pro target routing
+├── video_mme.py          # Video-MME wrapper helpers
+└── hellaswag.py          # HellaSwag wrapper helpers
 ```
 
 The split is by benchmark/input type, not by model name.

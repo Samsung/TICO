@@ -149,7 +149,7 @@ budget; the serializer reports this case rather than producing a broken file.
 ## Streaming file saves
 
 `CircleDocument.save()`, `tico.circle.io.save_model()`, and therefore the
-`tico-circle extract` and `optimize` commands no longer materialize the complete
+`tico-circle extract` and `optimize` commands do not materialize the complete
 binary before writing it. The layout is planned first, so every `Buffer.offset`
 in the header is final before the first byte is written and the output does not
 need to seek. The writer then emits the header from its existing storage, at most
@@ -175,11 +175,10 @@ lower 64 MiB budget described above):
 Inline packing is not streaming: the FlatBuffers builder converts each payload
 with `tobytes()`, copies it into a buffer that grows by doubling, and copies the
 finished FlatBuffer once more, so packing a payload total of *P* bytes transiently
-needs several times *P* (the extraction benchmark measured about 3 GiB of peak
-RSS beyond the input for a 512 MiB inline output). Ordinary small
-models keep the inline layout and their existing byte equivalence, and document
-saves retain their inline layout below 1 GiB. Above that private
-streaming budget a document save selects the appended layout directly, which keeps
+needs several times *P*. Ordinary small models keep the inline layout and their
+existing byte equivalence, and document saves retain their inline layout below
+1 GiB. Above that private streaming budget a document save selects the appended
+layout directly, which keeps
 the transient cost to the small header. Bytes-returning APIs keep the full
 FlatBuffer budget so their return contract and layout are unchanged; a model
 between the two thresholds therefore saves as appended payloads but serializes to
@@ -235,9 +234,8 @@ borrowed extraction results and documents whose mapping ownership has been relea
 while payload views remain alive. File identity is retained without holding the
 mapping open, so hard-link aliases of an old inode remain protected after an atomic
 replacement; clones and detached results carry no such source dependency.
-Windows does not allow replacing
-a mapped file, so the CLI falls back to the eager loader when the output names the
-input; that branch is selected by platform and was not exercised on Windows here.
+Windows does not allow replacing a mapped file, so the CLI uses the eager loader
+when the output names the input.
 
 Memory semantics: mapping removes the input-sized Python heap allocation and the
 payload copies, not the page cache. Pages the extraction reads or writes are
@@ -281,10 +279,9 @@ buffer.data = buffer.data.copy()
 ```
 
 Assigning newly computed `buffer.data` is also supported. A document clone or a
-constant-folding pass may allocate additional large arrays; this change does not
-make those operations out-of-core. Only the extraction workflow avoids copying
-discarded constants; `optimize` still clones or folds constants as its passes
-require.
+constant-folding pass may allocate additional large arrays; these operations are
+not out-of-core. Only the extraction workflow avoids copying discarded constants;
+`optimize` still clones or folds constants as its passes require.
 
 Unresolved Object API offsets obtained by directly unpacking only a header are
 rejected during repacking. Load the complete binary through `CircleDocument` or
@@ -296,12 +293,11 @@ and rejected, rather than silently losing their payloads.
 ## Recipe format policies
 
 Choosing `.circle` versus a host `.pt` artifact remains a recipe-level policy;
-choosing inline versus appended storage inside a `.circle` file is now entirely
+choosing inline versus appended storage inside a `.circle` file is entirely
 serializer-owned.
 
-In particular, this change deliberately does not modify the existing Gemma4 PLE
-`auto` policy, which chooses `.pt` for an oversized table. To request Circle for
-that stage, use the already existing option:
+The Gemma4 PLE `auto` policy chooses `.pt` for an oversized table. To request
+Circle for that stage, set:
 
 ```yaml
 export:
@@ -310,12 +306,12 @@ export:
 
 Once Circle is selected, it uses the ordinary converter and the same automatic
 serializer as every other model. There is no Gemma-specific large-buffer API.
-The real Gemma4 PLE checkpoint was not exercised in the accompanying validation.
+Validate the intended Gemma4 checkpoint and target backend separately.
 
 ## Memory and backend limits
 
-This change removes the FlatBuffer-embedded-constant size bottleneck, not every
-large-model limit:
+Appended payloads avoid the FlatBuffer-embedded-constant size bottleneck. The
+following large-model limits still apply:
 
 1. **RAM:** bytes-returning APIs materialize the complete output. Source tensor
    storage, conversion intermediates, the original binary during O1, and an

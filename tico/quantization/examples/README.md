@@ -81,9 +81,11 @@ Summary:
 | `generate.py` | No | No | No | No |
 | `inspector.py` | Mode-dependent | Mode-dependent | Debug only | Debug only |
 
-The four config-driven commands load the optional top-level `extensions` list
-from the config before resolving the adapter, and honor `model.adapter` for
-selecting a registered adapter variant. See the
+`quantize.py`, `evaluate.py`, `export.py`, `compare_side_by_side.py`, and
+`inspector.py --mode trace` load the optional top-level `extensions` list before
+resolving the adapter, and honor `model.adapter` for selecting a registered
+adapter variant. Other inspector smoke/static-runtime modes do not load
+extensions or resolve a recipe adapter. See the
 [config guide](./configs/README.md#extensions-optional) for the schema and the
 trust implications.
 
