@@ -220,35 +220,47 @@ def validate_result(
                 desired=circle_res.shape,
                 err_msg=f"Shape mismatches.\nexpected result: {expected_res.shape}\ncircle result: {circle_res.shape}",
             )
-            expected_tensor = expected_res
             circle_tensor = torch.from_numpy(circle_res.copy())
-        elif isinstance(expected_res, (int, float)):
-            # A Python scalar has no dtype or rank of its own. TICO serializes it
-            # either as a scalar constant or as a one-element size tensor, so the
-            # comparison adopts the serialized dtype (same kind) and shape while
-            # still checking the value exactly.
-            circle_tensor = torch.from_numpy(circle_res.copy())
-            expected_kind = "f" if isinstance(expected_res, float) else "i"
-            if circle_res.size != 1 or circle_res.dtype.kind not in (
-                expected_kind,
-                "u",
-            ):
+            # Tolerances apply only to floating-point (or complex) tensors.
+            # Zero tolerances select exact comparison without integer promotion.
+            approximate = expected_res.is_floating_point() or expected_res.is_complex()
+            torch.testing.assert_close(
+                actual=circle_tensor,
+                expected=expected_res,
+                equal_nan=True,
+                check_dtype=True,
+                rtol=rtol if approximate else 0,
+                atol=atol if approximate else 0,
+            )
+        elif isinstance(expected_res, (bool, int, float)):
+            # Scalars have no rank/dtype contract, but must retain their kind.
+            # Accept the scalar and single-element shapes emitted by conversion.
+            if isinstance(expected_res, bool):
+                allowed_kinds: tuple[str, ...] = ("b",)
+            elif isinstance(expected_res, int):
+                allowed_kinds = ("i", "u")
+            else:
+                allowed_kinds = ("f",)
+            if circle_res.size != 1 or circle_res.dtype.kind not in allowed_kinds:
                 raise AssertionError(
                     f"Scalar result {expected_res!r} cannot be compared with circle "
                     f"output {circle_res.dtype}{list(circle_res.shape)}."
                 )
-            expected_tensor = torch.full(
-                circle_tensor.shape, expected_res, dtype=circle_tensor.dtype
-            )
+            # item() preserves integer precision and promotes stored floats to Python
+            # float. Never cast the reference to the output dtype: that could hide
+            # truncation, overflow, or a finite reference becoming infinity.
+            actual = circle_res.item()
+            if isinstance(expected_res, float):
+                torch.testing.assert_close(
+                    actual=actual,
+                    expected=expected_res,
+                    equal_nan=True,
+                    rtol=rtol,
+                    atol=atol,
+                )
+            elif actual != expected_res:
+                raise AssertionError(
+                    f"Scalar value mismatches: expected {expected_res!r}, got {actual!r}."
+                )
         else:
             raise TypeError("Expected result must be a tensor or scalar value.")
-
-        # Check both dtype and value mismatch
-        torch.testing.assert_close(
-            actual=circle_tensor,
-            expected=expected_tensor,
-            equal_nan=True,
-            check_dtype=True,
-            rtol=rtol,
-            atol=atol,
-        )

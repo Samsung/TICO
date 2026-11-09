@@ -66,6 +66,21 @@ class PassValueTest(PassTest):
     def run_value_test(self):
         pass
 
+    def _assert_result_equal(self, ret_before: torch.Tensor, ret_after: torch.Tensor):
+        self.assertEqual(
+            ret_before.shape, ret_after.shape, "Shape mismatch after pass."
+        )
+        self.assertEqual(
+            ret_before.dtype, ret_after.dtype, "Dtype mismatch after pass."
+        )
+        if ret_before.is_floating_point() or ret_before.is_complex():
+            # Preserve the existing floating-point tolerance and NaN policy.
+            self.assertTrue(torch.allclose(ret_before, ret_after, rtol=1e-5, atol=1e-6))
+        else:
+            self.assertTrue(
+                torch.equal(ret_before, ret_after), "Value mismatch after pass."
+            )
+
 
 class SinglePassValueTest(PassValueTest):
     def run_value_test(self, test_pass: PassBase):  # type: ignore[override]
@@ -78,8 +93,7 @@ class SinglePassValueTest(PassValueTest):
         # inference after pass
         ret_after = self.ep.module()(*self.forward_args, **self.forward_kwargs)
 
-        self.assertEqual(ret_before.shape, ret_after.shape)
-        self.assertTrue(torch.allclose(ret_before, ret_after, atol=1e-06))
+        self._assert_result_equal(ret_before, ret_after)
 
 
 class MultiPassValueTest(PassValueTest):
@@ -94,5 +108,4 @@ class MultiPassValueTest(PassValueTest):
         # inference after pass
         ret_after = self.ep.module()(*self.forward_args, **self.forward_kwargs)
 
-        self.assertEqual(ret_before.shape, ret_after.shape)
-        self.assertTrue(torch.allclose(ret_before, ret_after, atol=1e-06))
+        self._assert_result_equal(ret_before, ret_after)
