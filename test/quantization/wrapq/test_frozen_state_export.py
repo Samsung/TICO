@@ -55,6 +55,11 @@ def _tensor_contract(tensor):
 class TestFrozenStateCircleExport(unittest.TestCase):
     """Check exact ABI, constant payloads and numerics, independently of FX metadata."""
 
+    def setUp(self):
+        rng = torch.random.fork_rng(devices=[])
+        rng.__enter__()
+        self.addCleanup(rng.__exit__, None, None, None)
+
     @staticmethod
     def _linear(dtype):
         module = torch.nn.Linear(2, 2, bias=False).eval()
@@ -275,47 +280,65 @@ class TestFrozenStateCircleExport(unittest.TestCase):
         }
 
     def _attention_roundtrip(self, family):
-        from test.quantization.wrapq.wrappers.llama.test_kv_cache_circle import (
-            TestLlamaKVCacheCircle,
-        )
-        from test.quantization.wrapq.wrappers.qwen_vl.test_kv_cache_circle import (
-            TestQwenKVCacheCircle,
-        )
+        from test.support.quantization.kv_cache import assert_cache_parity, hidden
 
-        fixture_class = (
-            TestLlamaKVCacheCircle if family == "llama" else TestQwenKVCacheCircle
-        )
-        source_fixture = fixture_class()
-        source_fixture.setUp()
-        source_fixture._make_attention(DType.uint(8))
-        source = source_fixture.attention
-        snapshots = self._snapshots(source)
-        restored_fixture = fixture_class()
-        restored_fixture.setUp()
-        restored_fixture._make_attention(DType.uint(8))
-        restored = restored_fixture.attention
+        if family == "llama":
+            from test.support.quantization.llama_kv_cache import (
+                assert_llama_decode_topology as assert_decode_topology,
+                make_llama_attention as make_attention,
+                mask,
+                prefill_args as build_prefill_args,
+                rope,
+            )
+        else:
+            from test.support.quantization.qwen_kv_cache import (
+                assert_qwen_decode_topology as assert_decode_topology,
+                make_qwen_attention as make_attention,
+                mask,
+                prefill_args as build_prefill_args,
+                rope,
+            )
+
+        # The original fixtures reset each model to this seed independently.
+        # Scope those resets so this test does not alter another test's RNG.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(20261024)
+            source, domains = make_attention(DType.uint(8))
+            snapshots = self._snapshots(source)
+            torch.manual_seed(20261024)
+            restored, _ = make_attention(DType.uint(8))
         restored.enable_calibration()
         restored.load_state_dict(copy.deepcopy(source.state_dict()))
         self._assert_snapshots_equal(snapshots, self._snapshots(restored))
 
-        prefill_args = source_fixture._prefill_args()
+        prefill_args = build_prefill_args()
         source_prefill = source.as_export_module("prefill", return_kv=True)
         restored_prefill = restored.as_export_module("prefill", return_kv=True)
         before = _export(source_prefill, prefill_args)
         after = _export(restored_prefill, prefill_args)
         self._assert_same_artifact(before, after)
-        outputs = source_fixture._assert_parity(
-            source_prefill, prefill_args, before, label=family + " frozen prefill"
+        outputs = assert_cache_parity(
+            self,
+            source,
+            source_prefill,
+            prefill_args,
+            before,
+            label=family + " frozen prefill",
         )
-        restored_fixture._assert_parity(
-            restored_prefill, prefill_args, after, label=family + " restored prefill"
+        assert_cache_parity(
+            self,
+            restored,
+            restored_prefill,
+            prefill_args,
+            after,
+            label=family + " restored prefill",
         )
         past = tuple(torch.from_numpy(value.copy()) for value in outputs[-2:])
-        cosine, sine = source_fixture._rope(3)
+        cosine, sine = rope(3)
         decode_args = (
-            source_fixture._hidden(1) + 0.31,
+            hidden(1) + 0.31,
             (cosine[:, -1:], sine[:, -1:]),
-            source_fixture._mask(1, 3),
+            mask(1, 3),
             past,
         )
         source_decode = source.as_export_module("decode", return_kv=True)
@@ -323,11 +346,18 @@ class TestFrozenStateCircleExport(unittest.TestCase):
         before_decode = _export(source_decode, decode_args)
         after_decode = _export(restored_decode, decode_args)
         self._assert_same_artifact(before_decode, after_decode)
-        source_fixture._assert_decode_topology(before_decode)
-        source_fixture._assert_parity(
-            source_decode, decode_args, before_decode, label=family + " frozen decode"
+        assert_decode_topology(self, before_decode, domains)
+        assert_cache_parity(
+            self,
+            source,
+            source_decode,
+            decode_args,
+            before_decode,
+            label=family + " frozen decode",
         )
-        restored_fixture._assert_parity(
+        assert_cache_parity(
+            self,
+            restored,
             restored_decode,
             decode_args,
             after_decode,
@@ -473,48 +503,57 @@ class TestFrozenStateCircleExport(unittest.TestCase):
         has_transformers_for("gemma4"), "Gemma4 Transformers unavailable"
     )
     def test_gemma_prefill_decode_survive_frozen_state_restore(self):
-        from test.quantization.wrapq.wrappers.gemma4.test_kv_cache_circle import (
-            _args,
-            TestGemma4KVCacheCircle as Fixture,
+        from test.support.quantization.gemma_kv_cache import (
+            args as cache_args,
+            assert_gemma_parity,
+            assert_storage_conversion,
+            freeze_attention,
+            make_gemma_attention,
         )
 
-        fixture = Fixture()
-        fixture.setUp()
-        source = fixture._attention()
-        fixture._freeze(source)
-        snapshots = self._snapshots(source)
-        restored = fixture._attention()
+        # Gemma source and restoration targets consume the seed sequentially.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(317)
+            source = make_gemma_attention()
+            freeze_attention(source)
+            snapshots = self._snapshots(source)
+            restored = make_gemma_attention()
         restored.load_state_dict(copy.deepcopy(source.state_dict()))
         self._assert_snapshots_equal(snapshots, self._snapshots(restored))
-        prefill_args = _args(2, 2)
+        prefill_args = cache_args(2, 2)
         source_prefill = source.as_export_module("prefill")
         restored_prefill = restored.as_export_module("prefill")
         before = _export(source_prefill, prefill_args)
         after = _export(restored_prefill, prefill_args)
         self._assert_same_artifact(before, after)
-        outputs = fixture._assert_parity(
-            source_prefill, prefill_args, before, label="Gemma frozen prefill"
+        outputs = assert_gemma_parity(
+            self, source_prefill, prefill_args, before, label="Gemma frozen prefill"
         )
-        fixture._assert_parity(
-            restored_prefill, prefill_args, after, label="Gemma restored prefill"
+        assert_gemma_parity(
+            self, restored_prefill, prefill_args, after, label="Gemma restored prefill"
         )
         past = tuple(torch.from_numpy(value.copy()) for value in outputs[-2:])
-        decode_args = _args(1, 3)
+        decode_args = cache_args(1, 3)
         kwargs = {"past_key_value": past}
         source_decode = source.as_export_module("decode")
         restored_decode = restored.as_export_module("decode")
         before_decode = _export(source_decode, decode_args, kwargs)
         after_decode = _export(restored_decode, decode_args, kwargs)
         self._assert_same_artifact(before_decode, after_decode)
-        fixture._assert_storage_conversion(
-            before_decode, source.obs_new_k, source.obs_present_key
+        assert_storage_conversion(
+            self, before_decode, source.obs_new_k, source.obs_present_key
         )
         for module, runtime in (
             (source_decode, before_decode),
             (restored_decode, after_decode),
         ):
-            fixture._assert_parity(
-                module, decode_args, runtime, kwargs=kwargs, label="Gemma frozen decode"
+            assert_gemma_parity(
+                self,
+                module,
+                decode_args,
+                runtime,
+                kwargs=kwargs,
+                label="Gemma frozen decode",
             )
         for output, input_index in zip(
             before.output_tensors[-2:], before_decode.program.inputs[-2:]
