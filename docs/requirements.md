@@ -352,7 +352,7 @@ TICO does not currently promise:
 | Core quantization graph passes | `test/quantization/passes/`, `test/unit_test/quantization/` |
 | Quantization algorithms and WrapQ | `test/quantization/algorithm/`, `test/quantization/wrapq/` |
 | Quantization recipes/export/evaluation | `test/quantization/recipes/`, `test/quantization/examples/`, related smoke tests |
-| Saved LLaMA bundle generation | `test/quantization/recipes/test_llama_circle_runtime.py`, `test_export_llama_bundle.py`, `test/quantization/examples/test_generate_cli.py` |
+| Saved LLaMA bundle generation | `test/quantization/recipes/runtime/test_llama_circle_runtime.py`, `test/quantization/recipes/export/test_export_llama_bundle.py`, `test/quantization/examples/test_generate_cli.py` |
 | Circle artifact verification/extraction/passes | `test/unit_test/circle/` |
 | CLI and configuration | `test/pt2_to_circle_test/`, config tests, quantization example/config tests |
 | Performance thresholds | `test/performance/benchmark_perf.py`, invoked by `./ccex test -p` |

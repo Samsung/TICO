@@ -115,6 +115,26 @@ suites without automatically loading every model directory.
 Use the [test documentation index](../test/README.md) for guides to test modules,
 the conversion harness, Circle helpers, and performance benchmarks.
 
+Recipe tests under `test/quantization/recipes/` follow the responsibility being
+verified, using the [recipe ownership guide](../tico/quantization/recipes/README.md#responsibility-boundaries):
+
+| Directory | Responsibility |
+|---|---|
+| `adapters/` | Adapter registration, selection, model loading, configuration and dispatch contracts. |
+| `data/` | Dataset roles, loading, filtering and calibration sample selection. |
+| `debug/` | Tracing, wrapper smoke cases, static diagnostic helpers and CPU validation tools. |
+| `evaluation/` | Evaluation protocols, metrics, generation diagnostics and result handling. |
+| `export/` | Export selection, preflight, artifacts, bundles and frozen snapshot ownership. |
+| `runtime/` | Execution and generation from saved Circle bundles. |
+| `stages/` | Stage dispatch, lifecycle and GPTQ-to-PTQ stage handoff. |
+| `integration/` | Real adapter, quantization, export and runtime connections. |
+
+The recipe root keeps public runner/preflight tests, shared configuration,
+extensions, overrides, qparam helpers and preset contracts. Shared fixtures remain
+under `test/support/`; optional dependency stubs remain in the recipe test root.
+These directories describe ownership and do not change discovery, skips or opt-in
+execution policy.
+
 ## 4. End-to-end module test flow
 
 `NNModuleTest` in `test/pt2_to_circle_test/builder.py` provides the common conversion
