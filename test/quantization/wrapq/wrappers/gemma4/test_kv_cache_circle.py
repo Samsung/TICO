@@ -21,15 +21,20 @@ import numpy as np
 import tico
 import torch
 from tico.circle import CircleDocument
-from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
-from tico.circle.runtime.quantization import fake_quantize_array
-from tico.quantization.config.ptq import PTQConfig
+from tico.circle.runtime import CircleReferenceRuntime
 from tico.quantization.config.specs import affine
 from tico.quantization.wrapq.dtypes import DType
-from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.qscheme import QScheme
-from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
-    QuantGemma4TextAttention,
+
+from test.support.quantization.gemma_kv_cache import (
+    args as _args,
+    assert_gemma_parity,
+    assert_storage,
+    assert_storage_conversion,
+    freeze_attention,
+    load as _load,
+    make_gemma_attention,
+    tensor_qparams,
 )
 
 try:
@@ -39,58 +44,6 @@ try:
     _HAS_GEMMA4 = True
 except ImportError:
     _HAS_GEMMA4 = False
-
-
-def _config(layer_type="full_attention"):
-    """Keep a full-attention final layer, as required by Transformers."""
-    sliding = layer_type == "sliding_attention"
-    layer_types = (
-        ["sliding_attention", "full_attention"] * 2
-        if sliding
-        else ["full_attention", "full_attention"]
-    )
-    config = Gemma4TextConfig.from_dict(
-        dict(
-            vocab_size=32,
-            hidden_size=8,
-            intermediate_size=16,
-            num_hidden_layers=len(layer_types),
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            num_global_key_value_heads=1,
-            head_dim=4,
-            global_head_dim=4,
-            max_position_embeddings=32,
-            layer_types=layer_types,
-            sliding_window=4,
-            hidden_size_per_layer_input=0,
-            attention_k_eq_v=False,
-            num_kv_shared_layers=2 if sliding else 1,
-            enable_moe_block=False,
-            attention_dropout=0.0,
-            allow_global_per_layer_attribute_access=True,
-        )
-    )
-    config._attn_implementation = "eager"
-    return config
-
-
-def _args(query_length, key_length):
-    """Avoid random inputs and keep the static capacity at 32 tokens."""
-    hidden = torch.linspace(0.25, 1.0, query_length * 8).reshape(1, query_length, 8)
-    return (
-        hidden,
-        torch.zeros(1, 1, query_length, key_length),
-        (torch.ones(1, query_length, 4), torch.zeros(1, query_length, 4)),
-    )
-
-
-def _load(observer, scale, zero_point):
-    """Install intentional frozen mismatch qparams for a boundary unit test."""
-    observer.load_qparams(
-        torch.full_like(observer.min_val, scale),
-        torch.full_like(observer.min_val, zero_point, dtype=torch.int32),
-    )
 
 
 class _CacheBranchExport(torch.nn.Module):
@@ -121,71 +74,10 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
     """Export complete attention modules and inspect their serialized ABI."""
 
     def setUp(self):
+        rng = torch.random.fork_rng(devices=[])
+        rng.__enter__()
+        self.addCleanup(rng.__exit__, None, None, None)
         torch.manual_seed(317)
-
-    @staticmethod
-    def _attention(
-        layer_index=0,
-        *,
-        signed_storage=False,
-        compute_policy=None,
-        layer_type="full_attention",
-    ):
-        storage_dtype = DType.int(16) if signed_storage else DType.uint(8)
-        config = PTQConfig(
-            overrides={
-                "new_k": affine(storage_dtype),
-                "new_v": affine(storage_dtype),
-                "present_key": compute_policy or affine(DType.uint(8)),
-                "present_value": compute_policy or affine(DType.uint(8)),
-            },
-            model_args={"text": {"max_seq": 32}},
-        )
-        return QuantGemma4TextAttention(
-            Gemma4TextAttention(
-                _config(layer_type),
-                layer_idx=(
-                    layer_index * 2
-                    if layer_type == "sliding_attention"
-                    else layer_index
-                ),
-            ).eval(),
-            qcfg=config,
-        ).eval()
-
-    @staticmethod
-    def _freeze(attention, *, shared_key_value=None):
-        """Collect real shapes, then intentionally select different frozen grids.
-
-        Recipe calibration coverage belongs to the adapter integration test;
-        this fixture exercises serialization of known, incompatible grids.
-        """
-        attention.enable_calibration()
-        args = _args(32, 32)
-        with torch.no_grad():
-            attention(
-                args[0],
-                args[2],
-                attention_mask=args[1],
-                shared_key_value=shared_key_value,
-                use_cache=True,
-            )
-        for _, observer in attention.named_observers():
-            if isinstance(observer, AffineObserverBase):
-                _load(observer, 0.03125, 0 if observer.qscheme.is_symmetric() else 128)
-        storage_observers = (
-            ()
-            if attention.is_kv_shared_layer
-            else (attention.obs_new_k, attention.obs_new_v)
-        )
-        for observer in storage_observers:
-            if observer.dtype == DType.int(16):
-                _load(observer, 0.09375, 0)
-            else:
-                _load(observer, 0.09375, 113)
-        for observer in (attention.obs_present_key, attention.obs_present_value):
-            _load(observer, 0.21875, 0 if observer.dtype == DType.int(16) else 91)
-        attention.freeze_qparams()
 
     @staticmethod
     def _convert(module, args, kwargs=None, *, optimize=True):
@@ -201,40 +93,6 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
         document.verify()
         return CircleReferenceRuntime(document)
 
-    def _assert_storage(self, tensor, observer):
-        self.assertEqual(
-            tensor.dtype,
-            np.dtype(np.int16 if observer.dtype == DType.int(16) else np.uint8),
-        )
-        self.assertIsNotNone(tensor.quantization)
-        scale, zero_point = observer.compute_qparams()
-        self.assertEqual(tensor.quantization.scale, (float(scale),))
-        self.assertEqual(tensor.quantization.zero_point, (int(zero_point),))
-        self.assertEqual(tensor.quantization.quantized_dimension, 0)
-
-    @staticmethod
-    def _qparams(tensor):
-        quantization = tensor.quantization
-        if quantization is None or not quantization.scale:
-            return None
-        return quantization.scale, quantization.zero_point
-
-    def _assert_storage_conversion(self, runtime, storage_observer, compute_observer):
-        """The storage boundary reaches C through exactly one Quantize."""
-        program = runtime.program
-        compute_scale, compute_zp = compute_observer.compute_qparams()
-        for index in program.inputs[-2:]:
-            self._assert_storage(program.tensor(index), storage_observer)
-            users = [op for op in program.operators if index in op.inputs]
-            self.assertEqual(len(users), 1)
-            self.assertEqual(users[0].name, "QUANTIZE")
-            converted = program.tensor(users[0].outputs[0])
-            self.assertEqual(
-                self._qparams(converted),
-                ((float(compute_scale),), (int(compute_zp),)),
-            )
-            self.assertEqual(converted.dtype, np.dtype(np.uint8))
-
     def _assert_cache_concats(self, runtime, *, key_length, compute_observer):
         program = runtime.program
         concats = [
@@ -248,7 +106,7 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
         expected = ((float(scale),), (int(zero_point),))
         for operator in concats:
             tensors = [program.tensor(i) for i in (*operator.inputs, *operator.outputs)]
-            self.assertEqual({self._qparams(tensor) for tensor in tensors}, {expected})
+            self.assertEqual({tensor_qparams(tensor) for tensor in tensors}, {expected})
             self.assertEqual(len({tensor.dtype for tensor in tensors}), 1)
         return concats
 
@@ -275,69 +133,18 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
             source = runtime.program.tensor(operator.inputs[0])
             target = runtime.program.tensor(operator.outputs[0])
             self.assertNotEqual(
-                (source.dtype, self._qparams(source)),
-                (target.dtype, self._qparams(target)),
+                (source.dtype, tensor_qparams(source)),
+                (target.dtype, tensor_qparams(target)),
                 "Redundant identity Quantize remains in serialized Circle",
             )
 
-    def _assert_parity(
-        self,
-        module,
-        args,
-        runtime,
-        *,
-        kwargs=None,
-        label,
-        allow_hidden_rounding_tie=False,
-    ):
-        """Use the same dequantized ABI values in eager and Circle execution."""
-        leaves, spec = torch.utils._pytree.tree_flatten((args, kwargs or {}))
-        self.assertEqual(len(leaves), len(runtime.program.inputs))
-        encoded = []
-        for value, index in zip(leaves, runtime.program.inputs):
-            tensor = runtime.program.tensor(index)
-            array = value.detach().numpy()
-            if tensor.is_quantized_integer:
-                array = fake_quantize_array(array, tensor)
-            encoded.append(np.array(array, copy=True))
-        eager_args, eager_kwargs = torch.utils._pytree.tree_unflatten(
-            [torch.from_numpy(value.copy()) for value in encoded], spec
-        )
-        with torch.no_grad():
-            eager = module(*eager_args, **eager_kwargs)
-        expected, _ = torch.utils._pytree.tree_flatten(eager)
-        result = runtime.run(encoded, mode=ExecutionMode.FAKE_QUANTIZE)
-        self.assertEqual(len(result.outputs), len(expected))
-        for index, (actual, wanted) in enumerate(zip(result.outputs, expected)):
-            error = np.abs(actual - wanted.detach().numpy())
-            metrics = {
-                "max_abs": float(error.max()),
-                "mean_abs": float(error.mean()),
-                "differing": int(np.count_nonzero(error)),
-            }
-            print(f"{label} output{index}: {metrics}")
-            if index == 0 and allow_hidden_rounding_tie and np.any(error):
-                # This equal-grid UINT8 fixture reaches an attention reduction
-                # half tie: Circle rounds away from zero, whereas PyTorch FQ
-                # rounds to even. Only one hidden element may differ, by exactly
-                # one output-grid step. Every cache value remains bit-exact.
-                tensor = runtime.program.tensor(runtime.program.outputs[index])
-                output_step = tensor.quantization.scale[0]
-                self.assertEqual(metrics["differing"], 1, metrics)
-                self.assertEqual(metrics["max_abs"], output_step, metrics)
-            else:
-                np.testing.assert_array_equal(
-                    actual, wanted.detach().numpy(), err_msg=f"{label}: {metrics}"
-                )
-        return result.outputs
-
     def _exercise_attention(self, *, signed_storage=False, equal=False):
         dtype = DType.int(16) if signed_storage else DType.uint(8)
-        attention = self._attention(
+        attention = make_gemma_attention(
             signed_storage=signed_storage,
             compute_policy=affine(dtype) if equal else None,
         )
-        self._freeze(attention)
+        freeze_attention(attention)
         if equal:
             for observer in (
                 attention.obs_present_key,
@@ -354,9 +161,13 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                 for index, observer in zip(
                     prefill.program.outputs[-2:], attention.cache_storage_observers()
                 ):
-                    self._assert_storage(prefill.program.tensor(index), observer)
-                outputs = self._assert_parity(
-                    prefill_module, prefill_args, prefill, label=label + " prefill"
+                    assert_storage(self, prefill.program.tensor(index), observer)
+                outputs = assert_gemma_parity(
+                    self,
+                    prefill_module,
+                    prefill_args,
+                    prefill,
+                    label=label + " prefill",
                 )
                 # Feed serialized storage outputs into both decode graphs unchanged.
                 past = tuple(torch.from_numpy(value.copy()) for value in outputs[-2:])
@@ -372,11 +183,11 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                         decode.program.outputs[-2:],
                         attention.cache_storage_observers(),
                     ):
-                        self._assert_storage(
-                            decode.program.tensor(input_index), observer
+                        assert_storage(
+                            self, decode.program.tensor(input_index), observer
                         )
-                        self._assert_storage(
-                            decode.program.tensor(output_index), observer
+                        assert_storage(
+                            self, decode.program.tensor(output_index), observer
                         )
                     concats = self._assert_cache_concats(
                         decode,
@@ -384,12 +195,13 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                         compute_observer=attention.obs_present_key,
                     )
                     if not equal:
-                        self._assert_storage_conversion(
-                            decode, attention.obs_new_k, attention.obs_present_key
+                        assert_storage_conversion(
+                            self, decode, attention.obs_new_k, attention.obs_present_key
                         )
                         self._assert_independent_current_branch(decode, concats)
                     self._assert_no_identity_quantizes(decode)
-                    outputs = self._assert_parity(
+                    outputs = assert_gemma_parity(
+                        self,
                         decode_module,
                         args,
                         decode,
@@ -416,8 +228,8 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
         """The first marker annotates the input ABI; S-to-C stays explicit."""
         for signed_storage in (False, True):
             with self.subTest(signed_storage=signed_storage):
-                attention = self._attention(signed_storage=signed_storage)
-                self._freeze(attention)
+                attention = make_gemma_attention(signed_storage=signed_storage)
+                freeze_attention(attention)
                 module = _CacheBranchExport(attention).eval()
                 past_key = torch.tensor([-3, -1, 1, 3, -5, 5, -7, 7]).reshape(
                     1, 1, 2, 4
@@ -444,8 +256,8 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                     for actual, wanted in zip(eager, expected):
                         torch.testing.assert_close(actual, wanted, rtol=0, atol=0)
                     runtime = self._convert(module, args)
-                    self._assert_storage_conversion(
-                        runtime, attention.obs_new_k, attention.obs_present_key
+                    assert_storage_conversion(
+                        self, runtime, attention.obs_new_k, attention.obs_present_key
                     )
                     concats = self._assert_cache_concats(
                         runtime,
@@ -460,7 +272,7 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                         attention.cache_storage_observers(),
                     ):
                         self.assertEqual(delta_index, input_index)
-                        self._assert_storage(program.tensor(input_index), observer)
+                        assert_storage(self, program.tensor(input_index), observer)
                         users = [
                             op for op in program.operators if input_index in op.inputs
                         ]
@@ -475,7 +287,8 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                     self._assert_no_identity_quantizes(runtime)
                     # Compare eager and Circle with the encoded S input values,
                     # as required by the serialized ABI, rather than raw current.
-                    self._assert_parity(
+                    assert_gemma_parity(
+                        self,
                         module,
                         args,
                         runtime,
@@ -487,31 +300,33 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                     past_value = torch.cat((past_value, eager[3]), dim=-2)
 
     def test_per_channel_compute_export_is_rejected(self):
-        attention = self._attention(
+        attention = make_gemma_attention(
             compute_policy=affine(
                 DType.uint(8), qscheme=QScheme.PER_CHANNEL_ASYMM, channel_axis=1
             )
         )
         with self.assertRaisesRegex(ValueError, "per-tensor affine"):
-            self._freeze(attention)
+            freeze_attention(attention)
             attention.as_export_module("decode")
 
     def test_shared_consumer_prefill_and_decode_use_producer_storage(self):
         for layer_type in ("full_attention", "sliding_attention"):
             for signed_storage in (False, True):
                 with self.subTest(layer_type=layer_type, signed_storage=signed_storage):
-                    producer = self._attention(
+                    producer = make_gemma_attention(
                         signed_storage=signed_storage, layer_type=layer_type
                     )
-                    self._freeze(producer)
-                    consumer = self._attention(
+                    freeze_attention(producer)
+                    consumer = make_gemma_attention(
                         layer_index=1,
                         signed_storage=not signed_storage,
                         layer_type=layer_type,
                     )
                     consumer.bind_cache_source(producer)
                     shared_key = torch.linspace(-1.0, 1.0, 32 * 4).reshape(1, 1, 32, 4)
-                    self._freeze(consumer, shared_key_value=(shared_key, -shared_key))
+                    freeze_attention(
+                        consumer, shared_key_value=(shared_key, -shared_key)
+                    )
                     shared = (shared_key[..., :3, :], -shared_key[..., :3, :])
                     for mode, query_length in (("prefill", 3), ("decode", 1)):
                         module = consumer.as_export_module(mode, cache_source=producer)
@@ -519,10 +334,11 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                         kwargs = {"shared_key_value": shared}
                         runtime = self._convert(module, args, kwargs)
                         self.assertEqual(len(runtime.program.outputs), 1)
-                        self._assert_storage_conversion(
-                            runtime, producer.obs_new_k, consumer.obs_present_key
+                        assert_storage_conversion(
+                            self, runtime, producer.obs_new_k, consumer.obs_present_key
                         )
-                        self._assert_parity(
+                        assert_gemma_parity(
+                            self,
                             module,
                             args,
                             runtime,
@@ -532,10 +348,10 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
 
     def test_external_float_policy_uses_folded_compute_input_grid(self):
         """Ordinary folding places C on the serialized external-cache inputs."""
-        consumer = self._attention(layer_index=1)
+        consumer = make_gemma_attention(layer_index=1)
         consumer.bind_external_float_cache()
         shared_key = torch.linspace(-0.875, 0.875, 32 * 4).reshape(1, 1, 32, 4)
-        self._freeze(consumer, shared_key_value=(shared_key, -shared_key))
+        freeze_attention(consumer, shared_key_value=(shared_key, -shared_key))
         shared = (shared_key[..., :3, :], -shared_key[..., :3, :])
         for mode, query_length in (("prefill", 3), ("decode", 1)):
             with self.subTest(mode=mode):
@@ -549,13 +365,14 @@ class TestGemma4KVCacheCircle(unittest.TestCase):
                     (consumer.obs_present_key, consumer.obs_present_value),
                 ):
                     tensor = runtime.program.tensor(index)
-                    self._assert_storage(tensor, observer)
+                    assert_storage(self, tensor, observer)
                     users = [
                         op for op in runtime.program.operators if index in op.inputs
                     ]
                     self.assertTrue(users)
                     self.assertNotIn("QUANTIZE", {op.name for op in users})
-                self._assert_parity(
+                assert_gemma_parity(
+                    self,
                     module,
                     args,
                     runtime,

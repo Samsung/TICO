@@ -120,41 +120,6 @@ class TestQuantGemma4ForCausalLMSmoke(unittest.TestCase):
         self.assertIsInstance(qmodel, PTQWrapper)
         self.assertIsInstance(qmodel.wrapped, QuantGemma4ForCausalLM)
 
-    def test_text_only_forward_is_finite(self):
-        """Text-only forward through the wrapper should produce finite logits."""
-        qmodel = prepare(self.fp_model, self.qcfg).eval()
-        sample = self._text_only_sample()
-
-        with torch.no_grad():
-            for _ in range(3):
-                qmodel(**sample)
-
-        quantized = convert(qmodel)
-        with torch.no_grad():
-            out = quantized(**sample)
-
-        # The wrapper mirrors the HF contract and returns a
-        # Gemma4CausalLMOutputWithPast; the logits live on ``.logits``.
-        self.assertTrue(torch.isfinite(out.logits).all())
-
-    def test_forward_output_shape(self):
-        """Forward output should have shape (batch, seq_len, vocab_size)."""
-        qmodel = prepare(self.fp_model, self.qcfg).eval()
-        sample = self._text_only_sample()
-
-        with torch.no_grad():
-            for _ in range(3):
-                qmodel(**sample)
-
-        quantized = convert(qmodel)
-        with torch.no_grad():
-            out = quantized(**sample)
-
-        self.assertEqual(
-            out.logits.shape,
-            (self.batch_size, self.seq_len, self.config.vocab_size),
-        )
-
     def test_logits_to_keep(self):
         """logits_to_keep=1 should produce logits only for the last position."""
         qmodel = prepare(self.fp_model, self.qcfg).eval()
@@ -190,16 +155,21 @@ class TestQuantGemma4ForCausalLMSmoke(unittest.TestCase):
         if softcap is not None:
             self.assertTrue(out.logits.abs().max().item() <= softcap + 1e-5)
 
-    def test_prepare_convert_flow(self):
-        """Full prepare → calibrate → convert flow should succeed."""
-
+    def test_text_only_ptq_flow_preserves_logits_contract(self):
+        """Public inference PTQ preserves wrapper, lifecycle, shape and finite logits."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_for_causal_lm import (
             QuantGemma4ForCausalLM,
         )
 
-        qmodel = prepare(self.fp_model, self.qcfg)
-        self.assertIsInstance(qmodel, PTQWrapper)
-        self.assertIsInstance(qmodel.wrapped, QuantGemma4ForCausalLM)
+        qmodel = prepare(self.fp_model, self.qcfg).eval()
+        self.assertIsInstance(qmodel, PTQWrapper, "prepare must return a PTQWrapper")
+        self.assertIsInstance(
+            qmodel.wrapped,
+            QuantGemma4ForCausalLM,
+            "prepare must dispatch to the model-family wrapper",
+        )
+        self.assertIs(qmodel._mode, Mode.CALIB, "prepare must enable calibration")
+        self.assertFalse(qmodel.training, "calibration must use inference mode")
 
         sample = self._text_only_sample()
         with torch.no_grad():
@@ -207,7 +177,8 @@ class TestQuantGemma4ForCausalLMSmoke(unittest.TestCase):
                 qmodel(**sample)
 
         quantized = convert(qmodel)
-        self.assertIs(quantized._mode, Mode.QUANT)
+        self.assertIs(quantized._mode, Mode.QUANT, "convert must freeze quantization")
+        self.assertFalse(quantized.training, "converted inference must remain in eval")
 
         with torch.no_grad():
             out = quantized(**sample)
@@ -215,8 +186,12 @@ class TestQuantGemma4ForCausalLMSmoke(unittest.TestCase):
         self.assertEqual(
             out.logits.shape,
             (self.batch_size, self.seq_len, self.config.vocab_size),
+            "PTQ must preserve full-sequence (batch, sequence, vocabulary) logits",
         )
-        self.assertTrue(torch.isfinite(out.logits).all())
+        self.assertTrue(
+            torch.isfinite(out.logits).all(),
+            "PTQ logits must contain only finite values",
+        )
 
     def test_observers_calibrated(self):
         """After convert, the softcapping and logits observers should have qparams."""

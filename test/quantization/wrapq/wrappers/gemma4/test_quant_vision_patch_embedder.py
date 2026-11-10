@@ -95,8 +95,8 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
     # NO_QUANT mode
     # ------------------------------------------------------------------
 
-    def test_no_quant_forward_matches_fp(self):
-        """In NO_QUANT mode the wrapper should match the floating-point module."""
+    def test_no_quant_forward_matches_fp_and_expected_shape(self):
+        """NO_QUANT preserves the fixed output shape and floating-point values."""
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
@@ -111,11 +111,17 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
             q_out = q_module(pixel_values, pixel_position_ids, padding_positions)
             fp_out = fp_module(pixel_values, pixel_position_ids, padding_positions)
 
-        # Shapes must match
+        expected_shape = (self.batch_size, self.num_patches, self.hidden_size)
+        self.assertEqual(
+            q_out.shape, expected_shape, "NO_QUANT must preserve the fixed output shape"
+        )
         self.assertEqual(q_out.shape, fp_out.shape)
 
         # The folded projection must remain numerically equivalent.
-        self.assertTrue(torch.allclose(q_out, fp_out, atol=1e-5, rtol=1e-5))
+        self.assertTrue(
+            torch.allclose(q_out, fp_out, atol=1e-5, rtol=1e-5),
+            "NO_QUANT must preserve floating-point patch embeddings",
+        )
 
     def test_pixel_normalization_is_folded_into_input_projection(self):
         """Fold pixel normalization into a cloned projection before PTQ."""
@@ -147,22 +153,6 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
 
         torch.testing.assert_close(fp_module.input_proj.weight, original_weight)
         self.assertIsNone(fp_module.input_proj.bias)
-
-    def test_no_quant_output_shape(self):
-        """Check that the output has the expected static shape."""
-        fp_module = _make_patch_embedder(
-            hidden_size=self.hidden_size,
-            patch_size=self.patch_size,
-            position_embedding_size=self.position_embedding_size,
-        )
-        q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
-
-        pixel_values, pixel_position_ids, padding_positions = self._sample_inputs()
-        with torch.no_grad():
-            output = q_module(pixel_values, pixel_position_ids, padding_positions)
-
-        expected_shape = (self.batch_size, self.num_patches, self.hidden_size)
-        self.assertEqual(output.shape, expected_shape)
 
     # ------------------------------------------------------------------
     # Mode transitions

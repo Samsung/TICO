@@ -123,59 +123,39 @@ class UtilsSignatureTest(unittest.TestCase):
 
     def test_bind_tuple(self):
         spec = ModelInputSpec(self.circle_model.circle_binary)
-        args = (
-            torch.randn(
-                2,
-                3,
-            ),
-            (
-                torch.randn(
-                    2,
-                    3,
-                ),
-                torch.randn(
-                    2,
-                    2,
-                ),
-            ),  # This tuple will be bound to x1, lin by flattening
-        )
+        x0 = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        x1 = torch.arange(10, 16, dtype=torch.float32).reshape(2, 3)
+        lin = torch.arange(20, 24, dtype=torch.float32).reshape(2, 2)
+        expected = tuple(leaf.clone() for leaf in (x0, x1, lin))
+        args = (x0, (x1, lin))
         inputs = spec.bind(args, {}, check=True)
 
-        assert len(inputs) == 3
-        assert inputs[0].shape == torch.Size([2, 3])
-        assert inputs[1].shape == torch.Size([2, 3])
-        assert inputs[2].shape == torch.Size([2, 2])
+        self.assertEqual(len(inputs), 3)
+        for index, (bound, leaf, shape) in enumerate(
+            zip(inputs, expected, ((2, 3), (2, 3), (2, 2)))
+        ):
+            with self.subTest(leaf=index):
+                self.assertEqual(bound.shape, torch.Size(shape))
+                self.assertEqual(bound.dtype, torch.float32)
+                self.assertTrue(torch.equal(bound, leaf), "Flattened leaf value/order")
 
     def test_bind_multi_level_tuple(self):
         spec = ModelInputSpec(self.circle_model.circle_binary)
-        args = (
-            torch.randn(
-                2,
-                3,
-            ),
-            (
-                (
-                    (
-                        (
-                            torch.randn(
-                                2,
-                                3,
-                            )
-                        ),
-                        torch.randn(
-                            2,
-                            2,
-                        ),
-                    )
-                )
-            ),  # This tuple will be bound to x1, lin by flattening
-        )
+        x0 = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        x1 = torch.arange(10, 16, dtype=torch.float32).reshape(2, 3)
+        lin = torch.arange(20, 24, dtype=torch.float32).reshape(2, 2)
+        expected = tuple(leaf.clone() for leaf in (x0, x1, lin))
+        args = (x0, ((x1,), ((lin,),)))
         inputs = spec.bind(args, {}, check=True)
 
-        assert len(inputs) == 3
-        assert inputs[0].shape == torch.Size([2, 3])
-        assert inputs[1].shape == torch.Size([2, 3])
-        assert inputs[2].shape == torch.Size([2, 2])
+        self.assertEqual(len(inputs), 3)
+        for index, (bound, leaf, shape) in enumerate(
+            zip(inputs, expected, ((2, 3), (2, 3), (2, 2)))
+        ):
+            with self.subTest(leaf=index):
+                self.assertEqual(bound.shape, torch.Size(shape))
+                self.assertEqual(bound.dtype, torch.float32)
+                self.assertTrue(torch.equal(bound, leaf), "Flattened leaf value/order")
 
     def test_bind_input_num_mismatch(self):
         spec = ModelInputSpec(self.circle_model.circle_binary)
