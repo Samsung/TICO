@@ -341,9 +341,9 @@ Relevant coverage includes:
   FAKE_QUANTIZE; its existing NATIVE unsupported diagnostic remains in force.
 - [Selected-row execution](../test/unit_test/circle/runtime/test_rowwise_gather.py):
   row qparams, index bounds, sharing and loading/execution allocation checks.
-- Real [Llama](../test/quantization/recipes/test_llama_explicit_embedding_integration.py),
-  [Qwen token](../test/quantization/recipes/test_qwen_token_embedding_integration.py),
-  and [Qwen multimodal](../test/quantization/recipes/test_qwen_multimodal_embedding_integration.py)
+- Real [Llama](../test/quantization/recipes/integration/test_llama_explicit_embedding_integration.py),
+  [Qwen token](../test/quantization/recipes/integration/test_qwen_token_embedding_integration.py),
+  and [Qwen multimodal](../test/quantization/recipes/integration/test_qwen_multimodal_embedding_integration.py)
   adapter exports: frozen-grid oracles, rotation, insertion, stage handoff, and
   loading/execution hooks that reject full embedding-table DQ/cache creation.
 
@@ -351,9 +351,9 @@ Run the focused CPU coverage in an installed test environment:
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest \
-  test.quantization.recipes.test_llama_explicit_embedding_integration \
-  test.quantization.recipes.test_qwen_token_embedding_integration \
-  test.quantization.recipes.test_qwen_multimodal_embedding_integration \
+  test.quantization.recipes.integration.test_llama_explicit_embedding_integration \
+  test.quantization.recipes.integration.test_qwen_token_embedding_integration \
+  test.quantization.recipes.integration.test_qwen_multimodal_embedding_integration \
   test.quantization.passes.test_explicit_embedding_export \
   test.quantization.passes.test_explicit_embedding_retarget \
   test.quantization.passes.test_explicit_embedding_reduced_range \

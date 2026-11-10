@@ -119,7 +119,7 @@ the scoring loop and do not measure pretrained quality:
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest \
-  test.quantization.recipes.test_cpu_evaluation
+  test.quantization.recipes.evaluation.test_cpu_evaluation
 ```
 
 ### Protocol record and checkpoint migration

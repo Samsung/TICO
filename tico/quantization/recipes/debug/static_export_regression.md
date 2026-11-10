@@ -122,7 +122,7 @@ imports source directly from its specified directory and verifies the location.
 ```bash
 python -m unittest \
   test.quantization.wrapq.utils.test_static_export_inputs \
-  test.quantization.recipes.test_export_regression
+  test.quantization.recipes.debug.test_export_regression
 ```
 
 These tests include real Torch export of small helper/adapter models, immutable

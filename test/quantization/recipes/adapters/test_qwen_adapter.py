@@ -1,0 +1,584 @@
+# Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+try:
+    from quantization.recipes.optional_dependency_stubs import (
+        install_optional_dependency_stubs,
+    )
+except ModuleNotFoundError:
+    from test.quantization.recipes.optional_dependency_stubs import (
+        install_optional_dependency_stubs,
+    )
+
+install_optional_dependency_stubs()
+
+import contextlib
+import copy
+import io
+import unittest
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
+
+import tico.quantization.recipes.adapters.qwen3_vl as qwen_mod
+import tico.quantization.recipes.data.vlm as vlm_data
+import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
+import tico.quantization.recipes.evaluation.mmmu as mmmu_mod
+
+import torch
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
+from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.dtypes import DType
+
+
+class TinyModule(torch.nn.Module):
+    """Tiny module exposing one linear submodule for hook registration."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 2)
+
+    def forward(self, x):
+        """Run a single linear layer."""
+        return self.linear(x)
+
+
+def _fake_qwen_model():
+    """Return a fake Qwen3-VL model config."""
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            vision_config=SimpleNamespace(depth=3, deepstack_visual_indexes=[0, 1]),
+            text_config=SimpleNamespace(num_hidden_layers=4),
+        )
+    )
+
+
+def _ptq_stage_cfg() -> dict[str, Any]:
+    """Return a small PTQ stage config shared by the build_ptq_config tests."""
+    return {
+        "activation": "int16",
+        "linear_weight": 4,
+        "vision_patch_embed_weight": 8,
+        "embedding_weight": 8,
+        "lm_head_weight": 4,
+        "spin_rotation_weight": "int16",
+        "norm": "int16",
+        "norm_weight": "int16",
+        "quantize_vision": True,
+        "quantize_text": False,
+        "quantize_lm_head": True,
+        "strict_wrap": False,
+    }
+
+
+def _vision_recipe_cfg() -> dict[str, Any]:
+    """Return a recipe cfg whose vision.grid_thw is a YAML-style list."""
+    return {
+        "model_args": {
+            "profile": "npu_export",
+            "vision": {
+                "grid_thw": [1, 8, 8],
+                "visual_start_idx": 0,
+                "spatial_merge_size": 2,
+            },
+        }
+    }
+
+
+class TestQwen3VLAdapter(unittest.TestCase):
+    def assert_recipe_cfg_untouched(
+        self,
+        cfg: dict[str, Any],
+        snapshot: dict[str, Any],
+        model_args: Any,
+        vision_args: Any,
+        grid_thw: Any,
+    ) -> None:
+        """Assert cfg still holds the same nested objects and values as before."""
+        self.assertEqual(cfg, snapshot)
+        self.assertIs(cfg["model_args"], model_args)
+        self.assertIs(cfg["model_args"]["vision"], vision_args)
+        self.assertIs(cfg["model_args"]["vision"]["grid_thw"], grid_thw)
+        self.assertIs(type(grid_thw), list)
+        self.assertEqual(grid_thw, [1, 8, 8])
+
+    def test_build_ptq_config_uses_architecture_counts_and_model_args(self):
+        """Qwen3VLAdapter should infer architecture counts before building PTQ config."""
+        captured: dict[str, Any] = {}
+
+        def fake_build_qwen3_vl_ptq_config(**kwargs):
+            captured.update(kwargs)
+            return {"ptq": "qwen"}
+
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        stage_cfg = _ptq_stage_cfg()
+        stage_snapshot = copy.deepcopy(stage_cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
+
+        with patch.object(
+            qwen_mod, "build_qwen3_vl_ptq_config", fake_build_qwen3_vl_ptq_config
+        ):
+            result = Qwen3VLAdapter().build_ptq_config(ctx, stage_cfg)
+
+        self.assertEqual(result, {"ptq": "qwen"})
+        self.assertEqual(captured["num_vision_blocks"], 3)
+        self.assertEqual(captured["num_text_layers"], 4)
+        self.assertEqual(captured["num_deepstack_mergers"], 2)
+        self.assertEqual(captured["model_args"]["vision"]["grid_thw"], (1, 8, 8))
+        self.assertIs(type(captured["model_args"]["vision"]["grid_thw"]), tuple)
+        self.assertEqual(captured["model_args"]["profile"], "npu_export")
+        self.assertEqual(captured["model_args"]["vision"]["visual_start_idx"], 0)
+        self.assertEqual(captured["model_args"]["vision"]["spatial_merge_size"], 2)
+        self.assertEqual(captured["linear_weight"].dtype, DType.uint(4))
+        self.assertEqual(captured["vision_patch_embed_weight"].dtype, DType.uint(8))
+        self.assertEqual(captured["lm_head_weight"].dtype, DType.uint(4))
+        self.assertEqual(captured["spin_rotation_weight"].dtype, DType.int(16))
+        self.assertFalse(captured["strict_wrap"])
+
+        # Preparing the builder arguments must not write into the recipe cfg.
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+        self.assertEqual(stage_cfg, stage_snapshot)
+
+    def test_build_ptq_config_returns_real_config_and_preserves_recipe_cfg(self):
+        """The real builder path should normalize grid_thw only in the returned config."""
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
+
+        result = Qwen3VLAdapter().build_ptq_config(ctx, _ptq_stage_cfg())
+
+        self.assertIsInstance(result, PTQConfig)
+        self.assertEqual(result.model_args["vision"]["grid_thw"], (1, 8, 8))
+        self.assertIs(type(result.model_args["vision"]["grid_thw"]), tuple)
+        self.assertEqual(result.model_args["profile"], "npu_export")
+        self.assertEqual(result.model_args["vision"]["visual_start_idx"], 0)
+        self.assertEqual(result.activation.dtype, DType.int(16))
+        self.assertFalse(result.strict_wrap)
+        self.assertEqual(
+            result.overrides["model"]["visual"]["patch_embed"]["proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(8),
+        )
+        text_layers = result.overrides["model"]["language_model"]["layers"]  # type: ignore[index]
+        self.assertEqual(
+            text_layers["3"]["self_attn"]["q_proj"]["weight"]["dtype"], DType.uint(4)
+        )
+        self.assertEqual(
+            result.overrides["lm_head"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+
+    def test_build_ptq_config_builder_failure_propagates_without_mutating_cfg(self):
+        """A failing builder must propagate and leave the recipe cfg untouched."""
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
+
+        def failing_builder(**kwargs):
+            raise RuntimeError("builder boom")
+
+        with patch.object(qwen_mod, "build_qwen3_vl_ptq_config", failing_builder):
+            with self.assertRaisesRegex(RuntimeError, "builder boom"):
+                Qwen3VLAdapter().build_ptq_config(ctx, _ptq_stage_cfg())
+
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+
+    def test_build_ptq_config_handles_missing_keys_and_tuple_grid(self):
+        """Missing keys get defaults in the returned config only; tuples pass through."""
+        cases: dict[str, dict[str, Any]] = {
+            "tuple_grid": {"model_args": {"vision": {"grid_thw": (1, 4, 4)}}},
+            "vision_without_grid": {"model_args": {"vision": {"visual_start_idx": 0}}},
+            "no_vision": {"model_args": {"profile": "npu_export"}},
+            "no_model_args": {},
+        }
+        for name, cfg in cases.items():
+            with self.subTest(case=name):
+                cfg_snapshot = copy.deepcopy(cfg)
+                original_model_args = cfg.get("model_args")
+                original_vision = (
+                    original_model_args.get("vision")
+                    if original_model_args is not None
+                    else None
+                )
+                ctx = RecipeContext(
+                    cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model()
+                )
+
+                result = Qwen3VLAdapter().build_ptq_config(ctx, _ptq_stage_cfg())
+
+                self.assertIsInstance(result, PTQConfig)
+                self.assertIsInstance(result.model_args["vision"], dict)
+                if name == "tuple_grid":
+                    self.assertEqual(result.model_args["vision"]["grid_thw"], (1, 4, 4))
+                    self.assertIs(type(result.model_args["vision"]["grid_thw"]), tuple)
+                else:
+                    self.assertNotIn("grid_thw", result.model_args["vision"])
+                if name == "no_vision":
+                    self.assertEqual(result.model_args["profile"], "npu_export")
+
+                # The recipe cfg keeps its original keys, values, and objects.
+                self.assertEqual(cfg, cfg_snapshot)
+                self.assertIs(cfg.get("model_args"), original_model_args)
+                if original_model_args is not None:
+                    self.assertIs(original_model_args.get("vision"), original_vision)
+
+    def test_build_ptq_config_repeated_calls_are_stable(self):
+        """Repeated calls with the same ctx and stage_cfg must agree and not mutate cfg."""
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        stage_cfg = _ptq_stage_cfg()
+        stage_snapshot = copy.deepcopy(stage_cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
+        adapter = Qwen3VLAdapter()
+
+        first = adapter.build_ptq_config(ctx, stage_cfg)
+        second = adapter.build_ptq_config(ctx, stage_cfg)
+
+        for result in (first, second):
+            self.assertIsInstance(result, PTQConfig)
+            self.assertEqual(result.model_args["vision"]["grid_thw"], (1, 8, 8))
+            self.assertIs(type(result.model_args["vision"]["grid_thw"]), tuple)
+        self.assertEqual(first.model_args, second.model_args)
+        self.assertEqual(first.activation, second.activation)
+        self.assertEqual(first.weight, second.weight)
+        self.assertEqual(first.strict_wrap, second.strict_wrap)
+        self.assertEqual(first.overrides, second.overrides)
+
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+        self.assertEqual(stage_cfg, stage_snapshot)
+
+    def test_apply_spinquant_passes_enable_vision_options_to_config(self):
+        """Qwen3VLAdapter should pass enable-based SpinQuant options to the config."""
+        captured: dict[str, Any] = {}
+        adapter = Qwen3VLAdapter()
+        model = TinyModule()
+        ctx = RecipeContext(
+            cfg={"runtime": {"show_progress": False}},
+            adapter=adapter,
+            model=model,
+        )
+
+        class FakeSpinQuantConfig:
+            """Fake SpinQuant config that records constructor keyword arguments."""
+
+            def __init__(self, **kwargs):
+                captured["config_kwargs"] = kwargs
+
+        def fake_prepare(model_arg, config, inplace=False):
+            captured["prepare"] = (model_arg, config, inplace)
+            return model_arg
+
+        def fake_convert(model_arg, inplace=False):
+            captured["convert"] = (model_arg, inplace)
+            return model_arg
+
+        stage_cfg = {
+            "init_method": "hadamard",
+            "enable_r1": False,
+            "enable_r2": False,
+            "fuse_deepstack_visual_outputs": False,
+            "enable_vision_r1": True,
+            "enable_vision_r2": True,
+            "vision_init_method": "random",
+            "require_vision_r1_layernorm_compatible": False,
+            "vision_rotation_tolerance": 1e-3,
+            "show_progress": False,
+        }
+
+        with (
+            patch.object(qwen_mod, "Qwen3VLSpinQuantConfig", FakeSpinQuantConfig),
+            patch.object(qwen_mod, "prepare", fake_prepare),
+            patch.object(qwen_mod, "convert", fake_convert),
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = adapter.apply_spinquant(ctx, stage_cfg)
+
+        self.assertIs(result, model)
+        kwargs = captured["config_kwargs"]
+        self.assertEqual(kwargs["init_method"], "hadamard")
+        self.assertFalse(kwargs["enable_r1"])
+        self.assertFalse(kwargs["enable_r2"])
+        self.assertFalse(kwargs["fuse_deepstack_visual_outputs"])
+        self.assertTrue(kwargs["enable_vision_r1"])
+        self.assertTrue(kwargs["enable_vision_r2"])
+        self.assertTrue(kwargs["fuse_vision_layer_norms"])
+        self.assertEqual(kwargs["vision_init_method"], "random")
+        self.assertFalse(kwargs["require_vision_r1_layernorm_compatible"])
+        self.assertEqual(kwargs["vision_rotation_tolerance"], 1e-3)
+        self.assertEqual(captured["prepare"][2], True)
+        self.assertEqual(captured["convert"][1], True)
+
+    def test_build_calibration_inputs_routes_mixed_dataset_config(self):
+        """Qwen3VLAdapter should route mixed calibration datasets to the data helper."""
+        captured = {}
+        datasets = [
+            {"dataset": "vqav2", "split": "testdev", "n_samples": 3},
+            {"dataset": "wikitext2", "split": "train", "n_samples": 5},
+        ]
+        ctx = RecipeContext(
+            cfg={
+                "runtime": {"seed": 7},
+                "calibration": {"datasets": datasets, "seq_len": 128},
+            },
+            adapter=Qwen3VLAdapter(),
+            model=_fake_qwen_model(),
+        )
+        ctx.processor = object()
+
+        def fake_build_vlm_calibration_inputs(**kwargs):
+            captured.update(kwargs)
+            return [{"input_ids": torch.ones(1, 2)}]
+
+        with patch.object(
+            qwen_mod,
+            "build_vlm_calibration_inputs",
+            fake_build_vlm_calibration_inputs,
+        ):
+            result = Qwen3VLAdapter().build_calibration_inputs(ctx)
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(torch.equal(result[0]["input_ids"], torch.ones(1, 2)))
+        self.assertEqual(captured["datasets"], datasets)
+        self.assertIsNone(captured["split"])
+        self.assertEqual(captured["max_seq_len"], 128)
+        self.assertEqual(captured["seed"], 7)
+
+    def test_vlm_data_helper_parses_mixed_dataset_string(self):
+        """The VLM data helper should parse old CLI-style mixed dataset specs."""
+        captured = {}
+
+        def fake_get_mixed_calib_inputs(**kwargs):
+            captured.update(kwargs)
+            return ["mixed"]
+
+        with patch.object(
+            vlm_data, "get_mixed_calib_inputs", fake_get_mixed_calib_inputs
+        ):
+            result = vlm_data.build_vlm_calibration_inputs(
+                processor=object(),
+                dataset="vqav2:testdev:3,wikitext2:train:5",
+                n_samples=1,
+                max_seq_len=128,
+                seed=11,
+            )
+
+        self.assertEqual(result, ["mixed"])
+        self.assertEqual(
+            captured["dataset_config"],
+            {
+                "vqav2": {"split": "testdev", "n_samples": 3},
+                "wikitext2": {"split": "train", "n_samples": 5},
+            },
+        )
+        self.assertEqual(captured["max_seq_len"], 128)
+        self.assertEqual(captured["seed"], 11)
+
+    def test_vlm_data_helper_defers_single_dataset_split_to_registry(self):
+        """Single-dataset mode should let the registry choose its default split."""
+        captured = {}
+
+        def fake_get_calib_inputs(*args, **kwargs):
+            captured["args"] = args
+            captured.update(kwargs)
+            return ["single"]
+
+        with patch.object(vlm_data, "get_calib_inputs", fake_get_calib_inputs):
+            result = vlm_data.build_vlm_calibration_inputs(
+                processor=object(),
+                dataset="mmmu_pro_vision",
+                n_samples=2,
+                max_seq_len=128,
+            )
+
+        self.assertEqual(result, ["single"])
+        self.assertEqual(captured["args"][0], "mmmu_pro_vision")
+        self.assertIsNone(captured["split"])
+
+    def test_apply_smoothquant_maps_component_selection_to_excluded_appliers(self):
+        """SmoothQuant component selection should translate to excluded applier names."""
+        adapter = Qwen3VLAdapter()
+        model = TinyModule()
+        ctx = RecipeContext(
+            cfg={},
+            adapter=adapter,
+            model=model,
+            calibration_inputs=[{"x": torch.ones(1, 2)}],
+        )
+        captured = {}
+
+        def fake_apply_smoothing(
+            model, activation_max, alpha, custom_alpha_map=None, exclude_appliers=None
+        ):
+            captured["alpha"] = alpha
+            captured["exclude_appliers"] = exclude_appliers
+            captured["custom_alpha_map"] = custom_alpha_map
+
+        with (
+            patch.object(adapter, "forward_calibration", lambda *args, **kwargs: None),
+            patch(
+                "tico.quantization.algorithm.smoothquant.smooth_quant.apply_smoothing",
+                fake_apply_smoothing,
+            ),
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                adapter.apply_smoothquant(ctx, {"alpha": 0.25, "components": "vision"})
+
+        self.assertEqual(captured["alpha"], 0.25)
+        self.assertEqual(
+            captured["exclude_appliers"], ["_apply_if_qwen3vl_text_decoder"]
+        )
+
+    def test_evaluate_dispatches_coco_and_llava_bench(self):
+        """Qwen3VLAdapter should dispatch COCO-style image caption benchmarks."""
+        calls = []
+        adapter = Qwen3VLAdapter()
+        ctx = RecipeContext(
+            cfg={
+                "evaluation": {
+                    "enabled": True,
+                    "coco": True,
+                    "llava_bench": True,
+                    "n_samples": 2,
+                    "max_seq_len": 128,
+                }
+            },
+            adapter=adapter,
+            model=object(),
+            processor=SimpleNamespace(tokenizer=object()),
+        )
+        ctx.device = torch.device("cpu")
+
+        def fake_evaluate_coco(**kwargs):
+            calls.append(("coco", kwargs))
+            return {"CIDEr": 1.0, "total_count": 2, "skipped_count": 0}
+
+        def fake_evaluate_llava_bench(**kwargs):
+            calls.append(("llava_bench", kwargs))
+            return {"CIDEr": 2.0, "total_count": 2, "skipped_count": 1}
+
+        def fake_print_coco_score_results(title, results):
+            calls.append(("print", {"title": title, "results": results}))
+
+        # COCO prints from the adapter module; LLaVA routing prints from the
+        # shared llava_bench module, so both print symbols are patched.
+        with (
+            patch.object(qwen_mod, "evaluate_coco", fake_evaluate_coco),
+            patch.object(
+                llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+            ),
+            patch.object(
+                qwen_mod, "print_coco_score_results", fake_print_coco_score_results
+            ),
+            patch.object(
+                llava_bench_mod,
+                "print_coco_score_results",
+                fake_print_coco_score_results,
+            ),
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                adapter.evaluate(ctx)
+
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[0][0], "coco")
+        self.assertEqual(calls[0][1]["n_samples"], 2)
+        self.assertEqual(calls[0][1]["max_seq_len"], 128)
+        self.assertEqual(calls[1][0], "print")
+        self.assertIn("COCO", calls[1][1]["title"])
+        self.assertEqual(calls[2][0], "llava_bench")
+        self.assertEqual(calls[2][1]["device"], "cpu")
+        self.assertEqual(calls[3][0], "print")
+        self.assertIn("Llava Bench", calls[3][1]["title"])
+
+    def test_evaluate_dispatches_mmmu_and_ppl(self):
+        """Qwen3VLAdapter should dispatch optional MMMU and PPL evaluation blocks."""
+        calls = []
+        adapter = Qwen3VLAdapter()
+        ctx = RecipeContext(
+            cfg={
+                "runtime": {"show_progress": False},
+                "calibration": {"seq_len": 128},
+                "evaluation": {
+                    "enabled": True,
+                    "max_seq_len": 128,
+                    "mmmu": {
+                        "enabled": True,
+                        "dataset": "MMMU/MMMU_Pro",
+                        "subjects": ["standard (4 options)"],
+                        "n_samples": 1,
+                    },
+                    "ppl": {
+                        "enabled": True,
+                        "dataset": "wikitext2",
+                        "split": "test",
+                        "stride": 32,
+                    },
+                },
+            },
+            adapter=adapter,
+            model=object(),
+            processor=SimpleNamespace(tokenizer=object()),
+        )
+        ctx.device = torch.device("cpu")
+
+        def fake_evaluate_vlm_text_ppl(**kwargs):
+            calls.append(("ppl", kwargs))
+            return 12.5
+
+        with (
+            patch.object(
+                mmmu_mod,
+                "evaluate_and_print_mmmu",
+                lambda **kwargs: calls.append(("mmmu", kwargs)),
+            ),
+            patch.object(
+                qwen_mod,
+                "evaluate_vlm_text_ppl",
+                fake_evaluate_vlm_text_ppl,
+            ),
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                adapter.evaluate(ctx)
+
+        self.assertEqual(calls[0][0], "mmmu")
+        self.assertEqual(calls[0][1]["dataset"], "MMMU/MMMU_Pro")
+        self.assertEqual(calls[0][1]["subjects"], ["standard (4 options)"])
+        self.assertEqual(calls[1][0], "ppl")
+        self.assertEqual(calls[1][1]["stride"], 32)
+
+
+if __name__ == "__main__":
+    unittest.main()

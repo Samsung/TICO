@@ -538,15 +538,17 @@ def _run(options: argparse.Namespace) -> int:
     )
     tests = {
         "regression": [
-            "test.quantization.recipes.test_cpu_fixtures",
-            "test.quantization.recipes.test_cpu_validation",
-            "test.quantization.recipes.test_export_regression",
+            "test.quantization.recipes.debug.test_cpu_fixtures",
+            "test.quantization.recipes.debug.test_cpu_validation",
+            "test.quantization.recipes.debug.test_export_regression",
             "test.quantization.wrapq.utils.test_static_export_inputs",
             "test.quantization.wrapq.wrappers.llama.test_rope_consistency",
         ],
-        "generate": ["test.quantization.recipes.test_cpu_generation"],
-        "coverage": ["test.quantization.recipes.test_qwen_cache_coverage_cpu"],
-        "evaluation": ["test.quantization.recipes.test_cpu_evaluation"],
+        "generate": ["test.quantization.recipes.integration.test_cpu_generation"],
+        "coverage": [
+            "test.quantization.recipes.integration.test_qwen_cache_coverage_cpu"
+        ],
+        "evaluation": ["test.quantization.recipes.evaluation.test_cpu_evaluation"],
     }
     for stage in stages:
         if stage in tests:
