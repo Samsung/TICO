@@ -92,6 +92,36 @@ class TestGemma4StaticRuntimeShape(unittest.TestCase):
         self.assertTrue(torch.equal(last_valid, torch.tensor([65, 35])))
         self.assertTrue((position_ids[0, shape.num_valid_patches :] == -1).all())
 
+    def test_e4b_static_profile_reuses_common_geometry(self):
+        """E4B selects the shared vision geometry and fixed cache capacity."""
+        cfg = _static_cfg()
+        options = cfg["debug"]["wrapper_smoke"]["gemma4"]
+        options["size_profile"] = "e4b_static_runtime"
+        options["static_runtime"]["profile"] = "gemma4_66x36_264"
+        for case in (
+            Gemma4TextDecoderLayerDecodeCase(),
+            Gemma4VisionModelCase(),
+            Gemma4VisionPoolerCase(),
+            Gemma4MultimodalEmbedderCase(),
+        ):
+            with self.subTest(case=case.name):
+                case.validate_config(cfg)
+                self.assertEqual(case._decode_max_seq(default=8), 2_048)
+                self.assertEqual(case._vision_patch_seq_len(default=36), 2_520)
+                self.assertEqual(case._vision_pool_output_length(default=4), 280)
+                self.assertEqual(case._visual_token_seq_len(default=16), 264)
+                shape = case._static_runtime_shape()
+                self.assertIsNotNone(shape)
+                assert shape is not None
+                self.assertTrue(
+                    torch.equal(
+                        _static_pixel_position_ids(shape),
+                        _static_pixel_position_ids(Gemma4StaticRuntimeShape()),
+                    )
+                )
+        with self.assertRaisesRegex(ValueError, "does not support"):
+            Gemma4TextAttentionKEqVPrefillCase().validate_config(cfg)
+
     def test_invalid_static_layouts_are_rejected(self):
         """Malformed runtime profiles should fail before any module allocation."""
         with self.assertRaisesRegex(ValueError, "at least 2"):

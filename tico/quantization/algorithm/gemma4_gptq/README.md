@@ -1,7 +1,7 @@
 ## gemma4_gptq
 
-A Gemma4 specific GPTQ implementation. It applies the same core GPTQ
-algorithm as [`../gptq/`](../gptq/README.md) and
+A shared GPTQ implementation for dense Gemma4 E2B/E4B image-text models.
+It applies the same core GPTQ algorithm as [`../gptq/`](../gptq/README.md) and
 [`../qwen3_vl_gptq/`](../qwen3_vl_gptq/README.md), but restructures the
 calibration and conversion flow around Gemma4's multimodal architecture.
 
@@ -67,6 +67,10 @@ by a subsequent real quantization step (e.g. `wrapq` / PTQ).
 [`../gptq/README.md`](../gptq/README.md). For `weight_bits_overrides`, key
 matching is full name → stage-local name → full-name suffix.
 
+The same config resolves the actual text layer stack for both variants: 35
+layers for E2B and 42 for E4B. Projection shapes come from the HF modules,
+including E2B double-wide shared MLPs and E4B ordinary shared MLPs.
+
 Gemma4 specific fields:
 
 | Field | Default | Description |
@@ -96,7 +100,7 @@ from transformers import AutoProcessor, AutoModelForImageTextToText
 from tico.quantization import prepare, convert
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 
-model_id = "google/gemma-4-e2b-it"
+model_id = "google/gemma-4-E2B-it"  # or "google/gemma-4-E4B-it"
 processor = AutoProcessor.from_pretrained(model_id)
 model = AutoModelForImageTextToText.from_pretrained(model_id)
 model.eval()
@@ -168,7 +172,7 @@ config = Gemma4GPTQConfig(
 
 | | `qwen3_vl_gptq/` | `gemma4_gptq/` |
 |---|---|---|
-| Target | Qwen3-VL (vision + text) | Gemma4 E2B (vision + text) |
+| Target | Qwen3-VL (vision + text) | Gemma4 E2B/E4B (vision + text) |
 | Patch embedding | `Conv3d` (`patch_embed.proj`) | `Linear` (`patch_embedder.input_proj`) |
 | Vision merger | `merger` + `deepstack_merger_list` | `pooler` + `embed_vision` (multimodal embedder) |
 | Deepstack | Replays `_deepstack_process` after each text layer | Not present; PLE is internal to each layer |

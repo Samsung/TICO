@@ -14,12 +14,13 @@
 
 """Host-side ``.pt`` artifact for the Gemma4 PLE token-identity lookup.
 
-The Gemma4 E2B ``embed_tokens_per_layer`` table has
+The dense Gemma4 ``embed_tokens_per_layer`` table has
 ``vocab_size_per_layer_input x num_hidden_layers x hidden_size_per_layer_input``
-elements (2.35 B for E2B). That exceeds the 2 GiB flatbuffer limit of a Circle
-file in float32 and even at 8-bit weights, so the shared ``ple_embedding``
-stage can alternatively be saved as a torch artifact that a host runtime loads
-directly.
+elements (35 x 256 columns for E2B, 42 x 256 for E4B). At 8-bit weights,
+the E4B table alone is 2.625 GiB. The recipe keeps these large tables in the
+shared host ``ple_embedding`` torch artifact under its existing ``auto``
+policy. The complete table is loaded in memory; this is not streaming or
+out-of-core lookup.
 
 The artifact stores the complete stage contract, not just a weight tensor:
 the (integer) table with its weight qparams, ``embed_scale``, the packed

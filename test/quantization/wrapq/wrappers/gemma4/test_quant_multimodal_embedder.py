@@ -155,16 +155,22 @@ class TestQuantGemma4MultimodalEmbedder(unittest.TestCase):
         self.assertTrue(torch.allclose(q_out, fp_out, atol=1e-5, rtol=1e-5))
 
     def test_no_quant_output_shape(self):
-        """Check that the output has the expected shape (B, seq_len, text_hidden_size)."""
-        fp_module = _make_multimodal_embedder(self.vision_cfg, self.text_cfg)
-        q_module = QuantGemma4MultimodalEmbedder(fp_module).eval()
-
+        """Vision projection follows tiny, E2B, and E4B text hidden widths."""
+        # Only this small projection is instantiated, never a text model or
+        # production vision tower; its input retains the tiny vision width.
         inputs = self._sample_inputs()
-        with torch.no_grad():
-            output = q_module(*inputs)
-
-        expected_shape = (self.batch_size, self.seq_len, self.text_hidden_size)
-        self.assertEqual(output.shape, expected_shape)
+        for hidden_size in (self.text_hidden_size, 1536, 2560):
+            with self.subTest(hidden_size=hidden_size):
+                text_cfg = _make_text_config(hidden_size=hidden_size)
+                fp_module = _make_multimodal_embedder(self.vision_cfg, text_cfg)
+                q_module = QuantGemma4MultimodalEmbedder(fp_module).eval()
+                with torch.no_grad():
+                    output = q_module.as_export_module()(*inputs)
+                    expected = fp_module(*inputs)
+                self.assertEqual(
+                    output.shape, (self.batch_size, self.seq_len, hidden_size)
+                )
+                torch.testing.assert_close(output, expected, atol=1e-5, rtol=1e-5)
 
     # ------------------------------------------------------------------
     # Mode transitions

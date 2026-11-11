@@ -121,7 +121,7 @@ def _gemma4_text_layer_override(
 ) -> Dict[str, Any]:
     """Build overrides for one Gemma4TextDecoderLayer.
 
-    Mirrors the dense/no-MoE E2B text layer structure in HF:
+    Mirrors the dense/no-MoE E2B/E4B text layer structure in HF:
       self_attn
       mlp
       input_layernorm
@@ -284,7 +284,7 @@ def _gemma4_vision_model_override(
     return vision
 
 
-def build_gemma4_e2b_ptq_config(
+def build_gemma4_ptq_config(
     *,
     num_text_layers: int,
     num_vision_layers: int,
@@ -298,7 +298,7 @@ def build_gemma4_e2b_ptq_config(
     norm_weight: Optional[QuantSpec] = None,
     strict_wrap: bool = True,
 ) -> PTQConfig:
-    """Build a PTQConfig for Gemma4 E2B static image-text runtime.
+    """Build a PTQConfig for dense Gemma4 E2B/E4B static image-text runtime.
 
     The returned config is intentionally conservative. It assigns default
     activation and weight specs globally, then adds explicit weight overrides for
@@ -366,3 +366,7 @@ def build_gemma4_e2b_ptq_config(
         model_args=dict(model_args or {}),
         strict_wrap=strict_wrap,
     )
+
+
+# Backward-compatible public name; the signature and override paths are shared.
+build_gemma4_e2b_ptq_config = build_gemma4_ptq_config

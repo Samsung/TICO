@@ -36,11 +36,23 @@ qwen3_vl_export.yaml
 gemma4_quantize.yaml
 gemma4_eval_suite.yaml
 gemma4_export.yaml
+gemma4_e4b_quantize.yaml
+gemma4_e4b_eval_suite.yaml
+gemma4_e4b_export.yaml
+static_gemma4_e4b_runtime.yaml
 gemma4_e2b_assistant_quantize.yaml
 gemma4_e2b_assistant_export.yaml
 ```
 
 Use lower snake case. Keep names descriptive but short.
+
+Gemma4 E2B and E4B use `family: gemma4` and the same config-driven wrappers.
+The existing `gemma4_{quantize,eval_suite,export}.yaml` files retain E2B
+behavior. The `gemma4_e4b_*` files select `google/gemma-4-E4B-it` and distinct
+`./out/gemma4_e4b_quantized` / `./out/gemma4_e4b_eval_suite` namespaces,
+including E4B-specific answers, reviews, and summaries. Use
+`static_gemma4_e4b_runtime.yaml` with `inspector --mode static-gemma4-runtime`
+for the common static debug runtime. No separate E4B adapter is needed.
 
 ## Top-level schema
 
@@ -302,17 +314,20 @@ model_args:
     spatial_merge_size: 2
 ```
 
-Gemma4 static image-text example:
+Gemma4 E2B/E4B static image-text example:
 
 ```yaml
 model_args:
   vision:
-    visual_start_idx: 0
-    num_visual_tokens: 256
-    image_height: 896
-    image_width: 896
+    profile: gemma4_66x36_264
     validate_static_layout: false
 ```
+
+This profile selects a 1056x576 image, 2520 padded patches, and 264 visual
+tokens for either variant. The legacy `e2b_66x36_264` profile and existing
+default remain accepted with identical geometry and position IDs. Explicit
+`image_height`, `image_width`, `num_visual_tokens`, and `visual_start_idx`
+settings remain available; existing E2B evaluation examples retain theirs.
 
 Rules:
 

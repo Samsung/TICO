@@ -22,7 +22,7 @@ from tico.quantization.config.gptq import GPTQConfig
 @dataclass
 class Gemma4GPTQConfig(GPTQConfig):
     """
-    Configuration for GPTQ on Gemma4 (E2B).
+    Configuration for GPTQ on dense Gemma4 E2B/E4B.
 
     This config extends the generic GPTQ configuration with Gemma4 specific
     switches so that the quantizer can process the model in stage order:

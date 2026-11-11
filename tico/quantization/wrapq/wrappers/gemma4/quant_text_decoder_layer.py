@@ -44,13 +44,13 @@ LayerKV = Tuple[torch.Tensor, torch.Tensor]
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4TextDecoderLayer")
 class QuantGemma4TextDecoderLayer(QuantModuleBase):
-    """PTQ wrapper for dense Gemma4 E2B text decoder layers.
+    """PTQ wrapper for dense Gemma4 E2B/E4B text decoder layers.
 
     The wrapper mirrors the dense Hugging Face ``Gemma4TextDecoderLayer`` path
     and keeps residual additions, layer-scalar multiplication, and optional
     per-layer embedding (PLE) fusion explicit for activation observation.
 
-    The E2B scope intentionally rejects MoE layers. Static runtime code should
+    The dense Gemma4 scope intentionally rejects MoE layers. Static runtime code should
     own dynamic orchestration such as KV-cache writes, shared-KV bookkeeping,
     position/RoPE creation, attention-mask creation, and sampling. This wrapper
     only performs fixed-shape tensor compute and returns optional K/V deltas when
@@ -79,7 +79,7 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
 
         if self.enable_moe_block:
             raise NotImplementedError(
-                "Gemma4 E2B static PTQ supports dense decoder layers only. "
+                "Gemma4 E2B/E4B static PTQ supports dense decoder layers only. "
                 "MoE routing and expert dispatch are intentionally out of scope."
             )
 

@@ -15,7 +15,12 @@
 import unittest
 from pathlib import Path
 
+from tico.quantization.recipes.adapters import get_adapter, resolve_adapter
 from tico.quantization.recipes.config import load_recipe_config
+from tico.quantization.recipes.evaluation.selection import (
+    validate_adapter_evaluation_config,
+)
+from tico.quantization.recipes.stages import get_stage
 
 _CONFIG_DIR = (
     Path(__file__).resolve().parents[3]
@@ -40,6 +45,9 @@ class TestGemma4ExampleConfigs(unittest.TestCase):
             "gemma4_quantize.yaml",
             "gemma4_eval_suite.yaml",
             "gemma4_export.yaml",
+            "gemma4_e4b_quantize.yaml",
+            "gemma4_e4b_eval_suite.yaml",
+            "gemma4_e4b_export.yaml",
         ):
             with self.subTest(name=name):
                 cfg = self._load(name)
@@ -95,6 +103,71 @@ class TestGemma4ExampleConfigs(unittest.TestCase):
         self.assertEqual(cfg["export"]["artifacts"], ["circle_per_layer"])
         self.assertEqual(cfg["export"]["max_seq_len"], 2048)
         self.assertTrue(cfg["export"]["prefill_decode"])
+
+    def test_e4b_presets_validate_with_the_shared_adapter(self):
+        """E4B recipes must resolve the same adapter and registered stages as E2B."""
+        for name in (
+            "gemma4_e4b_quantize.yaml",
+            "gemma4_e4b_eval_suite.yaml",
+            "gemma4_e4b_export.yaml",
+        ):
+            with self.subTest(name=name):
+                cfg = self._load(name)
+                self.assertEqual(cfg["model"]["name_or_path"], "google/gemma-4-E4B-it")
+                self.assertIs(resolve_adapter(cfg), get_adapter("gemma4"))
+                validate_adapter_evaluation_config(resolve_adapter(cfg), cfg)
+                for stage in cfg["pipeline"]:
+                    self.assertIsNotNone(get_stage(stage["name"]))
+                self.assertEqual(
+                    cfg["model_args"]["vision"]["profile"], "gemma4_66x36_264"
+                )
+
+    def test_e4b_quantize_and_export_keep_the_existing_workflow(self):
+        """The variant changes model dimensions without changing pipeline contracts."""
+        quantize = self._load("gemma4_e4b_quantize.yaml")
+        export = self._load("gemma4_e4b_export.yaml")
+        self.assertEqual(
+            quantize["pipeline"], self._load("gemma4_quantize.yaml")["pipeline"]
+        )
+        self.assertEqual(quantize["export"]["artifacts"], ["ptq_checkpoint"])
+        self.assertEqual(export["pipeline"], [])
+        self.assertEqual(export["export"]["artifacts"], ["circle_per_layer"])
+        self.assertTrue(export["export"]["prefill_decode"])
+        self.assertEqual(export["export"]["vision"]["granularity"], "both")
+
+    def test_e4b_output_paths_are_separate_from_e2b(self):
+        """Variant presets must never overwrite E2B checkpoints or quality reports."""
+        for purpose in ("quantize", "export", "eval_suite"):
+            with self.subTest(purpose=purpose):
+                e2b = self._load(f"gemma4_{purpose}.yaml")
+                e4b = self._load(f"gemma4_e4b_{purpose}.yaml")
+                self.assertNotEqual(
+                    e2b["export"]["output_dir"], e4b["export"]["output_dir"]
+                )
+                self.assertIn("gemma4_e4b", e4b["export"]["output_dir"])
+        cfg = self._load("gemma4_e4b_eval_suite.yaml")
+        self.assertEqual(
+            cfg["evaluation"]["output_dir"], "./out/gemma4_e4b_eval_suite/evaluation"
+        )
+        llava = cfg["evaluation"]["llava_bench"]
+        self.assertEqual(llava["candidate_label"], "gemma4_e4b")
+        for field in ("dir", "answers", "reviews", "summary"):
+            with self.subTest(field=field):
+                value = llava["output"][field]
+                self.assertTrue(value.startswith("./out/gemma4_e4b_eval_suite/"))
+                self.assertNotIn("gemma4_e2b", value)
+
+    def test_e4b_eval_and_static_runtime_share_vision_geometry(self):
+        """E4B static debugging and eager judge inputs select the common image profile."""
+        cfg = self._load("static_gemma4_e4b_runtime.yaml")["debug"][
+            "static_gemma4_runtime"
+        ]
+        self.assertEqual(cfg["model"], "google/gemma-4-E4B-it")
+        self.assertEqual(cfg["vision_profile"], "gemma4_66x36_264")
+        self.assertEqual(cfg["max_seq"], 2048)
+        llava = self._load("gemma4_e4b_eval_suite.yaml")["evaluation"]["llava_bench"]
+        self.assertEqual((llava["resized_height"], llava["resized_width"]), (576, 1056))
+        self.assertEqual(llava["visual_token_margin"], 264)
 
 
 if __name__ == "__main__":

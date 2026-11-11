@@ -50,7 +50,7 @@ class StopReplay(Exception):
 @register_quantizer(Gemma4GPTQConfig)
 class Gemma4GPTQQuantizer(BaseQuantizer):
     """
-    Gemma4 specific GPTQ quantizer.
+    GPTQ quantizer for dense Gemma4 E2B/E4B.
 
     This quantizer stores raw calibration inputs during ``prepare()`` and
     performs stagewise GPTQ during ``convert()``.

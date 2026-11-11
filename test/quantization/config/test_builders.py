@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from typing import Any, Mapping
 
 from tico.quantization.config.builders import (
     _build_llama_layer_overrides,
@@ -22,7 +23,10 @@ from tico.quantization.config.builders import (
     build_llm_ptq_config,
     build_qwen3_vl_ptq_config,
 )
-from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.config.gemma4_builders import (
+    build_gemma4_e2b_ptq_config,
+    build_gemma4_ptq_config,
+)
 from tico.quantization.config.llama_attention import DEFAULT_EXECUTION_PROFILE
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine, mx, no_quant
@@ -302,9 +306,52 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
         )
 
 
-class TestBuildGemma4E2BPtqConfig(unittest.TestCase):
-    def test_build_gemma4_e2b_ptq_config_follows_hf_text_and_model_scopes(self):
-        cfg = build_gemma4_e2b_ptq_config(
+class TestBuildGemma4PtqConfig(unittest.TestCase):
+    """Verify shared dense Gemma4 override paths and compatibility."""
+
+    def test_gemma4_overrides_cover_each_dense_variant(self):
+        """E2B and E4B override every configured layer at all HF placements."""
+        for num_layers in (35, 42):
+            with self.subTest(num_layers=num_layers):
+                cfg = build_gemma4_ptq_config(
+                    num_text_layers=num_layers,
+                    num_vision_layers=16,
+                    linear_weight=affine(DType.uint(4)),
+                )
+                for root in (
+                    cfg,
+                    cfg.child("model"),
+                    cfg.child("language_model"),
+                    cfg.child("model").child("language_model"),
+                ):
+                    layers = root.overrides["layers"]
+                    assert isinstance(layers, Mapping)
+                    self.assertEqual(set(layers), {str(i) for i in range(num_layers)})
+                    for layer in layers.values():
+                        for projection in ("gate_proj", "up_proj", "down_proj"):
+                            self.assertEqual(
+                                layer["mlp"][projection]["weight"]["dtype"],
+                                DType.uint(4),
+                            )
+
+    def test_gemma4_e2b_builder_is_compatible_alias(self):
+        """The old public API retains the signature and complete override tree."""
+        self.assertIs(build_gemma4_e2b_ptq_config, build_gemma4_ptq_config)
+        kwargs: dict[str, Any] = dict(
+            num_text_layers=35,
+            num_vision_layers=16,
+            model_args={"profile": "reference_eval"},
+            linear_weight=affine(DType.uint(4)),
+            embedding_weight=affine(DType.uint(8)),
+            strict_wrap=False,
+        )
+        self.assertEqual(
+            build_gemma4_e2b_ptq_config(**kwargs), build_gemma4_ptq_config(**kwargs)
+        )
+
+    def test_build_gemma4_ptq_config_follows_hf_text_and_model_scopes(self):
+        """The generic builder preserves existing observer override paths."""
+        cfg = build_gemma4_ptq_config(
             num_text_layers=2,
             num_vision_layers=1,
             linear_weight=affine(DType.uint(4)),

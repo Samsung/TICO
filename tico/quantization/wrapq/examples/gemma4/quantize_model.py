@@ -46,10 +46,11 @@ import torch
 import tico
 import tico.quantization
 import tico.quantization.config.ptq
-from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_layer_type_head_dim
 
 torch.manual_seed(123)
 
@@ -228,7 +229,7 @@ def main():
     num_visual_tokens = 4
 
     # Build a Gemma4-specific PTQ config with proper overrides.
-    ptq_config = build_gemma4_e2b_ptq_config(
+    ptq_config = build_gemma4_ptq_config(
         num_text_layers=int(text_config.num_hidden_layers),
         num_vision_layers=int(vision_config.num_hidden_layers),
         model_args={
@@ -279,7 +280,7 @@ def main():
     orig_model2 = copy.deepcopy(model2)
     model2.eval()
 
-    ptq_config2 = build_gemma4_e2b_ptq_config(
+    ptq_config2 = build_gemma4_ptq_config(
         num_text_layers=int(text_config.num_hidden_layers),
         num_vision_layers=int(vision_config.num_hidden_layers),
         model_args={
@@ -339,7 +340,6 @@ def main():
 
     # Build precomputed example inputs (simulating CPU runtime output).
     hidden_size = int(text_config.hidden_size)
-    head_dim = int(text_config.head_dim)
     num_layers = int(text_config.num_hidden_layers)
     ple_dim = int(getattr(text_config, "hidden_size_per_layer_input", 0) or 0)
     layer_types = list(text_config.layer_types)
@@ -354,6 +354,7 @@ def main():
     ex_attention_masks = {}
     ex_position_embeddings = {}
     for layer_type in layer_types:
+        head_dim = gemma4_layer_type_head_dim(text_config, layer_type)
         ex_attention_masks[layer_type] = torch.zeros(batch_size, 1, seq_len, seq_len)
         cos = torch.ones(batch_size, seq_len, head_dim)
         sin = torch.zeros(batch_size, seq_len, head_dim)

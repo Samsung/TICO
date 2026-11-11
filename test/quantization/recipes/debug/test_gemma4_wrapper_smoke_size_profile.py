@@ -51,7 +51,7 @@ _GEMMA4_AVAILABILITY = _has_gemma4()
     _GEMMA4_AVAILABILITY.reason or "Gemma4 is unavailable",
 )
 class TestGemma4WrapperSmokeSizeProfile(unittest.TestCase):
-    """Validate tiny compatibility and bounded E2B-width configurations."""
+    """Validate tiny compatibility and bounded E2B/E4B-width configurations."""
 
     def test_tiny_remains_the_default_profile(self):
         """An omitted profile should preserve the current tiny dimensions."""
@@ -83,6 +83,64 @@ class TestGemma4WrapperSmokeSizeProfile(unittest.TestCase):
             ["sliding_attention", "full_attention"],
         )
         self.assertEqual(text_cfg.hidden_size_per_layer_input, 0)
+
+    def test_e4b_text_dimensions_preserve_case_topology(self):
+        """E4B profiles expose production widths without allocating weights."""
+        for profile in ("e4b_dims", "e4b_static_runtime"):
+            with self.subTest(profile=profile):
+                cfg = _profile_cfg(profile)
+                text_cfg = Gemma4TextAttentionPrefillCase()._make_text_config(
+                    cfg,
+                    layer_types=("sliding_attention", "full_attention"),
+                    num_kv_shared_layers=1,
+                    hidden_size_per_layer_input=256,
+                )
+                self.assertEqual(text_cfg.hidden_size, 2_560)
+                self.assertEqual(text_cfg.intermediate_size, 10_240)
+                self.assertEqual(text_cfg.num_attention_heads, 8)
+                self.assertEqual(text_cfg.num_key_value_heads, 2)
+                if hasattr(text_cfg, "per_layer_config"):
+                    self.assertEqual(
+                        text_cfg.per_layer_config[1].num_key_value_heads, 2
+                    )
+                else:
+                    self.assertEqual(getattr(text_cfg, "num_global_key_value_heads"), 2)
+                self.assertEqual(text_cfg.num_hidden_layers, 2)
+                self.assertEqual(text_cfg.num_kv_shared_layers, 1)
+                self.assertFalse(text_cfg.use_double_wide_mlp)
+                self.assertEqual(text_cfg.hidden_size_per_layer_input, 256)
+                self.assertEqual(text_cfg.sliding_window, 512)
+                self.assertEqual(
+                    gemma4_layer_type_head_dim(text_cfg, "sliding_attention"), 256
+                )
+                self.assertEqual(
+                    gemma4_layer_type_head_dim(text_cfg, "full_attention"), 512
+                )
+
+    def test_e4b_vision_dimensions_match_e2b(self):
+        """The two width variants reuse the same bounded vision tower."""
+        case = Gemma4VisionAttentionCase()
+        e2b = case._make_vision_config(_profile_cfg("e2b_dims"))
+        e4b = case._make_vision_config(_profile_cfg("e4b_dims"))
+        self.assertEqual(e2b.to_dict(), e4b.to_dict())
+
+    def test_e4b_profiles_reject_unbounded_cases(self):
+        """Production-width profiles never build a full text or PLE table."""
+        for profile in ("e4b_dims", "e4b_static_runtime"):
+            cfg = _profile_cfg(profile)
+            with self.assertRaisesRegex(ValueError, "does not support"):
+                Gemma4TextModelCase().validate_config(cfg)
+            with self.assertRaisesRegex(ValueError, "does not support"):
+                Gemma4TextScaledWordEmbeddingCase().build(cfg)
+
+    def test_e4b_circle_filename_is_distinct(self):
+        """E4B artifacts use separate names from E2B and tiny smoke outputs."""
+        case = Gemma4TextMLPCase()
+        for profile in ("e4b_dims", "e4b_static_runtime"):
+            self.assertEqual(
+                case.export_filename(_profile_cfg(profile)),
+                f"gemma4_text_mlp.{profile}.q.circle",
+            )
 
     def test_e2b_vision_dimensions_keep_one_layer(self):
         """Vision module cases should use E2B widths and one smoke layer."""

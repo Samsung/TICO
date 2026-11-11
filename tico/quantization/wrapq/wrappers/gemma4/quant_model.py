@@ -21,7 +21,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
-    assert_gemma4_e2b_no_moe,
+    assert_gemma4_dense_no_moe,
     dynamic_placeholder_fuse,
     fixed_slot_fuse,
     validate_static_visual_layout,
@@ -77,7 +77,7 @@ def _get_placeholder_mask(
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4Model")
 class QuantGemma4Model(QuantModuleBase):
-    """PTQ wrapper skeleton for image-text Gemma4 E2B.
+    """PTQ wrapper skeleton for image-text Gemma4 E2B/E4B.
 
     The default eager/PTQ path uses dynamic placeholder-mask fusion so natural
     PyTorch benchmarks and general calibration follow HF-style placeholder
@@ -100,7 +100,7 @@ class QuantGemma4Model(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         fp_model = cast("Gemma4Model", fp_model)
-        assert_gemma4_e2b_no_moe(fp_model)
+        assert_gemma4_dense_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.config = fp_model.config
         self.vision_tower = (

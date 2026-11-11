@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4VisionEncoderLayer")
 class QuantGemma4VisionEncoderLayer(QuantModuleBase):
-    """PTQ wrapper for one Gemma4 E2B vision encoder layer.
+    """PTQ wrapper for one Gemma4 E2B/E4B vision encoder layer.
 
     The wrapper mirrors Hugging Face ``Gemma4VisionEncoderLayer`` for the dense
     vision path. It keeps the two residual additions explicit so activation

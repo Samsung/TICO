@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Static-shape runtime skeleton for Gemma4 E2B.
+"""Static-shape runtime skeleton for dense Gemma4 E2B/E4B.
 
 This module mirrors the Llama static runtime design while adding a fixed image
 prefill stage. CPU code owns processor/tokenizer logic, static layout checks,
@@ -42,7 +42,7 @@ from tico.quantization.config.gemma4_attention import (
     get_gemma4_text_attention_options,
     RopeConvention,
 )
-from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
@@ -69,7 +69,7 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     get_gemma4_static_vision_profile,
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
-    assert_gemma4_e2b_no_moe,
+    assert_gemma4_dense_no_moe,
     build_decode_attention_mask,
     gemma4_layer_type_head_dim,
     StaticGemma4Layout,
@@ -249,7 +249,7 @@ class LayerCache:
 
 @dataclass
 class StaticGemma4RuntimeConfig:
-    """Configuration for the Gemma4 E2B static runtime smoke flow."""
+    """Configuration for the dense Gemma4 E2B/E4B static runtime smoke flow."""
 
     model: str = "google/gemma-4-e2b-it"
     max_seq: int = 2048
@@ -267,7 +267,7 @@ class StaticGemma4RuntimeConfig:
 
 
 class StaticGemma4Runtime:
-    """CPU-orchestrated static runtime for Gemma4 E2B."""
+    """CPU-orchestrated static runtime for dense Gemma4 E2B/E4B."""
 
     def __init__(
         self,
@@ -281,7 +281,7 @@ class StaticGemma4Runtime:
     ):
         """Create an NPU-profile runtime; ``rope="hf"`` is an explicit override."""
         layout.validate()
-        assert_gemma4_e2b_no_moe(model)
+        assert_gemma4_dense_no_moe(model)
 
         model = cast("Gemma4ForConditionalGeneration", model)
         self.model = model.eval().to(device)
@@ -314,7 +314,7 @@ class StaticGemma4Runtime:
             )
         self.vision_profile = vision_profile
 
-        qcfg = build_gemma4_e2b_ptq_config(
+        qcfg = build_gemma4_ptq_config(
             num_text_layers=int(self.text_config.num_hidden_layers),
             num_vision_layers=int(
                 cast("Gemma4VisionConfig", model.config.vision_config).num_hidden_layers
@@ -454,8 +454,8 @@ class StaticGemma4Runtime:
         - Full attention layers: ``head_dim = config.global_head_dim``
 
         The number of KV heads may also differ when
-        ``num_global_key_value_heads`` is set, but for E2B it defaults to
-        ``num_key_value_heads`` for all layers.
+        ``num_global_key_value_heads`` is set for alternative full attention.
+        Dense E2B/E4B use ``num_key_value_heads`` for all layers (one/two).
         """
         caches = []
         for layer_idx in range(int(self.text_config.num_hidden_layers)):
@@ -467,7 +467,7 @@ class StaticGemma4Runtime:
 
             # Per-layer-type num_kv_heads
             # use_alternative_attention = attention_k_eq_v and not is_sliding
-            # For E2B, attention_k_eq_v=False, so num_kv_heads is always
+            # For dense E2B/E4B, attention_k_eq_v=False, so num_kv_heads is always
             # config.num_key_value_heads.  But we handle the general case.
             attention_k_eq_v = getattr(self.text_config, "attention_k_eq_v", False)
             use_alternative_attention = attention_k_eq_v and not is_sliding
@@ -1904,7 +1904,7 @@ def verify_step_generation(
 
 
 def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
-    """Run the Gemma4 E2B static runtime smoke flow.
+    """Run the dense Gemma4 E2B/E4B static runtime smoke flow.
 
     This entry point runs the ``build_static_inputs``, ``token_embedding``,
     ``vision_prefill``, ``mm_fusion``, ``masks_and_rope``, ``prefill``, and

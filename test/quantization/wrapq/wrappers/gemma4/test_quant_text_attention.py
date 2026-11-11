@@ -175,6 +175,132 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         self.assertEqual(qattn.attn_options.layout, "unrolled")
         self.assertEqual(qattn.attn_options.rope, "pre_negated_sin")
 
+    def test_e4b_layer_geometry_gqa_prefill_decode_and_shared_consumers(self):
+        """E4B uses four query groups per KV head and distinct sliding/full widths."""
+        cfg = _make_text_config(
+            hidden_size=16,
+            num_hidden_layers=4,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=256,
+            global_head_dim=512,
+            layer_types=["sliding_attention", "full_attention"] * 2,
+            num_kv_shared_layers=2,
+            use_double_wide_mlp=False,
+            allow_global_per_layer_attribute_access=False,
+        )
+        for producer_index, consumer_index, head_dim in ((0, 2, 256), (1, 3, 512)):
+            with self.subTest(head_dim=head_dim):
+                fp_producer = self._make_attention(cfg, producer_index)
+                fp_consumer = self._make_attention(cfg, consumer_index)
+                producers = self._make_layout_pair(fp_producer)
+                consumers = self._make_layout_pair(fp_consumer)
+                for producer, consumer in zip(producers, consumers):
+                    consumer.bind_cache_source(producer)
+                    self.assertEqual(producer.head_dim, head_dim)
+                    self.assertEqual(consumer.head_dim, head_dim)
+                    self.assertEqual(producer.num_key_value_groups, 4)
+                    self.assertEqual(consumer.num_key_value_groups, 4)
+                    self.assertEqual(
+                        producer.q_proj.wrapped.module.out_features, 8 * head_dim
+                    )
+                    self.assertEqual(
+                        producer.k_proj.wrapped.module.out_features, 2 * head_dim
+                    )
+
+                hidden = torch.randn(1, 3, 16)
+                rope = self._rope(1, 3, head_dim)
+                mask = self._zero_mask(1, 3, 3)
+                shared_states: list[dict[str, LayerKV]] = [{}, {}]
+                prefill_outputs = []
+                consumer_outputs = []
+                with torch.no_grad():
+                    for producer, consumer, shared in zip(
+                        producers, consumers, shared_states
+                    ):
+                        result = producer(
+                            hidden,
+                            _rope_for_attention(producer, rope),
+                            attention_mask=mask,
+                            shared_kv_states=shared,
+                            use_cache=True,
+                            cache_output_mode="present",
+                        )
+                        prefill_outputs.append(result)
+                        key, value = result[2]
+                        self.assertEqual(key.shape, (1, 2, 3, head_dim))
+                        self.assertEqual(value.shape, key.shape)
+                        self.assertEqual(
+                            shared[producer.layer_type][0].shape, key.shape
+                        )
+                        consumer_outputs.append(
+                            consumer(
+                                hidden,
+                                _rope_for_attention(consumer, rope),
+                                attention_mask=mask,
+                                shared_kv_states=shared,
+                                use_cache=True,
+                            )
+                        )
+                    self._assert_output_tuple_close(*prefill_outputs)
+                    self._assert_output_tuple_close(*consumer_outputs)
+                    self.assertIsNone(consumer_outputs[0][2])
+
+                    hf_shared: dict[str, LayerKV] = {}
+                    hf_out, _ = fp_producer(
+                        hidden,
+                        position_embeddings=rope,
+                        attention_mask=mask,
+                        shared_kv_states=hf_shared,
+                    )
+                    hf_consumer_out, _ = fp_consumer(
+                        hidden,
+                        position_embeddings=rope,
+                        attention_mask=mask,
+                        shared_kv_states=hf_shared,
+                    )
+                    torch.testing.assert_close(
+                        prefill_outputs[0][0], hf_out, atol=1e-5, rtol=1e-5
+                    )
+                    torch.testing.assert_close(
+                        consumer_outputs[0][0], hf_consumer_out, atol=1e-5, rtol=1e-5
+                    )
+
+                    decode_hidden = torch.randn(1, 1, 16)
+                    decode_rope = self._rope(1, 1, head_dim)
+                    decode_mask = self._zero_mask(1, 1, 4)
+                    decode_outputs = []
+                    decode_consumer_outputs = []
+                    for producer, consumer, shared, previous in zip(
+                        producers, consumers, shared_states, prefill_outputs
+                    ):
+                        result = producer(
+                            decode_hidden,
+                            _rope_for_attention(producer, decode_rope),
+                            attention_mask=decode_mask,
+                            past_key_value=previous[2],
+                            shared_kv_states=shared,
+                            use_cache=True,
+                            cache_output_mode="delta",
+                        )
+                        decode_outputs.append(result)
+                        self.assertEqual(result[2][0].shape, (1, 2, 1, head_dim))
+                        self.assertEqual(result[2][1].shape, (1, 2, 1, head_dim))
+                        self.assertEqual(
+                            shared[producer.layer_type][0].shape, (1, 2, 4, head_dim)
+                        )
+                        decode_consumer_outputs.append(
+                            consumer(
+                                decode_hidden,
+                                _rope_for_attention(consumer, decode_rope),
+                                attention_mask=decode_mask,
+                                shared_key_value=shared[producer.layer_type],
+                            )
+                        )
+                    self._assert_output_tuple_close(*decode_outputs)
+                    self._assert_output_tuple_close(*decode_consumer_outputs)
+
     def test_reference_profile_uses_batched_layout(self):
         """The reference profile should select the batched GQA implementation."""
         qattn = QuantGemma4TextAttention(

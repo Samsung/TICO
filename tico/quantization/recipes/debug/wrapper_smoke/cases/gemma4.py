@@ -39,6 +39,7 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     Gemma4StaticVisionProfile,
     get_gemma4_static_vision_profile,
 )
+from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_layer_type_head_dim
 
 if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
@@ -64,38 +65,48 @@ _GEMMA4_SLIDING_ROPE_PARAMETERS: dict[str, Any] = {
 }
 
 _GEMMA4_SIZE_PROFILE_TINY = "tiny"
-_GEMMA4_SIZE_PROFILE_E2B_DIMS = "e2b_dims"
-_GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME = "e2b_static_runtime"
-_GEMMA4_SIZE_PROFILES = frozenset(
-    {
-        _GEMMA4_SIZE_PROFILE_TINY,
-        _GEMMA4_SIZE_PROFILE_E2B_DIMS,
-        _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME,
-    }
+_GEMMA4_WIDTH_VARIANTS: dict[str, dict[str, Any]] = {
+    "e2b": {
+        "hidden_size": 1_536,
+        "intermediate_size": 6_144,
+        "num_key_value_heads": 1,
+        "num_global_key_value_heads": 1,
+        "use_double_wide_mlp": True,
+    },
+    "e4b": {
+        "hidden_size": 2_560,
+        "intermediate_size": 10_240,
+        "num_key_value_heads": 2,
+        "num_global_key_value_heads": 2,
+        "use_double_wide_mlp": False,
+    },
+}
+_GEMMA4_WIDTH_PROFILES = {
+    f"{variant}_{kind}": variant
+    for variant in _GEMMA4_WIDTH_VARIANTS
+    for kind in ("dims", "static_runtime")
+}
+_GEMMA4_STATIC_RUNTIME_PROFILES = frozenset(
+    profile for profile in _GEMMA4_WIDTH_PROFILES if profile.endswith("_static_runtime")
 )
-_GEMMA4_E2B_WIDTH_PROFILES = frozenset(
-    {
-        _GEMMA4_SIZE_PROFILE_E2B_DIMS,
-        _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME,
-    }
-)
+_GEMMA4_SIZE_PROFILES = frozenset({_GEMMA4_SIZE_PROFILE_TINY, *_GEMMA4_WIDTH_PROFILES})
 
-_GEMMA4_E2B_PLE_DIM = 256
-_GEMMA4_E2B_STATIC_MAX_SEQ = 2_048
-_GEMMA4_E2B_STATIC_PROFILE = get_gemma4_static_vision_profile(
+_GEMMA4_PLE_DIM = 256
+_GEMMA4_STATIC_MAX_SEQ = 2_048
+_GEMMA4_STATIC_PROFILE = get_gemma4_static_vision_profile(
     DEFAULT_GEMMA4_STATIC_VISION_PROFILE
 )
-_GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS = _GEMMA4_E2B_STATIC_PROFILE.num_visual_tokens
-_GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS = _GEMMA4_E2B_STATIC_PROFILE.max_soft_tokens
-_GEMMA4_E2B_STATIC_PATCH_GRID_HEIGHT = _GEMMA4_E2B_STATIC_PROFILE.patch_grid_height
-_GEMMA4_E2B_STATIC_PATCH_GRID_WIDTH = _GEMMA4_E2B_STATIC_PROFILE.patch_grid_width
-_GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE = _GEMMA4_E2B_STATIC_PROFILE.pooling_kernel_size
+_GEMMA4_STATIC_NUM_VISUAL_TOKENS = _GEMMA4_STATIC_PROFILE.num_visual_tokens
+_GEMMA4_STATIC_MAX_SOFT_TOKENS = _GEMMA4_STATIC_PROFILE.max_soft_tokens
+_GEMMA4_STATIC_PATCH_GRID_HEIGHT = _GEMMA4_STATIC_PROFILE.patch_grid_height
+_GEMMA4_STATIC_PATCH_GRID_WIDTH = _GEMMA4_STATIC_PROFILE.patch_grid_width
+_GEMMA4_VISION_POOLING_KERNEL_SIZE = _GEMMA4_STATIC_PROFILE.pooling_kernel_size
 _GEMMA4_SUPPORTED_MAX_SOFT_TOKENS = frozenset({70, 140, 280, 560, 1_120})
 
-# The E2B-width profiles intentionally cover bounded module-level cases and
+# The production-width profiles intentionally cover bounded module-level cases and
 # one-layer vision composites. Text/full multimodal models and vocabulary-sized
 # embeddings remain tiny-only because they defeat the smoke workflow.
-_GEMMA4_E2B_DIMS_SUPPORTED_CASES = frozenset(
+_GEMMA4_DIMS_SUPPORTED_CASES = frozenset(
     {
         "gemma4_text_mlp",
         "gemma4_text_attention_prefill",
@@ -119,25 +130,25 @@ _GEMMA4_E2B_DIMS_SUPPORTED_CASES = frozenset(
     }
 )
 
-# The static-runtime profile follows the real E2B execution contract rather
-# than exercising synthetic feature variants. In particular, E2B itself uses
-# attention_k_eq_v=False, so the K=V-only branch remains available in e2b_dims
-# but is intentionally excluded here.
-_GEMMA4_E2B_STATIC_RUNTIME_SUPPORTED_CASES = _GEMMA4_E2B_DIMS_SUPPORTED_CASES - {
+# The static-runtime profile follows the dense E2B/E4B execution contract rather
+# than exercising synthetic feature variants. Both variants use
+# attention_k_eq_v=False, so the K=V-only branch remains available in the
+# dimensions profiles but is intentionally excluded here.
+_GEMMA4_STATIC_RUNTIME_SUPPORTED_CASES = _GEMMA4_DIMS_SUPPORTED_CASES - {
     "gemma4_text_attention_k_eq_v_prefill"
 }
 
 
 @dataclass(frozen=True)
 class Gemma4StaticRuntimeShape:
-    """Fixed input-shape contract used by E2B static-runtime smoke exports."""
+    """Fixed input-shape contract used by dense Gemma4 static-runtime smoke exports."""
 
-    max_seq: int = _GEMMA4_E2B_STATIC_MAX_SEQ
-    num_visual_tokens: int = _GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS
-    max_soft_tokens: int = _GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS
-    patch_grid_height: int = _GEMMA4_E2B_STATIC_PATCH_GRID_HEIGHT
-    patch_grid_width: int = _GEMMA4_E2B_STATIC_PATCH_GRID_WIDTH
-    pooling_kernel_size: int = _GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE
+    max_seq: int = _GEMMA4_STATIC_MAX_SEQ
+    num_visual_tokens: int = _GEMMA4_STATIC_NUM_VISUAL_TOKENS
+    max_soft_tokens: int = _GEMMA4_STATIC_MAX_SOFT_TOKENS
+    patch_grid_height: int = _GEMMA4_STATIC_PATCH_GRID_HEIGHT
+    patch_grid_width: int = _GEMMA4_STATIC_PATCH_GRID_WIDTH
+    pooling_kernel_size: int = _GEMMA4_VISION_POOLING_KERNEL_SIZE
 
     def __post_init__(self) -> None:
         if self.max_seq < 2:
@@ -155,12 +166,12 @@ class Gemma4StaticRuntimeShape:
 
         profile = Gemma4StaticVisionProfile(
             name="wrapper_smoke",
-            visual_start_idx=_GEMMA4_E2B_STATIC_PROFILE.visual_start_idx,
+            visual_start_idx=_GEMMA4_STATIC_PROFILE.visual_start_idx,
             num_visual_tokens=self.num_visual_tokens,
             max_soft_tokens=self.max_soft_tokens,
             patch_grid_height=self.patch_grid_height,
             patch_grid_width=self.patch_grid_width,
-            patch_size=_GEMMA4_E2B_STATIC_PROFILE.patch_size,
+            patch_size=_GEMMA4_STATIC_PROFILE.patch_size,
             pooling_kernel_size=self.pooling_kernel_size,
         )
         profile.validate(max_seq_len=self.max_seq)
@@ -262,7 +273,7 @@ def _gemma4_size_profile(cfg: Mapping[str, Any]) -> str:
 def _gemma4_static_runtime_shape(
     cfg: Mapping[str, Any],
 ) -> Gemma4StaticRuntimeShape:
-    """Parse and validate the E2B static-runtime input-shape options."""
+    """Parse and validate the dense Gemma4 static-runtime input-shape options."""
     gemma4_cfg = _gemma4_options(cfg)
     static_cfg = gemma4_cfg.get("static_runtime", {})
     if not isinstance(static_cfg, Mapping):
@@ -272,7 +283,7 @@ def _gemma4_static_runtime_shape(
         str(static_cfg.get("profile", DEFAULT_GEMMA4_STATIC_VISION_PROFILE))
     )
     return Gemma4StaticRuntimeShape(
-        max_seq=int(static_cfg.get("max_seq", _GEMMA4_E2B_STATIC_MAX_SEQ)),
+        max_seq=int(static_cfg.get("max_seq", _GEMMA4_STATIC_MAX_SEQ)),
         num_visual_tokens=int(
             static_cfg.get("num_visual_tokens", profile.num_visual_tokens)
         ),
@@ -297,14 +308,14 @@ def _build_text_config(
     num_kv_shared_layers: int = 0,
     hidden_size_per_layer_input: int = 0,
 ) -> Any:
-    """Create a tiny or E2B-width Gemma4 text config.
+    """Create a tiny or production-width Gemma4 text config.
 
     The helper intentionally provides ``layer_types`` and ``rope_parameters`` as
     a matched pair. This prevents Hugging Face from treating nested Gemma4 RoPE
     parameters as one global default-RoPE config, which otherwise emits
     ``Unrecognized keys in rope_parameters`` warnings in one-layer smoke cases.
 
-    Both E2B profiles copy the original channel and projection dimensions while
+    The E2B/E4B profiles copy the original channel and projection dimensions while
     preserving the short synthetic topology selected by each smoke case. PLE is
     disabled through ``hidden_size_per_layer_input=0`` unless a caller explicitly
     requests it.
@@ -323,17 +334,10 @@ def _build_text_config(
             "global_head_dim": 32,
             "max_position_embeddings": 128,
         }
-    elif size_profile in _GEMMA4_E2B_WIDTH_PROFILES:
+    elif size_profile in _GEMMA4_WIDTH_PROFILES:
         dimension_kwargs = {
             "vocab_size": 262_144,
-            "hidden_size": 1_536,
-            "intermediate_size": 6_144,
             "num_attention_heads": 8,
-            "num_key_value_heads": 1,
-            # E2B falls back to num_key_value_heads for ordinary full attention.
-            # Keep this explicit so the synthetic K=V case also has a valid
-            # global-KV projection shape.
-            "num_global_key_value_heads": 1,
             "head_dim": 256,
             "global_head_dim": 512,
             "hidden_activation": "gelu_pytorch_tanh",
@@ -341,8 +345,10 @@ def _build_text_config(
             "rms_norm_eps": 1e-6,
             "sliding_window": 512,
             "final_logit_softcapping": 30.0,
-            "use_double_wide_mlp": True,
             "vocab_size_per_layer_input": 262_144,
+            # Explicit global KV heads model the official fallback and keep the
+            # synthetic K=V branch valid for both variants.
+            **_GEMMA4_WIDTH_VARIANTS[_GEMMA4_WIDTH_PROFILES[size_profile]],
         }
     else:
         raise AssertionError(f"Unhandled Gemma4 size profile: {size_profile}")
@@ -367,9 +373,9 @@ def _build_text_config(
 
 
 def _build_vision_config(*, size_profile: str) -> Any:
-    """Create a tiny or E2B-width Gemma4 vision config.
+    """Create a tiny or production-width Gemma4 vision config.
 
-    The E2B-width variant keeps a single encoder layer. It reproduces original
+    The production-width variant keeps a single encoder layer. It reproduces original
     projection, patch, and position-table dimensions without constructing the
     complete 16-layer vision tower.
     """
@@ -393,7 +399,7 @@ def _build_vision_config(*, size_profile: str) -> Any:
                 allow_global_per_layer_attribute_access=True,
             )
         )
-    elif size_profile in _GEMMA4_E2B_WIDTH_PROFILES:
+    elif size_profile in _GEMMA4_WIDTH_PROFILES:
         vision_cfg = Gemma4VisionConfig.from_dict(
             dict(
                 hidden_size=768,
@@ -562,7 +568,7 @@ def _static_pixel_position_ids(
     *,
     batch_size: int = 1,
 ) -> torch.Tensor:
-    """Create the padded 2-D patch layout used by the E2B image processor.
+    """Create the padded 2-D patch layout used by the dense Gemma4 image processor.
 
     The default contract contains a valid ``36 x 66`` patch grid (2,376
     patches) followed by 144 ``(-1, -1)`` padding slots. Pooling by ``3 x 3``
@@ -603,12 +609,13 @@ def _vision_additive_padding_mask(
 
 
 class Gemma4BaseCase(WrapperSmokeCase):
-    """Base class for Gemma4 E2B wrapper smoke cases."""
+    """Base class for dense Gemma4 wrapper smoke cases."""
 
-    tags: tuple[str, ...] = ("gemma4", "e2b")
+    tags: tuple[str, ...] = ("gemma4", "e2b", "e4b")
     # Set by concrete cases (class attribute or during build()).
     seq_len: int
     text_cfg: Any
+    attention_num_kv_heads: int
 
     def availability(self) -> CaseAvailability:
         """Return whether Gemma4 modules can be imported."""
@@ -622,10 +629,13 @@ class Gemma4BaseCase(WrapperSmokeCase):
         """Validate that this case supports the requested Gemma4 profile."""
         profile = _gemma4_size_profile(cfg)
         supported_cases = None
-        if profile == _GEMMA4_SIZE_PROFILE_E2B_DIMS:
-            supported_cases = _GEMMA4_E2B_DIMS_SUPPORTED_CASES
-        elif profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME:
-            supported_cases = _GEMMA4_E2B_STATIC_RUNTIME_SUPPORTED_CASES
+        if (
+            profile in _GEMMA4_WIDTH_PROFILES
+            and profile not in _GEMMA4_STATIC_RUNTIME_PROFILES
+        ):
+            supported_cases = _GEMMA4_DIMS_SUPPORTED_CASES
+        elif profile in _GEMMA4_STATIC_RUNTIME_PROFILES:
+            supported_cases = _GEMMA4_STATIC_RUNTIME_SUPPORTED_CASES
 
         if supported_cases is not None and self.name not in supported_cases:
             supported = ", ".join(sorted(supported_cases))
@@ -638,7 +648,7 @@ class Gemma4BaseCase(WrapperSmokeCase):
         self._active_size_profile = profile
         self._active_static_runtime_shape = (
             _gemma4_static_runtime_shape(cfg)
-            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
+            if profile in _GEMMA4_STATIC_RUNTIME_PROFILES
             else None
         )
         return profile
@@ -685,7 +695,7 @@ class Gemma4BaseCase(WrapperSmokeCase):
     def _calibration_sample_count(self, cfg: Mapping[str, Any], *, default: int) -> int:
         """Avoid retaining multiple large static-runtime samples in memory."""
         profile = self._validated_size_profile(cfg)
-        return 1 if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME else default
+        return 1 if profile in _GEMMA4_STATIC_RUNTIME_PROFILES else default
 
     def _case_pixel_position_ids(self, batch_size: int = 1) -> torch.Tensor:
         """Create tiny or static-runtime pixel positions for this case."""
@@ -790,21 +800,21 @@ class Gemma4BaseCase(WrapperSmokeCase):
     def prepare_model(
         self, model: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
-        """Prepare E2B-width modules in place to avoid an extra large copy."""
+        """Prepare production-width modules in place to avoid an extra large copy."""
         from tico.quantization import prepare
 
         profile = self._validated_size_profile(cfg)
-        inplace = self.inplace_prepare or profile in _GEMMA4_E2B_WIDTH_PROFILES
+        inplace = self.inplace_prepare or profile in _GEMMA4_WIDTH_PROFILES
         return prepare(model, self.ptq_config(cfg), inplace=inplace)
 
     def convert_model(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
-        """Convert E2B-width modules in place to limit peak host memory."""
+        """Convert production-width modules in place to limit peak host memory."""
         from tico.quantization import convert
 
         profile = self._validated_size_profile(cfg)
-        inplace = self.inplace_convert or profile in _GEMMA4_E2B_WIDTH_PROFILES
+        inplace = self.inplace_convert or profile in _GEMMA4_WIDTH_PROFILES
         return convert(prepared, inplace=inplace)
 
     def export_filename(self, cfg: Mapping[str, Any]) -> str:
@@ -820,7 +830,7 @@ class Gemma4TextMLPCase(Gemma4BaseCase):
 
     name = "gemma4_text_mlp"
     description = "Quantize one tiny dense Gemma4 text MLP module."
-    tags = ("gemma4", "e2b", "text", "mlp")
+    tags = ("gemma4", "e2b", "e4b", "text", "mlp")
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny Gemma4 text MLP and reference copy."""
@@ -851,7 +861,7 @@ class Gemma4TextMLPCase(Gemma4BaseCase):
 class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
     """Base class for mode-specific Gemma4 text attention smoke cases."""
 
-    tags: tuple[str, ...] = ("gemma4", "e2b", "text", "attention")
+    tags: tuple[str, ...] = ("gemma4", "e2b", "e4b", "text", "attention")
     max_mean_abs_diff = 2.0
     seq_len = 8
     max_seq = 8
@@ -887,6 +897,9 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
 
         module = Gemma4TextAttention(self.text_cfg, layer_idx=self.layer_idx).eval()
         self.attention_head_dim = int(module.head_dim)
+        self.attention_num_kv_heads = int(self.text_cfg.num_attention_heads) // int(
+            module.num_key_value_groups
+        )
         self.is_sliding_attention = bool(module.is_sliding)
         self.sliding_window = int(module.sliding_window or 0)
         return module, clone_module(module)
@@ -895,7 +908,7 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         """Create a synthetic full K/V tuple for a shared-KV consumer layer."""
         key_states = torch.randn(
             1,
-            self.text_cfg.num_key_value_heads,
+            self.attention_num_kv_heads,
             kv_len,
             self.attention_head_dim,
         )
@@ -1029,7 +1042,7 @@ class Gemma4TextAttentionDecodeBaseCase(Gemma4TextAttentionBaseCase):
         past_len = self.max_seq - 1
         past_key = torch.randn(
             1,
-            self.text_cfg.num_key_value_heads,
+            self.attention_num_kv_heads,
             past_len,
             self.attention_head_dim,
         )
@@ -1076,7 +1089,7 @@ class Gemma4TextAttentionPrefillCase(Gemma4TextAttentionPrefillBaseCase):
 
     name = "gemma4_text_attention_prefill"
     description = "Quantize one Gemma4 full-attention module in prefill mode."
-    tags = ("gemma4", "e2b", "text", "attention", "prefill")
+    tags = ("gemma4", "e2b", "e4b", "text", "attention", "prefill")
     layer_types = ("sliding_attention", "full_attention")
     layer_idx = 1
 
@@ -1086,7 +1099,7 @@ class Gemma4TextAttentionDecodeCase(Gemma4TextAttentionDecodeBaseCase):
 
     name = "gemma4_text_attention_decode"
     description = "Quantize one Gemma4 full-attention module in decode mode."
-    tags = ("gemma4", "e2b", "text", "attention", "decode")
+    tags = ("gemma4", "e2b", "e4b", "text", "attention", "decode")
     layer_types = ("sliding_attention", "full_attention")
     layer_idx = 1
 
@@ -1096,7 +1109,7 @@ class Gemma4TextSlidingAttentionPrefillCase(Gemma4TextAttentionPrefillBaseCase):
 
     name = "gemma4_text_attention_sliding_prefill"
     description = "Quantize one Gemma4 sliding-attention module in prefill mode."
-    tags = ("gemma4", "e2b", "text", "attention", "prefill", "sliding")
+    tags = ("gemma4", "e2b", "e4b", "text", "attention", "prefill", "sliding")
     layer_types = ("sliding_attention", "full_attention")
     layer_idx = 0
     smoke_sliding_window = 4
@@ -1107,7 +1120,7 @@ class Gemma4TextSlidingAttentionDecodeCase(Gemma4TextAttentionDecodeBaseCase):
 
     name = "gemma4_text_attention_sliding_decode"
     description = "Quantize one Gemma4 sliding-attention module in decode mode."
-    tags = ("gemma4", "e2b", "text", "attention", "decode", "sliding")
+    tags = ("gemma4", "e2b", "e4b", "text", "attention", "decode", "sliding")
     layer_types = ("sliding_attention", "full_attention")
     layer_idx = 0
     smoke_sliding_window = 4
@@ -1121,7 +1134,7 @@ class Gemma4TextAttentionKEqVPrefillCase(Gemma4TextAttentionPrefillBaseCase):
         "Quantize one Gemma4 full-attention module with attention_k_eq_v=True "
         "in prefill mode."
     )
-    tags = ("gemma4", "e2b", "text", "attention", "prefill", "k_eq_v")
+    tags = ("gemma4", "e2b", "e4b", "text", "attention", "prefill", "k_eq_v")
     layer_types = ("full_attention",)
     layer_idx = 0
     attention_k_eq_v = True
@@ -1198,7 +1211,7 @@ class Gemma4TextAttentionSharedKVPrefillCase(
 
     name = "gemma4_text_attention_shared_kv_prefill"
     description = "Quantize one Gemma4 shared-KV attention consumer in prefill mode."
-    tags = ("gemma4", "e2b", "text", "attention", "prefill", "shared_kv")
+    tags = ("gemma4", "e2b", "e4b", "text", "attention", "prefill", "shared_kv")
     layer_types = ("full_attention", "full_attention")
     layer_idx = 1
     num_kv_shared_layers = 1
@@ -1230,7 +1243,7 @@ class Gemma4TextAttentionSharedKVDecodeCase(
 
     name = "gemma4_text_attention_shared_kv_decode"
     description = "Quantize one Gemma4 shared-KV attention consumer in decode mode."
-    tags = ("gemma4", "e2b", "text", "attention", "decode", "shared_kv")
+    tags = ("gemma4", "e2b", "e4b", "text", "attention", "decode", "shared_kv")
     layer_types = ("full_attention", "full_attention")
     layer_idx = 1
     num_kv_shared_layers = 1
@@ -1258,7 +1271,7 @@ class Gemma4TextAttentionSharedKVDecodeCase(
 class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
     """Base class for tiny Gemma4 text decoder-layer smoke cases."""
 
-    tags: tuple[str, ...] = ("gemma4", "e2b", "text", "decoder_layer")
+    tags: tuple[str, ...] = ("gemma4", "e2b", "e4b", "text", "decoder_layer")
     max_mean_abs_diff = 2.5
     max_seq: int
     seq_len = 8
@@ -1330,9 +1343,7 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         torch.manual_seed(123)
         profile = self._validated_size_profile(cfg)
         hidden_size_per_layer_input = (
-            _GEMMA4_E2B_PLE_DIM
-            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
-            else 0
+            _GEMMA4_PLE_DIM if profile in _GEMMA4_STATIC_RUNTIME_PROFILES else 0
         )
         self.text_cfg = self._make_text_config(
             cfg,
@@ -1350,6 +1361,9 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
             self.max_seq = self._decode_max_seq(default=type(self).max_seq)
         module = Gemma4TextDecoderLayer(self.text_cfg, layer_idx=self.layer_idx).eval()
         self.attention_head_dim = int(module.self_attn.head_dim)
+        self.attention_num_kv_heads = int(self.text_cfg.num_attention_heads) // int(
+            module.self_attn.num_key_value_groups
+        )
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
@@ -1503,6 +1517,7 @@ class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
     tags = (
         "gemma4",
         "e2b",
+        "e4b",
         "text",
         "decoder_layer",
         "prefill",
@@ -1536,9 +1551,7 @@ class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
         torch.manual_seed(123)
         profile = self._validated_size_profile(cfg)
         hidden_size_per_layer_input = (
-            _GEMMA4_E2B_PLE_DIM
-            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
-            else 0
+            _GEMMA4_PLE_DIM if profile in _GEMMA4_STATIC_RUNTIME_PROFILES else 0
         )
         self.text_cfg = self._make_text_config(
             cfg,
@@ -1548,7 +1561,7 @@ class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
         self.seq_len = self._text_prefill_seq_len(default=type(self).seq_len)
         self.sliding_window = (
             int(self.text_cfg.sliding_window)
-            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
+            if profile in _GEMMA4_STATIC_RUNTIME_PROFILES
             else type(self).sliding_window
         )
         self.text_cfg.sliding_window = self.sliding_window
@@ -1558,6 +1571,9 @@ class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
             layer_idx=self.layer_idx,
         ).eval()
         self.attention_head_dim = int(module.self_attn.head_dim)
+        self.attention_num_kv_heads = int(self.text_cfg.num_attention_heads) // int(
+            module.self_attn.num_key_value_groups
+        )
 
         if not module.self_attn.is_sliding:
             raise RuntimeError(
@@ -1610,7 +1626,7 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
 
     name = "gemma4_text_decoder_layer_decode"
     description = "Quantize one tiny dense Gemma4 text decoder layer in decode mode."
-    tags = ("gemma4", "e2b", "text", "decoder_layer", "decode")
+    tags = ("gemma4", "e2b", "e4b", "text", "decoder_layer", "decode")
     compare_reference_source = "prepared"
     seq_len = 1
     max_seq = 8
@@ -1623,13 +1639,13 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
         past = (
             torch.randn(
                 1,
-                self.text_cfg.num_key_value_heads,
+                self.attention_num_kv_heads,
                 past_len,
                 self.attention_head_dim,
             ),
             torch.randn(
                 1,
-                self.text_cfg.num_key_value_heads,
+                self.attention_num_kv_heads,
                 past_len,
                 self.attention_head_dim,
             ),
@@ -1676,7 +1692,7 @@ class Gemma4TextDecoderLayerSharedKVCase(
 
     name = "gemma4_text_decoder_layer_shared_kv"
     description = "Quantize one tiny Gemma4 decoder layer that consumes shared K/V."
-    tags = ("gemma4", "e2b", "text", "decoder_layer", "shared_kv")
+    tags = ("gemma4", "e2b", "e4b", "text", "decoder_layer", "shared_kv")
     layer_types = ("full_attention", "full_attention")
     layer_idx = 1
     num_kv_shared_layers = 1
@@ -1687,7 +1703,7 @@ class Gemma4TextDecoderLayerSharedKVCase(
         hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
         key_states = torch.randn(
             1,
-            self.text_cfg.num_key_value_heads,
+            self.attention_num_kv_heads,
             self.seq_len,
             self.attention_head_dim,
         )
@@ -1716,7 +1732,7 @@ class Gemma4TextModelCase(Gemma4BaseCase):
     description = (
         "Quantize one tiny dense Gemma4 text model with full and sliding attention."
     )
-    tags = ("gemma4", "e2b", "text", "model")
+    tags = ("gemma4", "e2b", "e4b", "text", "model")
     max_mean_abs_diff = 3.0
     seq_len = 8
     supports_circle_export = False
@@ -1819,7 +1835,7 @@ class Gemma4VisionAttentionCase(Gemma4BaseCase):
 
     name = "gemma4_vision_attention"
     description = "Quantize one tiny Gemma4 vision attention module."
-    tags = ("gemma4", "e2b", "vision", "attention")
+    tags = ("gemma4", "e2b", "e4b", "vision", "attention")
     max_mean_abs_diff = 2.0
     seq_len = 8
 
@@ -1896,7 +1912,7 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
 
     name = "gemma4_vision_encoder_layer"
     description = "Quantize one tiny Gemma4 vision encoder layer."
-    tags = ("gemma4", "e2b", "vision", "encoder_layer")
+    tags = ("gemma4", "e2b", "e4b", "vision", "encoder_layer")
     max_mean_abs_diff = 2.5
     seq_len = 8
 
@@ -1985,7 +2001,7 @@ class Gemma4TextScaledWordEmbeddingCase(Gemma4BaseCase):
 
     name = "gemma4_text_scaled_word_embedding"
     description = "Quantize one tiny Gemma4 text scaled word embedding module."
-    tags = ("gemma4", "e2b", "text", "embedding")
+    tags = ("gemma4", "e2b", "e4b", "text", "embedding")
     max_mean_abs_diff = 1.0
     vocab_size = 256
     embedding_dim = 64
@@ -2041,7 +2057,7 @@ class Gemma4VisionPatchEmbedderCase(Gemma4BaseCase):
 
     name = "gemma4_vision_patch_embedder"
     description = "Quantize one tiny Gemma4 vision patch embedder module."
-    tags = ("gemma4", "e2b", "vision", "patch_embedder")
+    tags = ("gemma4", "e2b", "e4b", "vision", "patch_embedder")
     max_mean_abs_diff = 2.0
     hidden_size = 32
     patch_size = 4
@@ -2134,7 +2150,7 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
 
     name = "gemma4_vision_pooler"
     description = "Quantize one tiny Gemma4 vision pooler module."
-    tags = ("gemma4", "e2b", "vision", "pooler")
+    tags = ("gemma4", "e2b", "e4b", "vision", "pooler")
     max_mean_abs_diff = 2.0
     # seq_len=16 and output_length=4 so that k=2 (16 / 4 = 4, sqrt(4) = 2).
     seq_len = 16
@@ -2245,7 +2261,7 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
     description = (
         "Quantize one tiny Gemma4 vision model (patch_embedder + encoder + pooler)."
     )
-    tags = ("gemma4", "e2b", "vision", "model")
+    tags = ("gemma4", "e2b", "e4b", "vision", "model")
     max_mean_abs_diff = 3.0
     # seq_len=36 and output_length=4 so that k=2 (36 / 3^2 = 4, sqrt(4) = 2).
     seq_len = 36
@@ -2356,7 +2372,7 @@ class Gemma4MultimodalEmbedderCase(Gemma4BaseCase):
     description = (
         "Quantize one tiny Gemma4 multimodal embedder (RMSNorm + Linear projection)."
     )
-    tags = ("gemma4", "e2b", "multimodal", "embedder")
+    tags = ("gemma4", "e2b", "e4b", "multimodal", "embedder")
     max_mean_abs_diff = 2.0
     seq_len = 16
 
@@ -2425,7 +2441,7 @@ class Gemma4VisionEncoderCase(Gemma4BaseCase):
 
     name = "gemma4_vision_encoder"
     description = "Quantize a tiny Gemma4 vision encoder."
-    tags = ("gemma4", "e2b", "vision", "encoder")
+    tags = ("gemma4", "e2b", "e4b", "vision", "encoder")
     max_mean_abs_diff = 3.0
     seq_len = 8
 
@@ -2514,16 +2530,16 @@ class Gemma4ModelCase(Gemma4BaseCase):
     description = (
         "Quantize one tiny Gemma4Model (vision tower + language model + fusion)."
     )
-    tags = ("gemma4", "e2b", "model", "image-text")
+    tags = ("gemma4", "e2b", "e4b", "model", "image-text")
     max_mean_abs_diff = 5.0
     seq_len = 16
     num_visual_tokens = 4
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
         """Build the PTQ config used by Gemma4Model smoke checks."""
-        from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+        from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 
-        return build_gemma4_e2b_ptq_config(
+        return build_gemma4_ptq_config(
             num_text_layers=int(self.text_cfg.num_hidden_layers),
             num_vision_layers=int(self.vision_cfg.num_hidden_layers),
             model_args={
@@ -2629,7 +2645,6 @@ class Gemma4ModelCase(Gemma4BaseCase):
         - position_embeddings: dict[layer_type -> (cos, sin)]
         """
         hidden_size = int(self.text_cfg.hidden_size)
-        head_dim = int(self.text_cfg.head_dim)
         num_layers = int(self.text_cfg.num_hidden_layers)
         ple_dim = int(getattr(self.text_cfg, "hidden_size_per_layer_input", 0) or 0)
         layer_types = list(self.text_cfg.layer_types)
@@ -2643,6 +2658,7 @@ class Gemma4ModelCase(Gemma4BaseCase):
         attention_masks: dict[str, torch.Tensor] = {}
         position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for layer_type in layer_types:
+            head_dim = gemma4_layer_type_head_dim(self.text_cfg, layer_type)
             attention_masks[layer_type] = torch.zeros(1, 1, self.seq_len, self.seq_len)
             cos = torch.ones(1, self.seq_len, head_dim)
             sin = torch.zeros(1, self.seq_len, head_dim)
@@ -2736,16 +2752,16 @@ class Gemma4ForConditionalGenerationCase(Gemma4TextLogitsCase):
         "Quantize one tiny Gemma4ForConditionalGeneration "
         "(text-only logits; Circle uses the external-embedding text core)."
     )
-    tags = ("gemma4", "e2b", "model", "conditional_generation", "image-text")
+    tags = ("gemma4", "e2b", "e4b", "model", "conditional_generation", "image-text")
     max_mean_abs_diff = 5.0
     seq_len = 16
     num_visual_tokens = 4
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
         """Build the PTQ config used by Gemma4ForConditionalGeneration smoke checks."""
-        from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+        from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 
-        return build_gemma4_e2b_ptq_config(
+        return build_gemma4_ptq_config(
             num_text_layers=int(self.text_cfg.num_hidden_layers),
             num_vision_layers=int(self.vision_cfg.num_hidden_layers),
             model_args={
@@ -2831,15 +2847,15 @@ class Gemma4ForCausalLMCase(Gemma4TextLogitsCase):
     description = (
         "Quantize one tiny Gemma4ForCausalLM " "(text decoder + lm_head + softcapping)."
     )
-    tags = ("gemma4", "e2b", "model", "causal_lm", "text")
+    tags = ("gemma4", "e2b", "e4b", "model", "causal_lm", "text")
     max_mean_abs_diff = 5.0
     seq_len = 16
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
         """Build the PTQ config used by Gemma4ForCausalLM smoke checks."""
-        from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+        from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 
-        return build_gemma4_e2b_ptq_config(
+        return build_gemma4_ptq_config(
             num_text_layers=int(self.text_cfg.num_hidden_layers),
             num_vision_layers=0,
         )

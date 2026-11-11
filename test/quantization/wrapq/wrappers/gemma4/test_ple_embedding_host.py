@@ -295,6 +295,26 @@ class TestGemma4PLEEmbeddingHostArtifact(unittest.TestCase):
         self.assertGreater(e2b_numel, CIRCLE_FLATBUFFER_LIMIT_BYTES)
         self.assertLess(e2b_numel // 2, CIRCLE_FLATBUFFER_LIMIT_BYTES)
 
+    def test_production_geometry_size_estimate_without_table_allocation(self):
+        """Meta weights estimate both dense tables without materializing them."""
+        from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+            CIRCLE_FLATBUFFER_LIMIT_BYTES,
+            estimate_gemma4_ple_embedding_circle_bytes,
+        )
+
+        _qtext, adapter = _make_adapter(self.cfg, quantized=True)
+        embedding = adapter.embed_tokens_per_layer.wrapped
+        for layers, packed in ((35, 8960), (42, 10752)):
+            with self.subTest(num_hidden_layers=layers):
+                embedding.module.weight = torch.nn.Parameter(
+                    torch.empty((262144, packed), device="meta")
+                )
+                estimated_bytes = estimate_gemma4_ple_embedding_circle_bytes(adapter)
+                self.assertEqual(estimated_bytes, 262144 * layers * 256)
+                self.assertGreater(estimated_bytes, CIRCLE_FLATBUFFER_LIMIT_BYTES)
+                if layers == 42:
+                    self.assertEqual(estimated_bytes / 2**30, 2.625)
+
 
 if __name__ == "__main__":
     unittest.main()

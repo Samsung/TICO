@@ -737,8 +737,8 @@ class TestQuantGemma4TextModel(unittest.TestCase):
         self.assertIsNotNone(qmodel.get_observer("inputs_embeds"))
         self.assertIsNotNone(qmodel.get_observer("layers.0.self_attn.q_proj.act_in"))
 
-    def test_moe_text_model_is_rejected_for_e2b_scope(self):
-        """Check that the E2B text-model wrapper rejects MoE configs explicitly."""
+    def test_moe_text_model_is_rejected_for_dense_scope(self):
+        """Check that the dense Gemma4 text-model wrapper rejects MoE configs explicitly."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
             QuantGemma4TextModel,
         )

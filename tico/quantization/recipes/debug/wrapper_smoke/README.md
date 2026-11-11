@@ -251,21 +251,27 @@ qwen3_vl_for_conditional_generation
 Use the regular Qwen3-VL quantize/export recipe when full text depth, vocabulary
 embeddings, LM head, or end-to-end multimodal execution is required.
 
-### Gemma4 E2B-width and static-runtime Circle export
+### Dense Gemma4 width and static-runtime Circle export
 
-Gemma4 cases default to the existing `tiny` profile. Two larger profiles are
-available for bounded wrapper cases:
+Gemma4 cases default to the CPU-friendly `tiny` profile. Production-width
+profiles are available explicitly for bounded wrapper cases:
 
 - `e2b_dims` uses the original E2B channel, projection, patch, and position-table
   dimensions while retaining smoke-sized input tensors.
 - `e2b_static_runtime` uses the same E2B dimensions and replaces the smoke input
   shapes with the fixed runtime contract used by the static Gemma4 path.
+- `e4b_dims` uses hidden size 2560, intermediate size 10240, 8 query heads,
+  2 KV heads (4 query groups each), sliding/full head dimensions 256/512,
+  and `use_double_wide_mlp=False`, with smoke-sized inputs.
+- `e4b_static_runtime` uses the same E4B widths with the common fixed runtime
+  geometry and 256-wide external PLE inputs. Select the shared vision alias
+  `gemma4_66x36_264`; legacy `e2b_66x36_264` has identical geometry.
 
-Both profiles retain a one- or two-layer case topology and deterministically
+All width profiles retain a one- or two-layer case topology and deterministically
 random weights. They do not download a Hugging Face checkpoint or construct the
 full text, vocabulary, PLE-table, or multimodal model.
 
-Supported `e2b_dims` cases:
+Supported `e2b_dims` and `e4b_dims` cases:
 
 ```text
 gemma4_text_mlp
@@ -289,31 +295,32 @@ gemma4_vision_model
 gemma4_multimodal_embedder
 ```
 
-`e2b_static_runtime` supports the same bounded cases except
+`e2b_static_runtime` and `e4b_static_runtime` support the same bounded cases except
 `gemma4_text_attention_k_eq_v_prefill`, which is a synthetic alternative-attention
-branch rather than the E2B runtime configuration.
+branch outside the dense E2B/E4B runtime configuration.
 
 Attention smoke cases use separate prefill and decode adapters. Full and sliding decode cases consume a single query token plus a fixed-capacity past cache. Shared-KV decode consumes a full externally managed K/V tuple and does not return a layer-owned K/V delta.
 
-The default static-runtime shape is:
+The common static-runtime geometry is shown below; text hidden size is 1536
+for E2B and 2560 for E4B:
 
 ```text
-Text prefill                  : (1, 2048, 1536)
-Text decode hidden            : (1, 1, 1536)
+Text prefill                  : (1, 2048, hidden_size)
+Text decode hidden            : (1, 1, hidden_size)
 Text decode K/V capacity      : 2048 tokens
 Sliding window                : 512 tokens
 Per-layer input (PLE)         : (1, S, 256)
 Vision patch slots            : 2520
-Vision valid patches          : 2304 = 48 x 48
-Vision padding patches        : 216
+Vision valid patches          : 2376 = 36 x 66
+Vision padding patches        : 144
 Pooler output slots           : 280
-Valid visual tokens           : 256 = 16 x 16
+Valid visual tokens           : 264 = 12 x 22
 Vision hidden size            : 768
 ```
 
 The vision layout matches Gemma4 processor semantics for the default
 `max_soft_tokens=280` and `pooling_kernel_size=3`: valid position IDs are
-followed by `(-1, -1)` padding slots, and the pooler removes 24 padded output
+followed by `(-1, -1)` padding slots, and the pooler removes 16 padded output
 slots after producing 280 fixed slots.
 
 Run one original-width module with smoke-sized inputs:
@@ -351,6 +358,19 @@ gemma4_text_decoder_layer_prefill.e2b_dims.q.circle
 gemma4_text_decoder_layer_prefill.e2b_static_runtime.q.circle
 ```
 
+For the E4B variants, select `e4b_dims` or `e4b_static_runtime` in the same
+commands, use an E4B output directory, and select the shared vision profile:
+
+```bash
+--set debug.wrapper_smoke.gemma4.size_profile=e4b_static_runtime
+--set debug.wrapper_smoke.gemma4.static_runtime.profile=gemma4_66x36_264
+```
+
+E4B filenames include `.e4b_dims.` or `.e4b_static_runtime.`. Exact-width
+execution is intentionally absent from the default test matrix; unit tests
+validate these profiles through configuration metadata without allocating
+production weights.
+
 Static dimensions can be overridden for targeted debugging:
 
 ```bash
@@ -359,12 +379,12 @@ Static dimensions can be overridden for targeted debugging:
 --set debug.wrapper_smoke.gemma4.static_runtime.max_soft_tokens=280
 ```
 
-`num_visual_tokens` must form a square grid, and `max_soft_tokens` must use a
-Gemma4 processor-supported budget. The full default shapes intentionally create
+`num_visual_tokens` must equal the pooled rectangular grid area, and
+`max_soft_tokens` must use a Gemma4 processor-supported budget. The full default shapes intentionally create
 large attention tensors, so use one calibration iteration and disable plotting
 when the goal is Circle/compiler validation.
 
-The following composite or vocabulary-sized cases reject both E2B profiles
+The following composite or vocabulary-sized cases reject all production-width profiles
 before allocating a model:
 
 ```text

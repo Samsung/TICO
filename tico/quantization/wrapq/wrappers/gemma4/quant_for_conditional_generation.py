@@ -22,7 +22,7 @@ from transformers.generation.utils import GenerationMixin
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import join_name
-from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_dense_no_moe
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     "transformers.models.gemma4.modeling_gemma4.Gemma4ForConditionalGeneration"
 )
 class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
-    """Top-level PTQ wrapper for Gemma4 E2B conditional generation."""
+    """Top-level PTQ wrapper for Gemma4 E2B/E4B conditional generation."""
 
     def __init__(
         self,
@@ -48,7 +48,7 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
         fp_name: Optional[str] = None,
     ):
         fp_model = cast("Gemma4ForConditionalGeneration", fp_model)
-        assert_gemma4_e2b_no_moe(fp_model)
+        assert_gemma4_dense_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
         self.config = fp_model.config
