@@ -131,9 +131,6 @@ class NNModuleTest(TestRunnerBase):
     ):
         dynamic_shapes = None
 
-        assert hasattr(self.nnmodule, "get_example_inputs")
-        self.forward_args, self.forward_kwargs = self.nnmodule.get_example_inputs()
-
         runtime = self.runtime()
 
         if hasattr(self.nnmodule, "get_dynamic_shapes"):
@@ -317,8 +314,27 @@ class NormalTestDictBuilder(TestDictBuilderBase):
         testdict = {}
         for nnmodule_cls in self._get_nnmodules(submodule):
             base_name = f"{submodule}.{nnmodule_cls.__name__}"
-            module_instance = nnmodule_cls()
-
-            testdict[base_name] = NNModuleTest(base_name, module_instance).make()
+            testdict[base_name] = self._make_test(base_name, nnmodule_cls)
 
         return testdict
+
+    @staticmethod
+    def _make_test(test_name: str, nnmodule_cls: type[TestModuleBase]):
+        # Only decorator-level skips are known without constructing the model.
+        # Other options (including instance-defined tags and tolerances) are
+        # resolved by the runner after construction, as before.
+        if is_tagged(nnmodule_cls, "skip"):
+
+            @unittest.skip(getattr(nnmodule_cls, "__tag_skip_reason", ""))
+            def wrapper(testcase):
+                pass
+
+        else:
+
+            def wrapper(testcase):
+                # Keep preparation outside make()'s negative-test assertion:
+                # a broken fixture must be an error, not an expected failure.
+                runner = NNModuleTest(test_name, nnmodule_cls())
+                runner.make()(testcase)
+
+        return wrapper

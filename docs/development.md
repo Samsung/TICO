@@ -189,6 +189,28 @@ selects the performance entry point instead of normal discovery. For example,
 `./ccex test -v -k add` combines verbose diagnostics with a focused test; setting
 `TICO_LOG=4` explicitly has the same effect (see [Log levels](#log-levels)).
 
+### Test duration reporting
+
+```bash
+./ccex test --durations 10         # Collection, suite time, and slowest 10 full test IDs
+./ccex test -k SimpleAdd --durations 0  # Report every executed test duration
+```
+
+`--durations N` is opt-in, accepts a nonnegative count (`0` means all), and works
+with the default suite, `-k`, and `-m`. It does not apply to `--perf`. It uses the
+standard unittest duration support on Python 3.12 and newer, with a small result
+adapter on Python 3.10/3.11; selection, outcomes, and exit behavior stay with unittest.
+
+Collection time starts in the timing worker before importing unittest and ends after
+discovery (including discovered imports and generated test construction). It excludes
+interpreter startup and the parent `ccex` script. Suite time surrounds unittest's runner,
+including class/module fixtures and result output. Individual durations include test
+setup, body, teardown, and cleanups; they exclude class/module fixtures and discovery.
+Thus suite time minus individual durations is not a discovery measurement. For complete
+command wall time, measure a fresh process externally, for example with
+`time ./ccex test -k SimpleAdd --durations 10`; compare identical environment, selection,
+and cache conditions across repeated fresh processes.
+
 ### Opt-in test requirements
 
 Small local CPU wrapper tests run in the default suite; their Transformers version
