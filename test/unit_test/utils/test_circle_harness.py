@@ -96,12 +96,12 @@ class TestCircleHarness(unittest.TestCase):
         np.testing.assert_array_equal(result[0], [[4, 5]])
 
     def test_real_reference_still_rejects_wrong_operator_shape_and_dtype(self):
-        for kwargs, error in [
-            ({"shape": [2, 1]}, "operator 0 .* has shape"),
-            ({"dtype": np.int32}, "dtype float32.*requires INT32"),
+        for shape, dtype, error in [
+            ([2, 1], np.float32, "operator 0 .* has shape"),
+            (None, np.int32, "dtype float32.*requires INT32"),
         ]:
-            with self.subTest(kwargs=kwargs):
-                self._add_document(**kwargs).save(self.path)
+            with self.subTest(shape=shape, dtype=dtype):
+                self._add_document(shape=shape, dtype=dtype).save(self.path)
                 with self.assertRaisesRegex(CircleRuntimeValidationError, error):
                     verify_circle(self.path)
                 with self.assertRaisesRegex(CircleRuntimeValidationError, error):
