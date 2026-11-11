@@ -153,7 +153,12 @@ A module derives from the repository test base and provides at least
   negative test, or skip the case
 
 Generated test names include the source module namespace, which allows `unittest -k`
-filtering through `./ccex test -k ...`.
+filtering through `./ccex test -k ...`. Discovery imports module definitions and
+creates test methods without constructing models or example inputs. Each selected,
+unskipped invocation constructs a fresh model and obtains its example inputs once;
+all conversion and comparison steps use copies of those same inputs. Instance-defined
+options and tolerances are resolved after construction. Fixture construction and input
+errors occur outside the negative-test expected-exception boundary.
 
 ### 4.2 Run the PyTorch reference first
 
@@ -200,6 +205,15 @@ The harness validates the serialized file with TICO's own artifact layer:
 
 This replaces the former external `circle2circle` invocation and catches malformed or
 unsupported Circle structures before numerical comparison.
+
+The static probe is also a distinct input case. A normal reference execution checks
+the same operator contracts for its actual values, but cannot establish that zero
+values take the same kernel path. For example, a static-shape `RESHAPE` shape input
+can contain valid dimensions during inference and invalid zero dimensions during
+the probe. Quantized probes also select fake-quantize mode, whereas ordinary public
+reference execution defaults to native mode. The harness therefore retains the
+probe for static models, including conversion-only and external-runtime tests;
+reference inference still reloads the serialized artifact through the public loader.
 
 ### 4.5 Validate symbolic shape metadata
 

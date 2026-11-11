@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -23,6 +25,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class CcexTestTest(unittest.TestCase):
@@ -42,6 +45,7 @@ class CcexTestTest(unittest.TestCase):
                 "ccex",
                 "infra/command/test",
                 "infra/scripts/test_run.py",
+                "infra/scripts/unittest_run.py",
             ):
                 destination = fixture_root / relative_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -204,6 +208,206 @@ class CcexTestTest(unittest.TestCase):
                 self.assertIn(
                     f"RUN unit tests with -k test.modules.{keyword}", completed.stdout
                 )
+
+    def test_durations_preserve_selection_and_report_full_ids(self) -> None:
+        for arguments in (("-k", "selected"), ("-k", "*FixtureTest.test_selected")):
+            for durations in (0, 1):
+                with self.subTest(arguments=arguments, durations=durations):
+                    completed = self._run_tests(
+                        *arguments,
+                        "--durations",
+                        str(durations),
+                        source=(
+                            "        self.assertEqual(1 + 1, 2)\n"
+                            "    def test_excluded(self):\n"
+                            "        self.fail('keyword filter was lost')\n"
+                        ),
+                    )
+                    self._assert_one_test_passed(completed)
+                    self.assertIn(
+                        "Collection (worker import through discovery):",
+                        completed.stderr,
+                    )
+                    self.assertIn(
+                        "Suite (including class/module fixtures):", completed.stderr
+                    )
+                    self.assertIn("Slowest test durations", completed.stderr)
+                    self.assertRegex(
+                        completed.stderr,
+                        r"[0-9.]+s +test_fixture.FixtureTest.test_selected",
+                    )
+
+    def test_durations_preserve_failure_import_and_no_match_status(self) -> None:
+        cases = (
+            ((), "        self.fail('fixture failure')\n", "FAILED (failures=1)"),
+            (
+                (),
+                "        pass\n\nraise ImportError('fixture import')\n",
+                "FAILED (errors=1)",
+            ),
+            (("-k", "__no_matching_test__"), "", "Ran 0 tests"),
+        )
+        for arguments, source, expected in cases:
+            results = [
+                self._run_tests(*arguments, *timing, source=source)
+                for timing in ((), ("--durations", "1"))
+            ]
+            with self.subTest(arguments=arguments, expected=expected):
+                # Older stdlib versions may succeed for an empty selection;
+                # the timing option must preserve that interpreter's behavior.
+                if expected != "Ran 0 tests":
+                    self.assertNotEqual(results[0].returncode, 0)
+                self.assertEqual(results[0].returncode, results[1].returncode)
+                for completed in results:
+                    self.assertIn(expected, completed.stderr)
+
+    def test_durations_preserve_skip_expected_failure_and_subtests(self) -> None:
+        completed = self._run_tests(
+            "--durations",
+            "1",
+            source=(
+                "        with self.subTest(value=1):\n"
+                "            self.assertEqual(1, 1)\n"
+                "    @unittest.skip('fixture skip')\n"
+                "    def test_skipped(self):\n"
+                "        self.fail('skip was lost')\n"
+                "    @unittest.expectedFailure\n"
+                "    def test_expected(self):\n"
+                "        self.fail('expected failure')\n"
+            ),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Ran 3 tests", completed.stderr)
+        self.assertIn("OK (skipped=1, expected failures=1)", completed.stderr)
+        durations = completed.stderr.split("Slowest test durations", 1)[1].split(
+            "\n\n", 1
+        )[0]
+        self.assertEqual(durations.count("test_fixture.FixtureTest."), 1)
+
+    def test_durations_forward_model_and_shorthand_selectors(self) -> None:
+        self._assert_one_test_passed(
+            self._run_tests(
+                "--durations",
+                "1",
+                "-m",
+                "Small Model*",
+                test_file="pt2_to_circle_test/test_model.py",
+                source="        self.assertEqual(os.environ['CCEX_TEST_MODEL'], 'Small Model*')\n",
+            )
+        )
+        for keyword in ("op", "net"):
+            self._assert_one_test_passed(
+                self._run_tests(
+                    "--durations",
+                    "1",
+                    "-k",
+                    keyword,
+                    source=(
+                        "        self.assertEqual(1 + 1, 2)\n\n"
+                        f"FixtureTest.__module__ = 'test.modules.{keyword}'\n"
+                    ),
+                )
+            )
+
+    def test_duration_compatibility_result_preserves_failfast_and_outcomes(
+        self,
+    ) -> None:
+        from infra.scripts import unittest_run
+
+        class Fixture(unittest.TestCase):
+            def test_success(self):
+                with self.subTest(value=1):
+                    self.assertEqual(1, 1)
+
+            @unittest.skip("fixture skip")
+            def test_skip(self):
+                self.fail("skip was lost")
+
+            @unittest.expectedFailure
+            def test_expected(self):
+                self.fail("expected failure")
+
+            def test_failure(self):
+                with self.subTest(value=2):
+                    self.fail("subtest failure")
+
+        for failfast in (False, True):
+            stream = io.StringIO()
+            with (
+                patch.object(unittest_run, "_NATIVE_DURATIONS", False),
+                patch.object(
+                    unittest_run._DurationRunner,
+                    "resultclass",
+                    unittest_run._LegacyDurationResult,
+                ),
+            ):
+                result = unittest_run._DurationRunner(
+                    stream=stream,
+                    failfast=failfast,
+                    durations=0,
+                ).run(
+                    unittest.TestSuite(
+                        Fixture(method)
+                        for method in (
+                            "test_success",
+                            "test_skip",
+                            "test_expected",
+                            "test_failure",
+                            "test_success",
+                        )
+                    )
+                )
+            with self.subTest(failfast=failfast):
+                self.assertFalse(result.wasSuccessful())
+                self.assertEqual(result.testsRun, 4 if failfast else 5)
+                self.assertEqual(len(result.skipped), 1)
+                self.assertEqual(len(result.expectedFailures), 1)
+                self.assertEqual(len(result.failures), 1)
+                self.assertEqual(len(result.collectedDurations), 3 if failfast else 4)
+                self.assertEqual(
+                    result.collectedDurations[0][0], Fixture("test_success").id()
+                )
+                self.assertIn("Slowest test durations", stream.getvalue())
+
+    def test_duration_results_preserve_buffer_and_class_setup_errors(self) -> None:
+        from infra.scripts import unittest_run
+
+        class BufferedFixture(unittest.TestCase):
+            def test_failure(self):
+                print("fixture output")
+                self.fail("fixture failure")
+
+        class ClassSetupErrorFixture(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                raise RuntimeError("fixture class setup failure")
+
+            def test_unreachable(self):
+                self.fail("class setup error was lost")
+
+        modes = (False, True) if unittest_run._NATIVE_DURATIONS else (False,)
+        for native in modes:
+            with (
+                self.subTest(native=native),
+                patch.object(unittest_run, "_NATIVE_DURATIONS", native),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                failed = unittest_run._DurationRunner(
+                    stream=io.StringIO(),
+                    buffer=True,
+                    durations=1,
+                ).run(unittest.TestSuite([BufferedFixture("test_failure")]))
+                self.assertEqual(len(failed.failures), 1)
+                self.assertIn("Stdout:\nfixture output", failed.failures[0][1])
+                self.assertEqual(len(failed.collectedDurations), 1)
+                setup_error = unittest_run._DurationRunner(
+                    stream=io.StringIO(),
+                    durations=1,
+                ).run(unittest.TestSuite([ClassSetupErrorFixture("test_unreachable")]))
+                self.assertEqual(setup_error.testsRun, 0)
+                self.assertEqual(len(setup_error.errors), 1)
+                self.assertIn("fixture class setup failure", setup_error.errors[0][1])
+                self.assertEqual(setup_error.collectedDurations, [])
 
 
 if __name__ == "__main__":

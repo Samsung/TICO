@@ -47,8 +47,19 @@ def main():
     parser.add_argument(
         "-p", "--perf", action="store_true", help="Run performance tests."
     )
+    parser.add_argument(
+        "--durations",
+        type=int,
+        metavar="N",
+        help="Report collection/suite time and the slowest N tests (0: all).",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose mode")
     args = parser.parse_args()
+
+    if args.durations is not None and args.durations < 0:
+        parser.error("--durations must be nonnegative")
+    if args.durations is not None and args.perf:
+        parser.error("--durations is only available for unittest runs")
 
     project_path = os.getenv("CCEX_PROJECT_PATH")
     if not project_path:
@@ -79,6 +90,19 @@ def main():
 
     os.environ["CCEX_RUNTIME"] = args.runtime
 
+    def run_unittest(arguments, *, env=None):
+        if args.durations is None:
+            command = ["python3", "-m", "unittest", *arguments]
+        else:
+            command = [
+                "python3",
+                os.path.join(project_path, "infra", "scripts", "unittest_run.py"),
+                "--durations",
+                str(args.durations),
+                *arguments,
+            ]
+        subprocess.run(command, check=True, env=env)
+
     ##############
     # Run commands
     ##############
@@ -91,19 +115,14 @@ def main():
     elif args.all or (not args.keyword and not args.model):
         print("RUN ALL unit tests ...")
 
-        cmd = ["python3", "-m", "unittest", "discover", "-s", test_dir, "-v"]
-
-        subprocess.run(cmd, check=True)
+        run_unittest(["discover", "-s", test_dir, "-v"])
     elif args.keyword:
         if args.keyword in ["net", "op"]:  # TODO Add "model"
             args.keyword = "test.modules." + args.keyword
 
         print(f"RUN unit tests with -k {args.keyword} ...")
 
-        cmd = [
-            "python3",
-            "-m",
-            "unittest",
+        arguments = [
             "discover",
             "-s",
             test_dir,
@@ -111,7 +130,7 @@ def main():
             args.keyword,
             "-v",
         ]
-        subprocess.run(cmd, check=True)
+        run_unittest(arguments)
     elif args.model:
         print(f"RUN unit tests for model {args.model} ...")
 
@@ -119,8 +138,7 @@ def main():
         env = os.environ.copy()
         env["CCEX_TEST_MODEL"] = args.model
 
-        cmd = f"python3 -m unittest test.pt2_to_circle_test.test_model -v".split(" ")
-        subprocess.run(cmd, check=True, env=env)
+        run_unittest(["test.pt2_to_circle_test.test_model", "-v"], env=env)
     else:
         assert False, "Cannot reach here"
 
