@@ -182,6 +182,77 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "mmlu",
         )
 
+    def test_evaluate_cli_releases_fp_model_before_loading_checkpoint(self):
+        """The FP model must leave the device before the checkpoint is loaded."""
+        events: list[str] = []
+
+        class TrackedModel(torch.nn.Linear):
+            """Floating-point model that records device moves."""
+
+            def to(self, *args, **kwargs):
+                events.append(f"fp.to({args[0]})")
+                return super().to(*args, **kwargs)
+
+        fp_model = TrackedModel(2, 2)
+        seen: dict[str, Any] = {}
+
+        class FakeAdapter:
+            """Fake adapter that retains the FP model outside the context."""
+
+            family = "llama"
+            evaluation_targets = frozenset({"ppl"})
+            evaluation_target_requirements: dict[str, str] = {}
+
+            def validate_evaluation_config(self, cfg):
+                """Validate targets through the shared adapter implementation."""
+                ModelAdapter.validate_evaluation_config(cast(ModelAdapter, self), cfg)
+
+            def load_model(self, ctx):
+                """Attach the tracked floating-point model."""
+                ctx.model = fp_model
+                return ctx
+
+            def evaluate(self, ctx):
+                """Record the evaluated model."""
+                seen["model"] = ctx.model
+
+        checkpoint = torch.nn.Identity()
+
+        def load(path, **kwargs):
+            """Record when the checkpoint is read."""
+            events.append("load")
+            return checkpoint
+
+        for argv, expected in (
+            (["evaluate.py", "--config", "r.yaml", "--checkpoint", "m.pt"], checkpoint),
+            (["evaluate.py", "--config", "r.yaml"], fp_model),
+        ):
+            with self.subTest(argv=argv):
+                events.clear()
+                with (
+                    patch.object(
+                        evaluate_cli,
+                        "load_recipe_config",
+                        lambda path, overrides: {
+                            "model": {"family": "llama", "name_or_path": "model"},
+                            "runtime": {},
+                            "evaluation": {"enabled": True},
+                        },
+                    ),
+                    patch.object(evaluate_cli, "set_seed", lambda seed: None),
+                    patch.object(
+                        evaluate_cli, "resolve_adapter", lambda cfg: FakeAdapter()
+                    ),
+                    patch.object(evaluate_cli.torch, "load", load),
+                    patch.object(sys, "argv", argv),
+                ):
+                    evaluate_cli.main()
+                self.assertIs(seen["model"], expected)
+                if expected is checkpoint:
+                    self.assertEqual(events, ["fp.to(cpu)", "load"])
+                else:
+                    self.assertEqual(events, [])
+
     def test_evaluate_cli_rejects_config_key_alias_as_target(self):
         """evaluate.py should reject non-canonical target names before model loading."""
         calls: list[str] = []

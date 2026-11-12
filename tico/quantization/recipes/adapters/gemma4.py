@@ -21,7 +21,7 @@ import tqdm
 from transformers import AutoProcessor
 
 from tico.quantization import convert, prepare
-from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.config import stage_name_matches
@@ -79,7 +79,7 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     build_gemma4_static_vision_profile,
     canonicalize_gemma4_static_vision_model_args,
 )
-from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_dense_no_moe
 
 _TEXT_LINEAR_MODULES = COMMON_LINEAR_MODULES + (
     "per_layer_input_gate",
@@ -101,7 +101,7 @@ _VISION_LAYER_PREFIXES = (
 
 
 class Gemma4Adapter(ModelAdapter):
-    """Model adapter for Gemma4 E2B PTQ and static runtime experiments."""
+    """Model adapter for Gemma4 E2B/E4B PTQ and static runtime experiments."""
 
     family = "gemma4"
     evaluation_targets = frozenset(
@@ -128,7 +128,7 @@ class Gemma4Adapter(ModelAdapter):
         return Gemma4GPTQConfig
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
-        """Load the Gemma4 E2B model and processor."""
+        """Load the Gemma4 E2B/E4B model and processor."""
         cfg = ctx.cfg
         model_cfg = cfg.get("model", {})
         runtime_cfg = cfg.get("runtime", {})
@@ -174,7 +174,7 @@ class Gemma4Adapter(ModelAdapter):
 
         ctx.model.eval()
         self._disable_cache(ctx.model)
-        assert_gemma4_e2b_no_moe(ctx.model)
+        assert_gemma4_dense_no_moe(ctx.model)
         # Load-time preprocessing: this must precede every algorithm stage,
         # including weight-only GPTQ and activation calibration.
         if fuse_ple_scale:
@@ -636,12 +636,12 @@ class Gemma4Adapter(ModelAdapter):
                     next_ids = outputs.logits[:, -1].argmax(-1, keepdim=True)
 
     def build_ptq_config(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):
-        """Build the Gemma4 E2B PTQConfig from recipe stage settings."""
+        """Build the Gemma4 E2B/E4B PTQConfig from recipe stage settings."""
         text_config = ctx.model.config.get_text_config()
         vision_config = ctx.model.config.vision_config
         model_args = dict(ctx.cfg.get("model_args", {}))
 
-        return build_gemma4_e2b_ptq_config(
+        return build_gemma4_ptq_config(
             num_text_layers=int(text_config.num_hidden_layers),
             num_vision_layers=int(vision_config.num_hidden_layers),
             model_args=model_args,
@@ -697,7 +697,7 @@ class Gemma4Adapter(ModelAdapter):
     def apply_ptq(
         self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
-        """Prepare, calibrate, and convert Gemma4 E2B with PTQ."""
+        """Prepare, calibrate, and convert Gemma4 E2B/E4B with PTQ."""
         qcfg = self.build_ptq_config(ctx, stage_cfg)
         prepared = prepare(
             ctx.require_model(), qcfg, inplace=bool(stage_cfg.get("inplace", True))
@@ -706,7 +706,7 @@ class Gemma4Adapter(ModelAdapter):
         return convert(prepared, inplace=True)
 
     def evaluate(self, ctx: RecipeContext) -> None:
-        """Evaluate Gemma4 E2B with the configured top-level targets."""
+        """Evaluate Gemma4 E2B/E4B with the configured top-level targets."""
         eval_cfg = ctx.cfg.get("evaluation", {})
         if not eval_cfg.get("enabled", False):
             return
@@ -891,7 +891,7 @@ class Gemma4Adapter(ModelAdapter):
             print(f"Saved cached NLL results to {path.resolve()}")
 
     def export(self, ctx: RecipeContext) -> None:
-        """Export configured Gemma4 E2B artifacts."""
+        """Export configured Gemma4 E2B/E4B artifacts."""
         export_cfg = ctx.cfg.get("export", {})
         if not export_cfg.get("enabled", False):
             return

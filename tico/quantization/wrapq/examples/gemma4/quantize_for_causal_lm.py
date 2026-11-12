@@ -38,7 +38,7 @@ import torch
 import tico
 import tico.quantization
 import tico.quantization.config.ptq
-from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.utils.version import has_transformers_for
@@ -122,7 +122,7 @@ def main():
     seq_len = 16
 
     # Build a Gemma4-specific PTQ config.
-    ptq_config = build_gemma4_e2b_ptq_config(
+    ptq_config = build_gemma4_ptq_config(
         num_text_layers=int(text_config.num_hidden_layers),
         num_vision_layers=0,
     )

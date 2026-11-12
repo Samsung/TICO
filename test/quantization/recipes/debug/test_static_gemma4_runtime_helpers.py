@@ -328,6 +328,113 @@ class TestAllocateEmptyCache(unittest.TestCase):
             )
             self.assertEqual(tuple(cache.past_v.shape), expected_shape)
 
+    def test_dense_variant_cache_topologies(self):
+        """E2B/E4B caches retain every layer's head width and KV head count."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        for num_layers, period, kv_heads in ((35, 5, 1), (42, 6, 2)):
+            with self.subTest(num_layers=num_layers):
+                layer_types = [
+                    "full_attention" if (i + 1) % period == 0 else "sliding_attention"
+                    for i in range(num_layers)
+                ]
+                runtime: Any = SimpleNamespace(
+                    text_config=SimpleNamespace(
+                        num_hidden_layers=num_layers,
+                        layer_types=layer_types,
+                        head_dim=256,
+                        global_head_dim=512,
+                        num_key_value_heads=kv_heads,
+                        num_global_key_value_heads=None,
+                        attention_k_eq_v=False,
+                    ),
+                    layout=SimpleNamespace(max_seq=4),
+                    device=torch.device("cpu"),
+                )
+                caches = StaticGemma4Runtime._allocate_empty_cache(
+                    runtime, batch_size=1, dtype=torch.float32
+                )
+                self.assertEqual(len(caches), num_layers)
+                for kind, cache in zip(layer_types, caches):
+                    width = 512 if kind == "full_attention" else 256
+                    self.assertEqual(cache.past_k.shape, (1, kv_heads, 3, width))
+                    self.assertEqual(cache.past_v.shape, cache.past_k.shape)
+                    self.assertEqual(torch.count_nonzero(cache.past_k).item(), 0)
+                    self.assertNotEqual(
+                        cache.past_k.data_ptr(), cache.past_v.data_ptr()
+                    )
+
+    def test_e4b_hf_cache_and_rope_geometry(self):
+        """Real HF per-layer config supplies separate full/sliding cache and RoPE."""
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        try:
+            from transformers import Gemma4TextConfig
+            from transformers.models.gemma4.modeling_gemma4 import (
+                Gemma4TextRotaryEmbedding,
+            )
+        except ImportError:
+            self.skipTest("transformers Gemma4 config and rotary modules are required")
+
+        config = Gemma4TextConfig.from_dict(
+            {
+                "hidden_size": 16,
+                "intermediate_size": 32,
+                "vocab_size": 8,
+                "num_hidden_layers": 42,
+                "layer_types": (["sliding_attention"] * 5 + ["full_attention"]) * 7,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "num_kv_shared_layers": 18,
+                "hidden_size_per_layer_input": 0,
+                "attention_k_eq_v": False,
+                "use_double_wide_mlp": False,
+            }
+        )
+        rotary = Gemma4TextRotaryEmbedding(config)
+        model = torch.nn.Module()
+        model.register_parameter("probe", torch.nn.Parameter(torch.zeros(1)))
+        language_model = torch.nn.Module()
+        language_model.add_module("rotary_emb", rotary)
+        backbone = torch.nn.Module()
+        backbone.add_module("language_model", language_model)
+        model.add_module("model", backbone)
+        runtime: Any = SimpleNamespace(
+            model=model,
+            text_config=config,
+            layout=SimpleNamespace(max_seq=4),
+            device=torch.device("cpu"),
+            rope_convention="hf",
+            past_len=2,
+        )
+        caches = StaticGemma4Runtime._allocate_empty_cache(
+            runtime, batch_size=1, dtype=torch.float32
+        )
+        self.assertEqual(len(caches), 42)
+        for idx, cache in enumerate(caches):
+            width = 512 if (idx + 1) % 6 == 0 else 256
+            self.assertEqual(cache.past_k.shape, (1, 2, 3, width))
+        _, prefill_rope = StaticGemma4Runtime.build_prefill_masks_and_rope(
+            runtime, torch.ones(1, 4, dtype=torch.long), torch.ones(1, 4)
+        )
+        _, decode_rope = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime, batch_size=1, dtype=torch.float32
+        )
+        for kind, width in (("sliding_attention", 256), ("full_attention", 512)):
+            for table in prefill_rope[kind]:
+                self.assertEqual(table.shape, (1, 4, width))
+            for prefill, decode in zip(prefill_rope[kind], decode_rope[kind]):
+                self.assertEqual(decode.shape, (1, 1, width))
+                torch.testing.assert_close(decode, prefill[:, 2:3], atol=0, rtol=0)
+
     def test_all_sliding_layers(self):
         """When all layers are sliding, all caches use head_dim."""
         from types import SimpleNamespace

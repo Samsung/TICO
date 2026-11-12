@@ -258,6 +258,121 @@ def _model_args():
 
 
 class TestGemma4PerLayerExport(unittest.TestCase):
+    def test_dense_variant_geometry_preserves_layer_and_ple_contracts(self):
+        """Both dense variants export every layer with its own KV geometry."""
+        for name, hidden, layers, shared, period, kv_heads in (
+            ("e2b", 1536, 35, 20, 5, 1),
+            ("e4b", 2560, 42, 18, 6, 2),
+        ):
+            with self.subTest(variant=name):
+                torch.manual_seed(2026)
+                export_model = FakeExportModel(ple_dim=256)
+                text = export_model.wrapped.model.wrapped.language_model.wrapped
+                text.config.hidden_size = hidden
+                text.config.num_hidden_layers = layers
+                text.config.num_kv_shared_layers = shared
+                text.config.num_attention_heads = 8
+                text.config.num_key_value_heads = kv_heads
+                text.config.intermediate_size = hidden * 4
+                text.config.use_double_wide_mlp = name == "e2b"
+                text.config.layer_types = [
+                    "full_attention" if (i + 1) % period == 0 else "sliding_attention"
+                    for i in range(layers)
+                ]
+                # No production-width weights are needed to inspect orchestration.
+                text.layers = torch.nn.ModuleList()
+                for index, layer_type in enumerate(text.config.layer_types):
+                    sliding = layer_type == "sliding_attention"
+                    layer = FakeDecoderLayer(
+                        layer_idx=index,
+                        is_sliding=sliding,
+                        is_shared=index >= layers - shared,
+                    )
+                    attention = layer.self_attn.wrapped
+                    attention.config.num_attention_heads = 8
+                    attention.num_key_value_groups = 8 // kv_heads
+                    attention.head_dim = 256 if sliding else 512
+                    text.layers.append(FakePTQWrapper(layer))
+
+                calls = {}
+
+                def capture_stage(module, inputs, save_path, **kwargs):
+                    del module
+                    calls[save_path.name] = (inputs, kwargs.get("kwargs", {}))
+
+                estimated_bytes = 262144 * layers * 256
+                with (
+                    tempfile.TemporaryDirectory() as tmpdir,
+                    patch.object(
+                        gemma_export,
+                        "_prepare_gemma4_export_model",
+                        return_value=(export_model, "q"),
+                    ),
+                    _patch_small_ple_table(estimated_bytes),
+                    patch.object(gemma_export, "_convert_and_save", capture_stage),
+                    patch.object(
+                        gemma_export, "save_gemma4_ple_embedding_artifact"
+                    ) as save_host,
+                ):
+                    gemma_export.export_gemma4_per_layer(
+                        q_model=export_model,
+                        max_seq_len=4,
+                        output_dir=tmpdir,
+                        model_args=_model_args(),
+                    )
+                    manifest = json.loads(
+                        (gemma_export.Path(tmpdir) / "ple_pipeline.json").read_text()
+                    )
+                save_host.assert_called_once()
+                self.assertEqual(manifest["schema_version"], 1)
+                self.assertEqual(manifest["embedding"]["format"], "pt")
+                self.assertEqual(
+                    manifest["embedding"]["estimated_circle_bytes"], estimated_bytes
+                )
+                self.assertEqual(
+                    manifest["embedding"]["outputs"][0]["shape"],
+                    [1, "S", layers, 256],
+                )
+                for projection, seq_len in zip(manifest["projections"], (4, 1)):
+                    self.assertEqual(
+                        projection["inputs"][0]["shape"], [1, seq_len, hidden]
+                    )
+                    self.assertEqual(
+                        projection["outputs"][0]["shape"], [1, seq_len, layers, 256]
+                    )
+                for phase, seq_len in (("prefill", 4), ("decode", 1)):
+                    layer_names = [
+                        key
+                        for key in calls
+                        if key.startswith(f"decoder_layer_{phase}_")
+                    ]
+                    self.assertEqual(len(layer_names), layers)
+                    for index, layer_type in enumerate(text.config.layer_types):
+                        inputs, kwargs = calls[
+                            f"decoder_layer_{phase}_{index}.q.circle"
+                        ]
+                        head_dim = 256 if layer_type == "sliding_attention" else 512
+                        self.assertEqual(tuple(inputs[0].shape), (1, seq_len, hidden))
+                        self.assertEqual(
+                            tuple(kwargs["position_embeddings"][0].shape),
+                            (1, seq_len, head_dim),
+                        )
+                        self.assertEqual(
+                            tuple(kwargs["per_layer_input"].shape), (1, seq_len, 256)
+                        )
+                        if index >= layers - shared:
+                            cache = kwargs["shared_key_value"]
+                            cache_len = 4
+                        elif phase == "decode":
+                            cache = kwargs["past_key_value"]
+                            cache_len = 3
+                        else:
+                            continue
+                        for tensor in cache:
+                            self.assertEqual(
+                                tuple(tensor.shape), (1, kv_heads, cache_len, head_dim)
+                            )
+
     def test_unavailable_fusion_rejects_before_any_stage_write(self):
         class FusionOwner(QuantModuleBase):
             def __init__(self, source):

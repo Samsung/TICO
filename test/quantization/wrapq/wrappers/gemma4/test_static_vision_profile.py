@@ -57,6 +57,28 @@ class TestGemma4StaticVisionProfile(unittest.TestCase):
             "245f8e683f7c4f08a07cd32b8cd24e0f496656b070eeb5095f5e2a7161894432",
         )
 
+    def test_generic_alias_preserves_geometry_and_position_ids(self) -> None:
+        """The shared profile changes only its manifest name."""
+        generic = get_gemma4_static_vision_profile("gemma4_66x36_264")
+        self.assertEqual(generic.name, "gemma4_66x36_264")
+        self.assertEqual(self.profile.name, "e2b_66x36_264")
+        self.assertTrue(
+            torch.equal(
+                generic.build_image_position_ids(),
+                self.profile.build_image_position_ids(),
+            )
+        )
+        self.assertEqual(
+            generic.position_ids_sha256(), self.profile.position_ids_sha256()
+        )
+        manifest = generic.to_manifest()
+        manifest["name"] = self.profile.name
+        self.assertEqual(manifest, self.profile.to_manifest())
+        expanded = canonicalize_gemma4_static_vision_model_args(
+            {"vision": {"profile": "gemma4_66x36_264"}}
+        )
+        self.assertEqual(expanded["vision"], generic.to_vision_model_args())
+
     def test_previous_e2b_profile_remains_available_by_name(self) -> None:
         """The previous 57-by-42 profile should remain explicitly selectable."""
         profile = get_gemma4_static_vision_profile("e2b_57x42_266")

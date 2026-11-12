@@ -14,7 +14,7 @@ See the [quantization overview](../README.md) for the Python API, the
 
 - [Choose a command](#which-command-should-i-use)
 - [LLaMA benchmark flow](#llama-benchmark-flow)
-- [Gemma4 E2B flow](#gemma4-e2b-flow)
+- [Gemma4 E2B/E4B flow](#gemma4-e2be4b-flow)
 - [Quantize](#quantize)
 - [Evaluate](#evaluate)
 - [Export](#export)
@@ -116,10 +116,34 @@ Use this three-step loop for the common LLaMA post-quantization benchmark flow.
      --checkpoint ./out/llama_quantized/quantized_model.pt
    ```
 
-### Gemma4 E2B flow
+<a id="gemma4-e2b-flow"></a>
 
-Gemma4 E2B uses the same config-driven three-step interface. The export preset
-writes static per-stage Circle files for the vision and text runtime.
+### Gemma4 E2B/E4B flow
+
+Dense Gemma4 E2B/E4B use the same `family: gemma4` adapter, wrappers, and
+config-driven three-step interface. The export presets write static per-stage
+Circle files for the vision and text runtime. The commands below retain the
+E2B presets; select these corresponding files for E4B:
+
+| Workflow | E2B preset | E4B preset |
+|---|---|---|
+| Quantize | `gemma4_quantize.yaml` | `gemma4_e4b_quantize.yaml` |
+| Eager evaluation | `gemma4_eval_suite.yaml` | `gemma4_e4b_eval_suite.yaml` |
+| Export | `gemma4_export.yaml` | `gemma4_e4b_export.yaml` |
+| Static debug runtime | `static_gemma4_runtime.yaml` | `static_gemma4_e4b_runtime.yaml` |
+
+E4B presets load `google/gemma-4-E4B-it` and write checkpoints/Circle files
+under `./out/gemma4_e4b_quantized` and evaluation outputs under
+`./out/gemma4_e4b_eval_suite`. Use that E4B checkpoint path when evaluating
+or exporting. Both variants share static vision geometry; E4B uses the
+`gemma4_66x36_264` profile alias. The [artifact reference](../recipes/export/gemma4_artifacts.md)
+describes per-layer cache geometry and the large host PLE table.
+
+E4B float32 weights occupy about 32 GB, so its quantize preset enables the GPTQ
+`move_cache_to_cpu` option to keep calibration caches in host memory. Evaluating
+a saved E4B checkpoint peaks near 47 GB on the device; on a 48 GB GPU set
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid fragmentation
+failures.
 
 1. Quantize Gemma4 E2B and save the checkpoint.
 
@@ -161,7 +185,7 @@ writes static per-stage Circle files for the vision and text runtime.
 ### Quantize
 
 `quantize.py` executes enabled `pipeline` stages in config order. The
-[LLaMA](#llama-benchmark-flow) and [Gemma4](#gemma4-e2b-flow) quickstarts show
+[LLaMA](#llama-benchmark-flow) and [Gemma4](#gemma4-e2be4b-flow) quickstarts show
 complete quantize/evaluate/export flows. To select a different checkpoint of an
 existing model family, use `--model`:
 

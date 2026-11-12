@@ -22,7 +22,7 @@ from transformers.generation.utils import GenerationMixin
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import join_name
-from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_dense_no_moe
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -47,7 +47,7 @@ class QuantGemma4ForCausalLM(QuantModuleBase, GenerationMixin):
         fp_name: Optional[str] = None,
     ):
         fp_model = cast("Gemma4ForCausalLM", fp_model)
-        assert_gemma4_e2b_no_moe(fp_model)
+        assert_gemma4_dense_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
         self.config = fp_model.config

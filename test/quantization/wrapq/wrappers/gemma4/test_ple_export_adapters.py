@@ -136,6 +136,49 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
     def _ids(self, seq_len: int) -> torch.Tensor:
         return torch.randint(0, self.cfg.vocab_size_per_layer_input, (1, seq_len))
 
+    def test_dense_variant_packed_ple_contracts(self):
+        """Small vocabularies preserve the 35/42-layer, 256-wide PLE axes."""
+        from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+            build_gemma4_ple_embedding_artifact,
+            Gemma4PLEEmbeddingHostTable,
+        )
+
+        for layers in (35, 42):
+            with self.subTest(num_hidden_layers=layers):
+                cfg = _make_ple_text_config(
+                    vocab_size=8,
+                    vocab_size_per_layer_input=8,
+                    num_hidden_layers=layers,
+                    layer_types=["full_attention"] * layers,
+                    hidden_size_per_layer_input=256,
+                    use_double_wide_mlp=layers == 35,
+                )
+                fp_model, qtext = _make_quant_text_model(cfg, quantized=False)
+                embedding, projection = self._adapters(qtext)
+                host = Gemma4PLEEmbeddingHostTable(
+                    build_gemma4_ple_embedding_artifact(embedding)
+                )
+                self.assertEqual(
+                    tuple(qtext.embed_tokens_per_layer.wrapped.module.weight.shape),
+                    (8, layers * 256),
+                )
+                for seq_len in (1, 3):
+                    ids = torch.arange(2 * seq_len).reshape(2, seq_len) % 8
+                    inputs_embeds = fp_model.embed_tokens(ids)
+                    with torch.no_grad():
+                        expected_token = fp_model.get_per_layer_inputs(ids, None)
+                        token = qtext.get_per_layer_inputs(ids, None)
+                        expected = fp_model.project_per_layer_inputs(
+                            inputs_embeds, expected_token
+                        )
+                        actual = qtext.project_per_layer_inputs(inputs_embeds, token)
+                        exported = projection(inputs_embeds, embedding(ids))
+                    self.assertEqual(tuple(token.shape), (2, seq_len, layers, 256))
+                    self.assertTrue(torch.equal(token, expected_token))
+                    self.assertTrue(torch.equal(host(ids), token))
+                    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+                    self.assertTrue(torch.equal(exported, actual))
+
     # ------------------------------------------------------------------ ownership
 
     def test_projection_adapter_owns_only_projection_state(self):

@@ -443,7 +443,7 @@ class TestGemma4AdapterModelLoading(_ModelLoadingContractMixin, unittest.TestCas
             return ["fused"]
 
         return [
-            patch.object(gemma4_mod, "assert_gemma4_e2b_no_moe", fake_assert_no_moe),
+            patch.object(gemma4_mod, "assert_gemma4_dense_no_moe", fake_assert_no_moe),
             patch.object(gemma4_mod, "fuse_gemma4_ple_embedding_scale", fake_fuse),
         ]
 
@@ -462,7 +462,9 @@ class TestGemma4AdapterModelLoading(_ModelLoadingContractMixin, unittest.TestCas
 
         with (
             self._loading_boundaries(events, primary=primary, legacy=legacy),
-            patch.object(gemma4_mod, "assert_gemma4_e2b_no_moe", failing_assert_no_moe),
+            patch.object(
+                gemma4_mod, "assert_gemma4_dense_no_moe", failing_assert_no_moe
+            ),
             self._assert_raises_same(error),
         ):
             Gemma4Adapter().load_model(ctx)

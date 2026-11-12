@@ -25,6 +25,7 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
     QuantGemma4TextAttention,
 )
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
@@ -115,6 +116,45 @@ class TestGemma4TextAttentionExportAdapters(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Unsupported Gemma4 export mode"):
             attention.as_export_module("invalid")
+
+    def test_e4b_sliding_and_full_export_cache_contracts(self):
+        """Real attention adapters export E4B's two KV heads at each layer width."""
+        config = _make_text_config(
+            num_hidden_layers=2,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=256,
+            global_head_dim=512,
+            layer_types=["sliding_attention", "full_attention"],
+            use_double_wide_mlp=False,
+            allow_global_per_layer_attribute_access=False,
+        )
+        for layer_index, head_dim in ((0, 256), (1, 512)):
+            attention = self._make_attention(config, layer_index)
+            for mode, seq_len, past_len in (("prefill", 3, 0), ("decode", 1, 3)):
+                with self.subTest(layer=layer_index, mode=mode):
+                    adapter = attention.as_export_module(mode)
+                    cos, sin = _rope(1, seq_len, head_dim)
+                    sin = prepare_gemma4_rope_sin(sin, attention.attn_options.rope)
+                    args = (
+                        torch.randn(1, seq_len, 16),
+                        torch.zeros(1, 1, seq_len, seq_len + past_len),
+                        (cos, sin),
+                    )
+                    kwargs = {}
+                    if past_len:
+                        key = torch.randn(1, 2, past_len, head_dim)
+                        kwargs["past_key_value"] = (key, torch.randn_like(key))
+                    with torch.no_grad():
+                        expected = adapter(*args, **kwargs)
+                        program = torch.export.export(adapter, args, kwargs)
+                        actual = program.module()(*args, **kwargs)
+                    self.assertEqual(actual[0].shape, (1, seq_len, 16))
+                    self.assertEqual(actual[1].shape, (1, 2, seq_len, head_dim))
+                    self.assertEqual(actual[2].shape, actual[1].shape)
+                    for left, right in zip(actual, expected):
+                        torch.testing.assert_close(left, right, atol=1e-5, rtol=1e-5)
 
     def test_prefill_adapter_returns_full_prompt_kv_delta(self):
         """Return one K/V delta entry for every prefill token."""

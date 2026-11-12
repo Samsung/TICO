@@ -26,7 +26,7 @@ PLEObserverFn = Callable[[torch.Tensor, Any], torch.Tensor]
 
 @dataclass(frozen=True)
 class StaticGemma4Layout:
-    """Static layout information required by the Gemma4 E2B runtime.
+    """Static layout information required by the dense Gemma4 runtime.
 
     Attributes:
         max_seq: Static text sequence length used by prefill graphs.
@@ -44,7 +44,7 @@ class StaticGemma4Layout:
         """Validate that the static multimodal layout is internally consistent."""
         if self.batch_size != 1:
             raise ValueError(
-                "Gemma4 E2B static runtime currently supports batch_size=1 only."
+                "Dense Gemma4 static runtime currently supports batch_size=1 only."
             )
         if self.max_seq <= 0:
             raise ValueError(f"max_seq must be positive, got {self.max_seq}.")
@@ -65,10 +65,10 @@ class StaticGemma4Layout:
             )
 
 
-def assert_gemma4_e2b_no_moe(model_or_config: Any) -> None:
+def assert_gemma4_dense_no_moe(model_or_config: Any) -> None:
     """Raise if the supplied Gemma4 model or config enables MoE blocks.
 
-    The initial Gemma4 E2B runtime supports only dense decoder layers. This
+    The dense Gemma4 E2B/E4B runtime supports only dense decoder layers. This
     guard should be called both in recipe loading and wrapper construction.
     """
 
@@ -80,7 +80,7 @@ def assert_gemma4_e2b_no_moe(model_or_config: Any) -> None:
 
     if bool(getattr(text_config, "enable_moe_block", False)):
         raise ValueError(
-            "Gemma4 E2B static runtime supports dense decoder layers only, "
+            "Dense Gemma4 static runtime supports dense decoder layers only, "
             "but text_config.enable_moe_block=True."
         )
 
@@ -89,8 +89,12 @@ def assert_gemma4_e2b_no_moe(model_or_config: Any) -> None:
             cls_name = type(module).__name__
             if cls_name in {"Gemma4TextRouter", "Gemma4TextExperts"}:
                 raise ValueError(
-                    f"Unexpected MoE module in Gemma4 E2B model: {name} ({cls_name})."
+                    f"Unexpected MoE module in dense Gemma4 model: {name} ({cls_name})."
                 )
+
+
+# Retained for external users and the existing Gemma4 assistant path.
+assert_gemma4_e2b_no_moe = assert_gemma4_dense_no_moe
 
 
 def _ensure_batched_visual_embeds(visual_embeds: torch.Tensor) -> torch.Tensor:

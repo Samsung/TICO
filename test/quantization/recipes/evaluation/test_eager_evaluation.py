@@ -309,7 +309,7 @@ class TestNativeModelLoading(unittest.TestCase):
                         return_value=model,
                     ),
                     patch(
-                        "tico.quantization.recipes.adapters.gemma4.assert_gemma4_e2b_no_moe"
+                        "tico.quantization.recipes.adapters.gemma4.assert_gemma4_dense_no_moe"
                     ),
                     patch(
                         "tico.quantization.recipes.adapters.gemma4.fuse_gemma4_ple_embedding_scale",

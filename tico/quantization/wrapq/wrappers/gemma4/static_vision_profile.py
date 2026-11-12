@@ -20,7 +20,7 @@ import hashlib
 import json
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -473,6 +473,13 @@ _PROFILE_REGISTRY: dict[str, Gemma4StaticVisionProfile] = {
         pooling_kernel_size=3,
     ),
 }
+
+
+# Preserve the historical default and its manifest name. New dense Gemma4
+# presets can select the model-independent name with identical geometry.
+_PROFILE_REGISTRY["gemma4_66x36_264"] = replace(
+    _PROFILE_REGISTRY[DEFAULT_GEMMA4_STATIC_VISION_PROFILE], name="gemma4_66x36_264"
+)
 
 
 def get_gemma4_static_vision_profile(name: str) -> Gemma4StaticVisionProfile:

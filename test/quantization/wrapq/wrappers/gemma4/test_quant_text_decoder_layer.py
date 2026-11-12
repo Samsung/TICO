@@ -362,8 +362,8 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
 
         self.assertTrue(torch.allclose(quant_out, fp_out, atol=1e-5, rtol=1e-5))
 
-    def test_moe_decoder_layers_are_rejected_for_e2b_scope(self):
-        """Check that the E2B decoder wrapper rejects MoE layers explicitly."""
+    def test_moe_decoder_layers_are_rejected_for_dense_scope(self):
+        """Check that the dense Gemma4 decoder wrapper rejects MoE layers explicitly."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
             QuantGemma4TextDecoderLayer,
         )

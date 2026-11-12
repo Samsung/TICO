@@ -254,6 +254,17 @@ def _vision_only_overrides(**extra) -> dict:
     return base
 
 
+def _has_gemma4_text_model() -> bool:
+    """Return whether Transformers provides the synthetic Gemma4 text model."""
+    try:
+        from transformers.models.gemma4.modeling_gemma4 import (  # noqa: F401
+            Gemma4TextModel,
+        )
+    except ImportError:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Config validation tests
 # ---------------------------------------------------------------------------
@@ -779,6 +790,40 @@ class TestBuildGPTQObjects(unittest.TestCase):
             self.assertIsInstance(obj, GPTQ)
             self.assertEqual(obj.quantizer.maxq.item(), 2**4 - 1)
 
+    def test_dense_variant_layer_stacks_keep_all_gptq_targets(self):
+        """E2B and E4B resolve and configure every text-layer projection."""
+        from tico.quantization.algorithm.gemma4_gptq.utils import (
+            build_module_name_map,
+            get_quantizable_layers,
+        )
+
+        torch.manual_seed(0)
+        for num_layers in (35, 42):
+            with self.subTest(num_layers=num_layers):
+                model = MockGemma4Model(
+                    dim=4, num_vision_layers=0, num_text_layers=num_layers
+                )
+                quantizer = _make_quantizer(weight_bits=4, **_text_only_overrides())
+                components = resolve_gemma4_components(
+                    model, cast(Gemma4GPTQConfig, quantizer.config)
+                )
+                self.assertEqual(len(components.text_layers), num_layers)
+                module_name = build_module_name_map(model)
+                targets = set()
+                for idx, layer in enumerate(components.text_layers):
+                    subset = get_quantizable_layers(layer)
+                    objects = quantizer._build_gptq_objects(
+                        subset=subset, module_name=module_name
+                    )
+                    self.assertEqual(set(objects), set(subset))
+                    for name, obj in objects.items():
+                        self.assertEqual(obj.quantizer.maxq.item(), 15)
+                        targets.add(module_name[subset[name]])
+                    self.assertIn(
+                        f"model.language_model.layers.{idx}.mlp.down_proj", targets
+                    )
+                self.assertEqual(len(targets), 6 * num_layers)
+
     def test_weight_bits_override_applied(self):
         model = MockGemma4Model(dim=64)
         quantizer = _make_quantizer(
@@ -1040,6 +1085,236 @@ class TestDeviceHelpers(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # convert() integration tests
 # ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_has_gemma4_text_model(), "Transformers Gemma4 is required")
+class TestDenseGemma4TextReplay(unittest.TestCase):
+    """Exercise GPTQ capture and replay across both complete dense topologies."""
+
+    @torch.no_grad()
+    def test_all_layers_receive_type_specific_rope_ple_and_shared_kv(self):
+        """GPTQ must replay all 35/42 layers with their own PLE and KV sources."""
+        from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+
+        class TextReplayModel(MockGemma4Model):
+            """Route cached raw inputs into the real tiny HF text stack."""
+
+            def forward(self, *args, **kwargs):
+                return self.model.language_model(*args, **kwargs)
+
+        for num_layers, pattern_length, num_shared, kv_heads, double_wide in (
+            (35, 5, 20, 1, True),
+            (42, 6, 18, 2, False),
+        ):
+            with self.subTest(num_layers=num_layers):
+                torch.manual_seed(19)
+                layer_types = (
+                    ["sliding_attention"] * (pattern_length - 1) + ["full_attention"]
+                ) * 7
+                config = Gemma4TextConfig.from_dict(
+                    dict(
+                        vocab_size=16,
+                        vocab_size_per_layer_input=16,
+                        hidden_size=16,
+                        intermediate_size=32,
+                        num_hidden_layers=num_layers,
+                        num_attention_heads=8,
+                        num_key_value_heads=kv_heads,
+                        num_global_key_value_heads=kv_heads,
+                        head_dim=4,
+                        global_head_dim=8,
+                        layer_types=layer_types,
+                        num_kv_shared_layers=num_shared,
+                        use_double_wide_mlp=double_wide,
+                        hidden_size_per_layer_input=4,
+                        sliding_window=8,
+                        max_position_embeddings=16,
+                        attention_k_eq_v=False,
+                        enable_moe_block=False,
+                        attention_dropout=0.0,
+                        use_cache=False,
+                        rope_parameters={
+                            "sliding_attention": {
+                                "rope_type": "default",
+                                "rope_theta": 10_000.0,
+                            },
+                            "full_attention": {
+                                "rope_type": "proportional",
+                                "partial_rotary_factor": 0.25,
+                                "rope_theta": 1_000_000.0,
+                            },
+                        },
+                    )
+                )
+                config._attn_implementation = "eager"
+                language_model = Gemma4TextModel(config).eval()
+                model = TextReplayModel(dim=16, num_text_layers=0).eval()
+                setattr(model.model, "language_model", language_model)
+                model.config.text_config = config
+                input_ids = torch.tensor([[1, 2]])
+                inputs_embeds = language_model.embed_tokens(input_ids)
+                ple = language_model.project_per_layer_inputs(
+                    inputs_embeds,
+                    language_model.get_per_layer_inputs(input_ids, inputs_embeds),
+                )
+                position_ids = torch.tensor([[0, 1]])
+                rope = {
+                    layer_type: language_model.rotary_emb(
+                        inputs_embeds, position_ids, layer_type
+                    )
+                    for layer_type in set(layer_types)
+                }
+                masks = {
+                    "sliding_attention": torch.zeros(1, 1, 2, 2),
+                    "full_attention": torch.full((1, 1, 2, 2), -0.125),
+                }
+                quantizer = _make_quantizer(**_text_only_overrides())
+                prepared = quantizer.prepare(model)
+                prepared(input_ids=input_ids, attention_mask=masks)
+                stages: list[nn.Module] = []
+                shared_dicts = []
+
+                def check_stage(**kwargs):
+                    """Inspect real capture contracts without allocating Hessians."""
+                    layer_idx = len(stages)
+                    stages.append(kwargs["stage_module"])
+                    self.assertIs(stages[-1], language_model.layers[layer_idx])
+                    self.assertEqual(kwargs["num_batches"], 1)
+                    cached = kwargs["cached_kwargs"]
+                    layer_type = layer_types[layer_idx]
+                    torch.testing.assert_close(
+                        cached["per_layer_input"][0],
+                        ple[:, :, layer_idx, :],
+                        atol=0.0,
+                        rtol=0.0,
+                    )
+                    torch.testing.assert_close(
+                        cached["attention_mask"][0],
+                        masks[layer_type],
+                        atol=0.0,
+                        rtol=0.0,
+                    )
+                    for actual, expected in zip(
+                        cached["position_embeddings"][0], rope[layer_type]
+                    ):
+                        torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+                    shared = cached["shared_kv_states"][0]
+                    shared_dicts.append(shared)
+                    if layer_idx >= num_layers - num_shared:
+                        key, value = shared[layer_type]
+                        head_dim = 4 if layer_type == "sliding_attention" else 8
+                        self.assertEqual(key.shape, (1, kv_heads, 2, head_dim))
+                        self.assertEqual(value.shape, key.shape)
+
+                with patch.object(
+                    quantizer,
+                    "_quantize_stage_from_stage_cache",
+                    side_effect=check_stage,
+                ):
+                    result = quantizer.convert(model)
+                self.assertEqual(len(stages), num_layers)
+                self.assertTrue(
+                    all(shared is shared_dicts[0] for shared in shared_dicts)
+                )
+                self.assertEqual(ple.shape, (1, 2, num_layers, 4))
+                self.assertIs(result.forward, quantizer._orig_model_forward)
+                self.assertEqual(quantizer.num_batches, 0)
+
+    @torch.no_grad()
+    def test_entry_capture_follows_cache_placement(self):
+        """The persistent PLE, hidden-state, and mask capture must honor offload."""
+        import tico.quantization.algorithm.gemma4_gptq.quantizer as quantizer_module
+        from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+
+        class TextReplayModel(MockGemma4Model):
+            """Route cached raw inputs into the real tiny HF text stack."""
+
+            def forward(self, *args, **kwargs):
+                return self.model.language_model(*args, **kwargs)
+
+        layer_types = ["sliding_attention"] * 5 + ["full_attention"]
+        real_offload = quantizer_module.maybe_move_cache_to_cpu
+        for enabled in (True, False):
+            with self.subTest(move_cache_to_cpu=enabled):
+                torch.manual_seed(23)
+                config = Gemma4TextConfig.from_dict(
+                    dict(
+                        vocab_size=16,
+                        vocab_size_per_layer_input=16,
+                        hidden_size=16,
+                        intermediate_size=32,
+                        num_hidden_layers=6,
+                        num_attention_heads=8,
+                        num_key_value_heads=2,
+                        num_global_key_value_heads=2,
+                        head_dim=4,
+                        global_head_dim=8,
+                        layer_types=layer_types,
+                        num_kv_shared_layers=0,
+                        use_double_wide_mlp=False,
+                        hidden_size_per_layer_input=4,
+                        sliding_window=8,
+                        max_position_embeddings=16,
+                        attention_k_eq_v=False,
+                        enable_moe_block=False,
+                        attention_dropout=0.0,
+                        use_cache=False,
+                    )
+                )
+                config._attn_implementation = "eager"
+                language_model = Gemma4TextModel(config).eval()
+                model = TextReplayModel(dim=16, num_text_layers=0).eval()
+                setattr(model.model, "language_model", language_model)
+                model.config.text_config = config
+                input_ids = torch.tensor([[1, 2]])
+                masks = {
+                    "sliding_attention": torch.zeros(1, 1, 2, 2),
+                    "full_attention": torch.full((1, 1, 2, 2), -0.125),
+                }
+                quantizer = _make_quantizer(
+                    **_text_only_overrides(
+                        move_cache_to_cpu=enabled, cache_dtype=torch.float32
+                    )
+                )
+                prepared = quantizer.prepare(model)
+                prepared(input_ids=input_ids, attention_mask=masks)
+                requests: list[tuple[Any, bool, Any]] = []
+
+                def record(value, *, enabled, dtype=None):
+                    """Record each placement request and keep the real behavior."""
+                    requests.append((value, enabled, dtype))
+                    return real_offload(value, enabled=enabled, dtype=dtype)
+
+                entry_requests: list[tuple[Any, bool, Any]] = []
+
+                def snapshot(**kwargs):
+                    """Keep only the requests issued before the first layer."""
+                    if not entry_requests:
+                        entry_requests.extend(requests)
+
+                with (
+                    patch.object(quantizer_module, "maybe_move_cache_to_cpu", record),
+                    patch.object(
+                        quantizer,
+                        "_quantize_stage_from_stage_cache",
+                        side_effect=snapshot,
+                    ),
+                ):
+                    quantizer.convert(model)
+
+                entry = entry_requests[-3:]
+                self.assertEqual(len(entry), 3)
+                hidden_states, per_layer_inputs, mask_mapping = (
+                    value for value, _, _ in entry
+                )
+                self.assertEqual(hidden_states.shape, (1, 2, 16))
+                self.assertEqual(per_layer_inputs.shape, (1, 2, 6, 4))
+                self.assertEqual(set(mask_mapping), set(masks))
+                for _, requested, dtype in entry:
+                    self.assertIs(requested, enabled)
+                    self.assertIs(dtype, torch.float32)
 
 
 class TestConvertIntegration(unittest.TestCase):

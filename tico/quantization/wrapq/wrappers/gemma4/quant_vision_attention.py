@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4VisionAttention")
 class QuantGemma4VisionAttention(QuantModuleBase):
-    """PTQ wrapper for Gemma4 E2B vision attention.
+    """PTQ wrapper for Gemma4 E2B/E4B vision attention.
 
     The wrapper mirrors Hugging Face ``Gemma4VisionAttention`` while keeping
     projection, RMSNorm, multidimensional RoPE, mask addition, softmax, and the

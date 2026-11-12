@@ -144,6 +144,94 @@ class TestGemma4TextModelCacheSources(unittest.TestCase):
         self.assertEqual(source.obs_new_k.min_val.dtype, torch.float64)
         self.assertEqual(consumer.obs_present_key.min_val.dtype, torch.float64)
 
+    def test_complete_dense_variant_topologies(self):
+        """Every E2B/E4B consumer references the final producer of its own type."""
+        for variant, sliding_count, layers, shared, kv_heads, producers in (
+            ("e2b", 4, 35, 20, 1, (13, 14)),
+            ("e4b", 5, 42, 18, 2, (22, 23)),
+        ):
+            with self.subTest(variant=variant):
+                layer_types = (
+                    ["sliding_attention"] * sliding_count + ["full_attention"]
+                ) * 7
+                # Keep the complete production topology with tiny weights and
+                # heterogeneous heads so ordinary CPU discovery stays cheap.
+                config = _make_text_config(
+                    layer_types=layer_types,
+                    hidden_size=16,
+                    intermediate_size=32,
+                    num_attention_heads=8,
+                    num_key_value_heads=kv_heads,
+                    num_global_key_value_heads=kv_heads,
+                    head_dim=4,
+                    global_head_dim=8,
+                    num_kv_shared_layers=shared,
+                    use_double_wide_mlp=variant == "e2b",
+                )
+                qcfg = PTQConfig(
+                    activation=affine(DType.int(16)),
+                    weight=affine(DType.int(16)),
+                    model_args={"text": {"max_seq": 16}},
+                )
+                model = QuantGemma4TextModel(_make_text_model(config), qcfg=qcfg).eval()
+                first_shared = layers - shared
+                self.assertEqual(first_shared, 15 if variant == "e2b" else 24)
+                actual_producers = [
+                    i
+                    for i in range(layers)
+                    if self._attention(model, i).store_full_length_kv
+                ]
+                self.assertEqual(actual_producers, list(producers))
+                for index in range(first_shared, layers):
+                    attention = self._attention(model, index)
+                    source_index = producers[layer_types[index] == "full_attention"]
+                    source = self._attention(model, source_index)
+                    self.assertIs(attention._cache_source, source)
+                    self.assertIs(
+                        attention.cache_storage_observers()[0], source.obs_new_k
+                    )
+                    self.assertIs(
+                        attention.cache_storage_observers()[1], source.obs_new_v
+                    )
+                    self.assertNotIn(source, list(attention.modules()))
+                    self.assertNotIn("_cache_source", attention._modules)
+                self.assertFalse(
+                    any("cache_source" in key for key in model.state_dict())
+                )
+
+                model.enable_calibration()
+                with torch.no_grad():
+                    output = model(
+                        input_ids=torch.tensor([[1, 3, 5]]),
+                        use_cache=False,
+                        return_shared_kv_states=True,
+                    )
+                for layer_type, head_dim in (
+                    ("sliding_attention", 4),
+                    ("full_attention", 8),
+                ):
+                    key, value = output.shared_kv_states[layer_type]
+                    self.assertEqual(key.shape, (1, kv_heads, 3, head_dim))
+                    self.assertEqual(value.shape, key.shape)
+                model.freeze_qparams()
+                for index in range(first_shared, layers):
+                    consumer = self._attention(model, index)
+                    source = consumer._cache_source
+                    storage = consumer.cache_storage_observers()
+                    self.assertIs(storage[0], source.obs_new_k)
+                    self.assertTrue(storage[0].has_qparams)
+                    scale = source.obs_new_k._cached_scale.clone()
+                    zero_point = source.obs_new_k._cached_zp.clone()
+                    # The source is a reference: resetting consumer statistics
+                    # never traverses or resets the producer's frozen grid.
+                    consumer.enable_calibration()
+                    torch.testing.assert_close(
+                        source.obs_new_k._cached_scale, scale, atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        source.obs_new_k._cached_zp, zero_point, atol=0, rtol=0
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

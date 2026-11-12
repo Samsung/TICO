@@ -1,8 +1,40 @@
 # Gemma4 export artifact contracts
 
-This guide owns the Gemma4 PLE, vision, cache, and external-embedding export
-contracts. The current E2B quantize and export presets provide the concrete
-file layout and shapes used below:
+This guide owns the common dense Gemma4 E2B/E4B PLE, vision, cache, and
+external-embedding export contracts. Both variants use `family: gemma4`, the
+same wrappers, and the same artifact names inside separate output directories.
+Text widths, layer counts, PLE shapes, and attention geometry come from the
+loaded config and attention modules.
+
+| Text geometry | E2B | E4B |
+|---|---|---|
+| Model | `google/gemma-4-E2B-it` | `google/gemma-4-E4B-it` |
+| Hidden / intermediate size | 1536 / 6144 | 2560 / 10240 |
+| Decoder layers | 35 | 42 |
+| Layer pattern | 4 sliding + 1 full, repeated 7 times | 5 sliding + 1 full, repeated 7 times |
+| Query / KV heads | 8 / 1 | 8 / 2 |
+| Sliding / full head dimension | 256 / 512 | 256 / 512 |
+| Shared-KV layers / first shared layer | 20 / 15 | 18 / 24 |
+| Sliding / full KV producer | 13 / 14 | 22 / 23 |
+| Double-wide shared MLP | enabled | disabled |
+| PLE shape per token | `[35, 256]` | `[42, 256]` |
+| Packed PLE width | 8960 | 10752 |
+| Vocabulary / PLE vocabulary | 262144 / 262144 | 262144 / 262144 |
+| Sliding window | 512 | 512 |
+
+The shared static vision profile `gemma4_66x36_264` has identical geometry,
+position IDs, and position-ID hash to the retained `e2b_66x36_264` name. The
+legacy default and manifest name remain unchanged. Vision outputs project to
+the text hidden width: `[264, 1536]` for E2B and `[264, 2560]` for E4B.
+
+The concrete file tables and runtime flow below use **E2B example values**:
+1536, 35, and `[35, 256]` are not universal contracts. E4B emits decoder
+indices `0..41`, hidden states `[B, S, 2560]`, PLE `[B, S, 42, 256]`, and
+cache tensors `[B, 2, cache_length, head_dim]`; `head_dim` is 256 for sliding
+and 512 for full attention. Each shared consumer takes storage KV from the
+producer of its own layer type.
+
+The existing E2B quantize and export presets provide the examples below:
 
 ```bash
 python -m tico.quantization.examples.quantize \
@@ -23,7 +55,14 @@ policy, and serialization; inspect the generated artifacts for actual sizes.
 The artifact tag `q` marks quantized graphs; a floating-point export uses
 `f32` instead.
 
-## Top level: `out/gemma4_quantized/`
+The E4B presets are `gemma4_e4b_quantize.yaml` and `gemma4_e4b_export.yaml`.
+They select `google/gemma-4-E4B-it`, the common vision profile, and
+`./out/gemma4_e4b_quantized` (with Circle files in its `circle_layers/`
+subdirectory), keeping E2B artifacts separate. Eager quality evaluation uses
+`gemma4_e4b_eval_suite.yaml`; static debug execution uses
+`static_gemma4_e4b_runtime.yaml` through `inspector --mode static-gemma4-runtime`.
+
+## Top level: `out/gemma4_quantized/` (E2B example)
 
 | File | Description |
 |---|---|
@@ -31,7 +70,7 @@ The artifact tag `q` marks quantized graphs; a floating-point export uses
 | `effective_config.yaml` | Resolved configuration of the quantize run (`gemma4_quantize.yaml` plus CLI overrides). |
 | `circle_layers/` | Export output directory, described below. |
 
-## `circle_layers/`: text pipeline
+## `circle_layers/`: text pipeline (E2B example)
 
 | File | Description |
 |---|---|
@@ -69,8 +108,11 @@ ple_pipeline.json                     # chosen format, shapes, and observer boun
   retains the recipe's 2 GiB estimated-size threshold and writes
   `ple_embedding.<tag>.pt` at or above that threshold; `circle` and `pt`
   force one format. The E2B table (262144 x 35 x 256 elements) is 9.4 GB in
-  float32 and 2.35 GB at 8-bit weights, so `auto` selects `.pt` for both
-  `f32` and `q` tags. This format policy is separate from the serializer's
+  float32 and 2.35 GB at 8-bit weights. The E4B table has
+  262144 x 42 x 256 elements: its UINT8 payload is 2.625 GiB before qparams,
+  frozen observers, and ancillary metadata. `auto` selects the host `.pt`
+  artifact for both variants and for both `f32` and `q` tags. This format
+  policy is separate from the serializer's
   appended-payload support: explicitly selecting `circle` can write larger
   tables through the shared serializer. See
   [recipe format policies](../../../../docs/large_circle_export.md#recipe-format-policies).
@@ -78,7 +120,11 @@ ple_pipeline.json                     # chosen format, shapes, and observer boun
   the integer table with its per-row weight qparams), `embed_scale`, the packed
   geometry, and the frozen `embedding`, `embed_scale`, `act_out`, and
   `per_layer_token_inputs` observers. `Gemma4PLEEmbeddingHostTable.from_artifact`
-  replays the stage on the host bit-exactly against the export adapter.
+  replays the stage on the host bit-exactly against the export adapter. The
+  current host loader materializes the complete artifact in memory; this is
+  not streaming or out-of-core execution. E4B reuses this external host-table
+  contract rather than placing its entire PLE table in a single inline
+  Circle FlatBuffer.
 - `ple_projection_*` take `inputs_embeds` `[1, S, hidden_size]` (the
   `mm_fusion` output for prefill, the token embedding for decode) and
   `per_layer_token_inputs`, and return packed `per_layer_inputs`
@@ -296,7 +342,7 @@ checkpointing with equivalent export-profile topology.
 Exporting another profile, including a failed export, also leaves previously
 created profile adapters unchanged.
 
-## Runtime data flow
+## Runtime data flow (E2B example)
 
 ```text
 Prefill:

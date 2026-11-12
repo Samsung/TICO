@@ -50,7 +50,7 @@ class StopReplay(Exception):
 @register_quantizer(Gemma4GPTQConfig)
 class Gemma4GPTQQuantizer(BaseQuantizer):
     """
-    Gemma4 specific GPTQ quantizer.
+    GPTQ quantizer for dense Gemma4 E2B/E4B.
 
     This quantizer stores raw calibration inputs during ``prepare()`` and
     performs stagewise GPTQ during ``convert()``.
@@ -371,6 +371,8 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
         correct slices before replaying.
         """
         assert isinstance(self.config, Gemma4GPTQConfig)
+        move_cache_to_cpu = self.config.move_cache_to_cpu
+        cache_dtype = self.config.cache_dtype
 
         language_model = components.language_model
         text_config = getattr(language_model, "config", None)
@@ -479,16 +481,24 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
 
             past_key_values = kwargs.get("past_key_values")
 
+            # The entry capture persists for every decoder layer. The packed
+            # PLE tensor and the masks dominate it, so they follow the same
+            # cache placement as the per-layer hidden states.
+            def offload(value: Any) -> Any:
+                return maybe_move_cache_to_cpu(
+                    value, enabled=move_cache_to_cpu, dtype=cache_dtype
+                )
+
             captured_batches.append(
                 {
-                    "hidden_states": hidden_states.detach().clone(),
+                    "hidden_states": offload(hidden_states.detach().clone()),
                     "per_layer_inputs": (
-                        per_layer_inputs.detach().clone()
+                        offload(per_layer_inputs.detach().clone())
                         if per_layer_inputs is not None
                         else None
                     ),
                     "position_embeddings": position_embeddings,
-                    "causal_mask_mapping": causal_mask_mapping,
+                    "causal_mask_mapping": offload(causal_mask_mapping),
                     # shared_kv_states is NOT captured here because it is a
                     # mutable dict that gets populated during the forward pass
                     # by layers with store_full_length_kv=True.  Instead, we

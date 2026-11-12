@@ -20,7 +20,7 @@ import unittest
 import torch
 
 from tico.quantization import convert, prepare
-from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.config.gemma4_builders import build_gemma4_ptq_config
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
@@ -156,7 +156,7 @@ class TestGemma4ForConditionalGenerationSmoke(unittest.TestCase):
 
     def _ptq_config(self):
         """Build the PTQ config used by smoke tests."""
-        return build_gemma4_e2b_ptq_config(
+        return build_gemma4_ptq_config(
             num_text_layers=int(self.text_cfg.num_hidden_layers),
             num_vision_layers=int(self.vision_cfg.num_hidden_layers),
             model_args={

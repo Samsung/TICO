@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PTQ wrapper for the dense Gemma4 E2B text model."""
+"""PTQ wrapper for the dense Gemma4 E2B/E4B text model."""
 
 from collections import UserDict
 from collections.abc import Mapping
@@ -28,7 +28,7 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
-    assert_gemma4_e2b_no_moe,
+    assert_gemma4_dense_no_moe,
     lookup_gemma4_per_layer_token_inputs,
     project_gemma4_per_layer_inputs,
     validate_gemma4_ple_projection_state,
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4TextModel")
 class QuantGemma4TextModel(QuantModuleBase):
-    """Quantization wrapper for the dense Gemma4 E2B text model.
+    """Quantization wrapper for the dense Gemma4 E2B/E4B text model.
 
     Eager full and sliding causal masks cover only the active query and cache
     spans. The forward path does not call Hugging Face mask factories.
@@ -68,7 +68,7 @@ class QuantGemma4TextModel(QuantModuleBase):
     limit eager calibration or evaluation, which retain the model's native
     context length.
 
-    The E2B scope intentionally rejects MoE. Cache allocation and writes,
+    The dense Gemma4 scope intentionally rejects MoE. Cache allocation and writes,
     sampling, and CPU/NPU orchestration remain runtime responsibilities.
     """
 
@@ -88,7 +88,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         fp_model = cast("Gemma4TextModel", fp_model)
-        assert_gemma4_e2b_no_moe(fp_model)
+        assert_gemma4_dense_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.rope_convention = get_gemma4_text_attention_options(self.qcfg).rope
 

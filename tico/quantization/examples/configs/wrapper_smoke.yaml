@@ -34,6 +34,9 @@ debug:
       # tiny: current lightweight synthetic modules
       # e2b_dims: original E2B channel/weight dimensions with smoke-sized inputs
       # e2b_static_runtime: E2B dimensions plus fixed runtime input shapes
+      # e4b_dims: E4B widths, two KV heads, smoke-sized inputs, no double-wide MLP
+      # e4b_static_runtime: E4B dimensions plus the common fixed runtime shapes
+      # Exact-width profiles are opt-in; tiny remains the CPU-friendly default.
       size_profile: tiny
       static_runtime:
         max_seq: 2048

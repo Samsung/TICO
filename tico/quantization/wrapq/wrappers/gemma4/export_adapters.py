@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Export adapters for Gemma4 E2B static-shape runtime.
+"""Export adapters for dense Gemma4 E2B/E4B static-shape runtime.
 
 The adapters define the contracts that should be exported to NPU-friendly static
 graphs. CPU runtime code owns dynamic orchestration, cache writes, sampling, and

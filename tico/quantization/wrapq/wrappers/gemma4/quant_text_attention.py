@@ -46,7 +46,7 @@ CacheOutputMode = Literal["delta", "present", "full"]
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4TextAttention")
 class QuantGemma4TextAttention(QuantModuleBase):
-    """PTQ wrapper for dense Gemma4 E2B text attention.
+    """PTQ wrapper for dense Gemma4 E2B/E4B text attention.
 
     The wrapper keeps projection, RoPE, cache, mask, and shared-KV semantics
     common across two attention layouts:
@@ -56,7 +56,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
     - ``unrolled`` groups query rows sharing K/V in rank-3 matmuls and avoids
       head-axis broadcasting for static NPU export.
 
-    The dense E2B scope supports regular K/V-owning layers, global layers where
+    The dense Gemma4 scope supports regular K/V-owning layers, global layers where
     ``attention_k_eq_v=True``, and shared-KV consumer layers. Dynamic runtime
     orchestration such as cache writes, shared-KV bookkeeping, mask generation,
     and sampling remains outside this module.

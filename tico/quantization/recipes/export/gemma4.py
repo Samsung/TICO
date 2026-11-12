@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Static per-stage Circle export for Gemma4 E2B."""
+"""Static per-stage Circle export for dense Gemma4 E2B/E4B."""
 
 import hashlib
 import json
@@ -65,7 +65,7 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     canonicalize_gemma4_static_vision_model_args,
     Gemma4StaticVisionProfile,
 )
-from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_dense_no_moe
 from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
     build_gemma4_vision_split_export_bundle,
     Gemma4VisionSplitExportBundle,
@@ -944,7 +944,7 @@ def export_gemma4_per_layer(
     ple_embedding_format: str = "auto",
     compile_config: CompileConfigBase | None = None,
 ) -> None:
-    """Export a floating-point or PTQ-wrapped Gemma4 E2B by runtime stage.
+    """Export a floating-point or PTQ-wrapped dense Gemma4 E2B/E4B by runtime stage.
 
     The generated Circle set contains the configured image vision pipeline,
     dynamic token embedding, fixed-slot multimodal fusion, every text decoder
@@ -992,7 +992,7 @@ def export_gemma4_per_layer(
     qmodel, gemma_model, qvision, qtext = _unwrap_gemma4_components(export_model)
     # The arithmetic-only fusion stage has no quantized child entry to guard it.
     ExportCapabilityGuard(gemma_model, "multimodal_fusion")
-    assert_gemma4_e2b_no_moe(qtext.config)
+    assert_gemma4_dense_no_moe(qtext.config)
 
     text_capacity = int(qtext.config.max_position_embeddings)
     if max_seq_len > text_capacity:

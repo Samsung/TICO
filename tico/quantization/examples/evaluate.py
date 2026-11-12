@@ -30,6 +30,23 @@ from tico.quantization.recipes.utils import set_seed
 from tico.quantization.wrapq.lifecycle import validate_frozen_model
 
 
+def _release_floating_point_model(ctx: RecipeContext) -> None:
+    """Free the evaluation device before a checkpoint replaces the loaded model.
+
+    The adapter loads the floating-point model for its tokenizer, processor, and
+    context artifacts. Keeping its weights on the device while the checkpoint is
+    loaded doubles peak memory. Artifacts may retain module references, so the
+    weights are moved off the device and never merely dereferenced.
+    """
+    model = ctx.model
+    ctx.model = None
+    if isinstance(model, torch.nn.Module):
+        model.to("cpu")
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate an FP or fake-quant checkpoint."
@@ -98,6 +115,7 @@ def main() -> None:
     ctx = adapter.load_model(ctx)
 
     if args.checkpoint:
+        _release_floating_point_model(ctx)
         checkpoint = torch.load(
             args.checkpoint,
             map_location=ctx.device,
