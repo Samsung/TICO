@@ -1221,6 +1221,101 @@ class TestDenseGemma4TextReplay(unittest.TestCase):
                 self.assertIs(result.forward, quantizer._orig_model_forward)
                 self.assertEqual(quantizer.num_batches, 0)
 
+    @torch.no_grad()
+    def test_entry_capture_follows_cache_placement(self):
+        """The persistent PLE, hidden-state, and mask capture must honor offload."""
+        import tico.quantization.algorithm.gemma4_gptq.quantizer as quantizer_module
+        from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+
+        class TextReplayModel(MockGemma4Model):
+            """Route cached raw inputs into the real tiny HF text stack."""
+
+            def forward(self, *args, **kwargs):
+                return self.model.language_model(*args, **kwargs)
+
+        layer_types = ["sliding_attention"] * 5 + ["full_attention"]
+        real_offload = quantizer_module.maybe_move_cache_to_cpu
+        for enabled in (True, False):
+            with self.subTest(move_cache_to_cpu=enabled):
+                torch.manual_seed(23)
+                config = Gemma4TextConfig.from_dict(
+                    dict(
+                        vocab_size=16,
+                        vocab_size_per_layer_input=16,
+                        hidden_size=16,
+                        intermediate_size=32,
+                        num_hidden_layers=6,
+                        num_attention_heads=8,
+                        num_key_value_heads=2,
+                        num_global_key_value_heads=2,
+                        head_dim=4,
+                        global_head_dim=8,
+                        layer_types=layer_types,
+                        num_kv_shared_layers=0,
+                        use_double_wide_mlp=False,
+                        hidden_size_per_layer_input=4,
+                        sliding_window=8,
+                        max_position_embeddings=16,
+                        attention_k_eq_v=False,
+                        enable_moe_block=False,
+                        attention_dropout=0.0,
+                        use_cache=False,
+                    )
+                )
+                config._attn_implementation = "eager"
+                language_model = Gemma4TextModel(config).eval()
+                model = TextReplayModel(dim=16, num_text_layers=0).eval()
+                setattr(model.model, "language_model", language_model)
+                model.config.text_config = config
+                input_ids = torch.tensor([[1, 2]])
+                masks = {
+                    "sliding_attention": torch.zeros(1, 1, 2, 2),
+                    "full_attention": torch.full((1, 1, 2, 2), -0.125),
+                }
+                quantizer = _make_quantizer(
+                    **_text_only_overrides(
+                        move_cache_to_cpu=enabled, cache_dtype=torch.float32
+                    )
+                )
+                prepared = quantizer.prepare(model)
+                prepared(input_ids=input_ids, attention_mask=masks)
+                requests: list[tuple[Any, bool, Any]] = []
+
+                def record(value, *, enabled, dtype=None):
+                    """Record each placement request and keep the real behavior."""
+                    requests.append((value, enabled, dtype))
+                    return real_offload(value, enabled=enabled, dtype=dtype)
+
+                entry_requests: list[tuple[Any, bool, Any]] = []
+
+                def snapshot(**kwargs):
+                    """Keep only the requests issued before the first layer."""
+                    if not entry_requests:
+                        entry_requests.extend(requests)
+
+                with (
+                    patch.object(quantizer_module, "maybe_move_cache_to_cpu", record),
+                    patch.object(
+                        quantizer,
+                        "_quantize_stage_from_stage_cache",
+                        side_effect=snapshot,
+                    ),
+                ):
+                    quantizer.convert(model)
+
+                entry = entry_requests[-3:]
+                self.assertEqual(len(entry), 3)
+                hidden_states, per_layer_inputs, mask_mapping = (
+                    value for value, _, _ in entry
+                )
+                self.assertEqual(hidden_states.shape, (1, 2, 16))
+                self.assertEqual(per_layer_inputs.shape, (1, 2, 6, 4))
+                self.assertEqual(set(mask_mapping), set(masks))
+                for _, requested, dtype in entry:
+                    self.assertIs(requested, enabled)
+                    self.assertIs(dtype, torch.float32)
+
 
 class TestConvertIntegration(unittest.TestCase):
     """Integration tests for the full prepare -> convert flow."""

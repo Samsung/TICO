@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import unittest
 from pathlib import Path
 
@@ -126,14 +127,27 @@ class TestGemma4ExampleConfigs(unittest.TestCase):
         """The variant changes model dimensions without changing pipeline contracts."""
         quantize = self._load("gemma4_e4b_quantize.yaml")
         export = self._load("gemma4_e4b_export.yaml")
-        self.assertEqual(
-            quantize["pipeline"], self._load("gemma4_quantize.yaml")["pipeline"]
-        )
+        e4b_pipeline = copy.deepcopy(quantize["pipeline"])
+        # Cache placement is a memory setting, not a pipeline contract: E4B
+        # float32 weights leave no room for calibration caches on a 48 GB GPU.
+        self.assertIs(e4b_pipeline[0].pop("move_cache_to_cpu"), True)
+        self.assertEqual(e4b_pipeline, self._load("gemma4_quantize.yaml")["pipeline"])
         self.assertEqual(quantize["export"]["artifacts"], ["ptq_checkpoint"])
         self.assertEqual(export["pipeline"], [])
         self.assertEqual(export["export"]["artifacts"], ["circle_per_layer"])
         self.assertTrue(export["export"]["prefill_decode"])
         self.assertEqual(export["export"]["vision"]["granularity"], "both")
+
+    def test_gptq_and_ptq_weight_grids_match_for_reused_modules(self):
+        """GPTQ qparams are reused by PTQ only when both use the same weight grid."""
+        for name in ("gemma4_quantize.yaml", "gemma4_e4b_quantize.yaml"):
+            with self.subTest(name=name):
+                stages = {
+                    stage["name"]: stage for stage in self._load(name)["pipeline"]
+                }
+                self.assertEqual(stages["gptq"]["weight_bits"], 4)
+                self.assertEqual(stages["ptq"]["linear_weight"], "uint4")
+                self.assertEqual(stages["ptq"]["vision_patch_embed_weight"], "uint4")
 
     def test_e4b_output_paths_are_separate_from_e2b(self):
         """Variant presets must never overwrite E2B checkpoints or quality reports."""

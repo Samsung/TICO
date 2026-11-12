@@ -139,6 +139,12 @@ or exporting. Both variants share static vision geometry; E4B uses the
 `gemma4_66x36_264` profile alias. The [artifact reference](../recipes/export/gemma4_artifacts.md)
 describes per-layer cache geometry and the large host PLE table.
 
+E4B float32 weights occupy about 32 GB, so its quantize preset enables the GPTQ
+`move_cache_to_cpu` option to keep calibration caches in host memory. Evaluating
+a saved E4B checkpoint peaks near 47 GB on the device; on a 48 GB GPU set
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to avoid fragmentation
+failures.
+
 1. Quantize Gemma4 E2B and save the checkpoint.
 
    ```bash

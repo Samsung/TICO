@@ -163,6 +163,9 @@ config = Gemma4GPTQConfig(
 - `prepare()` caches **raw model inputs** for every calibration batch; vision
   batches are cached twice (global + vision cache). Use `move_cache_to_cpu=True`
   and optionally `cache_dtype=torch.float16` to bound GPU/host memory.
+- The text-layer entry capture (hidden states, packed per-layer inputs, and
+  attention masks for every batch) follows the same `move_cache_to_cpu` and
+  `cache_dtype` settings; it is the largest cache for E4B-sized models.
 - Raw-replay stages (`patch_embed`, `pooler`, `multimodal_embedder`, `lm_head`)
   run a full model forward per cached batch, so their cost scales with
   calibration set size. Blocks/layers use cached stage-entry inputs and only

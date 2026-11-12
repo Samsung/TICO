@@ -33,6 +33,7 @@ pipeline:
   - name: gptq
     enabled: true
     weight_bits: 4
+    move_cache_to_cpu: true  # Keep E4B calibration caches off a 48 GB GPU.
 
   - name: ptq
     enabled: true
@@ -41,7 +42,7 @@ pipeline:
     linear_weight: uint4
     embedding_weight: uint8
     lm_head_weight: uint8
-    vision_patch_embed_weight: uint8
+    vision_patch_embed_weight: uint4
     norm_weight: int16
     strict_wrap: true
 
