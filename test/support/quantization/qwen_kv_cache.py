@@ -127,6 +127,10 @@ def load_controlled_qparams(attention, domains) -> None:
                 *domains.producer_qparam,
             )
     load_qparam(attention.obs_k_rot, *domains.producer_qparam)
+    # The value path has no RoPE observers, but its layout bracket owns the
+    # projection-output grid as well; pin it so the view chain keeps the
+    # controlled domain.
+    load_qparam(attention.obs_v_view, *domains.producer_qparam)
     value_projection = attention.v_proj.wrapped
     if not isinstance(value_projection, QuantLinear):
         raise AssertionError("value projection must be QuantLinear")

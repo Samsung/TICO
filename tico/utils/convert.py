@@ -80,6 +80,9 @@ from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBa
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropPass
 from tico.quantization.passes.quantize_bias import QuantizeBias
+from tico.quantization.passes.remove_redundant_quantisers import (
+    RemoveRedundantQuantisers,
+)
 from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 from tico.quantization.wrapq.utils.check_missing_qparam import check_missing_qparam
 from tico.serialize.circle_serializer import build_circle_bytes, build_circle_model
@@ -343,6 +346,7 @@ def _prepare_exported_program(
                 QuantizeBias(),
                 RemoveUnusedPlaceholder(),
                 InsertQuantizeOnDtypeMismatch(),
+                RemoveRedundantQuantisers(),
             ]
         )
         quantize_graph = PassManager(passes=quantization_passes)
