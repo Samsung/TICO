@@ -91,6 +91,9 @@ class QuantQwen3VLVisionPatchMerger(QuantModuleBase):
             fp_name=join_name(fp_name, "linear_fc2"),
         )
 
+        # Layout-op bracket: keep the post-norm view in the affine domain.
+        self.obs_post_norm_view = self._make_obs("post_norm_view")
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with fake quantization.
@@ -108,6 +111,9 @@ class QuantQwen3VLVisionPatchMerger(QuantModuleBase):
         else:
             x = self.norm(x).view(-1, self.hidden_size)
 
+        # Bracket the post-norm view so it stays in the affine domain.
+        x = self._fq(x, self.obs_post_norm_view)
+
         # Apply first linear layer
         x = self.linear_fc1(x)
 
@@ -120,5 +126,4 @@ class QuantQwen3VLVisionPatchMerger(QuantModuleBase):
         return x
 
     def _all_observers(self) -> Iterable:
-        """This wrapper owns no observers directly."""
-        return ()
+        yield from (self.obs_post_norm_view,)

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch.fx
 import copy
+import operator
 
 from collections import defaultdict
 from typing import Any
@@ -29,6 +30,7 @@ from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.graph import create_node
+from tico.utils.mx.dtypes import elem_format_from_mx_dtype, is_mx_dtype
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import quant_min_max
@@ -41,12 +43,61 @@ from tico.utils.validate_args_kwargs import (
     PermuteArgs,
     ReluArgs,
     ReshapeArgs,
+    RMSNormArgs,
+    SigmoidArgs,
+    SplitWithSizesArgs,
+    SubTensorArgs,
 )
 
 
 def qparam_dtype(node: torch.fx.Node) -> str:
     assert QPARAM_KEY in node.meta
     return node.meta[QPARAM_KEY].dtype
+
+
+# Bit width of the supported affine storage dtypes.
+_DTYPE_WIDTH = {"uint4": 4, "uint8": 8, "int16": 16}
+
+
+def convert_qparam(qparam: QuantParam, target_dtype: str) -> QuantParam:
+    """Convert a QuantParam from one dtype to another.
+
+    Supports conversions between int16 and unsigned types (uint8, uint4).
+    The conversion preserves the representable value range.
+    """
+    if qparam.dtype == target_dtype:
+        return copy.deepcopy(qparam)
+
+    assert qparam.scale is not None and len(qparam.scale) == 1
+    assert qparam.zero_point is not None and len(qparam.zero_point) == 1
+
+    src_dtype = qparam.dtype
+    src_scale = qparam.scale[0]
+    src_zerop = qparam.zero_point[0]
+    src_min, src_max = quant_min_max(src_dtype)
+
+    # Compute the real value range from the source qparam
+    real_max = src_scale * (src_max - src_zerop)
+    real_min = src_scale * (src_min - src_zerop)
+
+    dst_min, dst_max = quant_min_max(target_dtype)
+    n_levels = dst_max - dst_min + 1  # 256 for uint8, 16 for uint4, 65536 for int16
+
+    if target_dtype == "int16":
+        # Converting to int16: symmetric, zero_point = 0
+        abs_max = max(abs(real_max), abs(real_min))
+        dst_scale = abs_max / 32767
+        dst_zerop = 0
+    else:
+        # Converting to unsigned: use full range [0, n_levels-1]
+        dst_scale = (real_max - real_min) / (n_levels - 1)
+        dst_zerop = round(-real_min / dst_scale)
+
+    new_qparam = QuantParam()
+    new_qparam.scale = [dst_scale]
+    new_qparam.zero_point = [dst_zerop]
+    new_qparam.dtype = target_dtype
+    return new_qparam
 
 
 # Convert i16 qparam to u8 qparam
@@ -96,16 +147,18 @@ def _u8_to_i16(qparam: QuantParam) -> QuantParam:
     return new_qparam
 
 
-def _insert_quantize_op_before(node, inp):
+def _insert_quantize_op_before(node, inp, qparam: QuantParam | None = None):
     graph = node.graph
-    qparam: QuantParam = node.meta[QPARAM_KEY]
+    if qparam is None:
+        qparam = node.meta[QPARAM_KEY]
     assert qparam.scale is not None and len(qparam.scale) == 1
     assert qparam.zero_point is not None and len(qparam.zero_point) == 1
     assert qparam.quantized_dimension is None
     scale = qparam.scale[0]
     zerop = qparam.zero_point[0]
     min_, max_ = quant_min_max(qparam.dtype)
-    dtype = getattr(torch, qparam.dtype)
+    # torch has no uint4 storage type; keep uint8 storage like the quant op.
+    dtype = torch.uint8 if qparam.dtype == "uint4" else getattr(torch, qparam.dtype)
 
     with graph.inserting_before(node):
         q_args = (inp, scale, zerop, min_, max_, dtype)
@@ -154,6 +207,36 @@ def _insert_quantize_op_after(node):
     return quantize
 
 
+def _insert_mx_quantize_op_after(node, qparam: QuantParam):
+    """Insert an MX quantize op converting ``node``'s affine output to the MX
+    domain described by ``qparam`` (block element dtype + quantized dimension).
+
+    An affine ``quantize_per_tensor`` cannot express a conversion into an MX
+    domain, so MX-boundary legalization uses ``circle_custom::quantize_mx``.
+    """
+    graph = node.graph
+    assert is_mx_dtype(qparam.dtype)
+    assert qparam.quantized_dimension is not None
+    elem_format = elem_format_from_mx_dtype(qparam.dtype)
+
+    with graph.inserting_after(node):
+        q_args = (node, elem_format, qparam.quantized_dimension)
+        quantize = create_node(
+            graph,
+            torch.ops.circle_custom.quantize_mx.default,
+            args=q_args,
+        )
+
+    node.replace_all_uses_with(quantize, propagate_meta=True)
+    quantize.replace_input_with(quantize, node)
+
+    quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
+    # The MX quantize fake kernel returns its input unchanged.
+    quantize.meta["val"] = node.meta["val"]
+
+    return quantize
+
+
 def _linear_handler(node, logger):
     lin_args = LinearArgs(*node.args, **node.kwargs)
     inp = lin_args.input
@@ -177,9 +260,27 @@ def _linear_handler(node, logger):
         # important to mitigate this accuracy drop in backend.
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Run the linear in the MX domain and requantize the output back to
+        # the annotated affine grid.
+        quantize = _insert_quantize_op_after(node)
+
+        node.meta[QPARAM_KEY] = copy.deepcopy(inp.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) in ("int16", "uint8", "uint4") and is_mx_dtype(
+        qparam_dtype(node)
+    ):
+        # Convert the affine activation to the annotated MX domain.
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_mx.default is inserted after {inp.name}.")
     else:
         raise NotYetSupportedError(
-            f"Unsupported dtype: From {qparam_dtype(inp)} to {qparam_dtype(node)}"
+            f"Unsupported dtype mismatch at {node.name}: "
+            f"in={qparam_dtype(inp)}, out={qparam_dtype(node)}"
         )
 
 
@@ -200,20 +301,75 @@ def _add_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(x) == qparam_dtype(node):
+    if qparam_dtype(x) == qparam_dtype(y) == qparam_dtype(node):
         return
 
-    if qparam_dtype(x) != qparam_dtype(y):
+    if not (
+        is_mx_dtype(qparam_dtype(x))
+        or is_mx_dtype(qparam_dtype(y))
+        or is_mx_dtype(qparam_dtype(node))
+    ):
+        # Legacy affine behavior.
+        if qparam_dtype(x) == qparam_dtype(node):
+            return
+
+        if qparam_dtype(x) != qparam_dtype(y):
+            return
+
+        if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
+            quantize = _insert_quantize_op_after(node)
+
+            quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+            node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+            logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+            return
+
+        raise NotYetSupportedError(
+            f"Unsupported dtype mismatch at {node.name}: "
+            f"x={qparam_dtype(x)}, y={qparam_dtype(y)}, out={qparam_dtype(node)}"
+        )
+
+    # Uniform MX family with the output on x's grid is directly supported.
+    if (
+        is_mx_dtype(qparam_dtype(x))
+        and is_mx_dtype(qparam_dtype(y))
+        and is_mx_dtype(qparam_dtype(node))
+        and qparam_dtype(x) == qparam_dtype(node)
+    ):
         return
 
-    if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
-        quantize = _insert_quantize_op_after(node)
+    if (is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y))) and (
+        qparam_dtype(node) in ("int16", "uint8", "uint4")
+    ):
+        # One input is MX and the annotated output is affine: bring the affine
+        # input into the MX domain, run the add in MX and requantize the output
+        # back to the affine grid.
+        mx_node = x
+        if qparam_dtype(y) != qparam_dtype(x):
+            if qparam_dtype(x) in ("int16", "uint8", "uint4"):
+                _insert_mx_quantize_op_after(x, y.meta[QPARAM_KEY])
+                mx_node = y
+                logger.debug(f"quantize_mx.default is inserted after {x.name}.")
+            if qparam_dtype(y) in ("int16", "uint8", "uint4"):
+                _insert_mx_quantize_op_after(y, x.meta[QPARAM_KEY])
+                logger.debug(f"quantize_mx.default is inserted after {y.name}.")
 
-        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+        _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(mx_node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (not is_mx_dtype(qparam_dtype(x)) and not is_mx_dtype(qparam_dtype(y))) and (
+        is_mx_dtype(qparam_dtype(node))
+    ):
+        # Affine inputs with an annotated MX output: convert both inputs.
+        _insert_mx_quantize_op_after(y, node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_mx.default is inserted after {y.name}.")
+        _insert_mx_quantize_op_after(x, node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_mx.default is inserted after {x.name}.")
     else:
-        raise NotYetSupportedError("Unsupported dtype")
+        raise NotYetSupportedError(
+            f"Unsupported dtype: x={qparam_dtype(x)}, y={qparam_dtype(y)}, "
+            f"out={qparam_dtype(node)} (node {node.name})"
+        )
 
 
 def _mul_handler(node, logger):
@@ -233,7 +389,16 @@ def _mul_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(x) == qparam_dtype(node):
+    # The op is directly executable when the output stays on x's grid and y is
+    # either on the same grid or at least in the same quantization family
+    # (the backend allows cross-type MUL inside one family).
+    if qparam_dtype(x) == qparam_dtype(node) and (
+        qparam_dtype(y) == qparam_dtype(node)
+        or (
+            is_mx_dtype(qparam_dtype(y)) == is_mx_dtype(qparam_dtype(node))
+            and is_mx_dtype(qparam_dtype(y)) == is_mx_dtype(qparam_dtype(x))
+        )
+    ):
         return
 
     if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
@@ -242,8 +407,115 @@ def _mul_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y))) and (
+        qparam_dtype(node) in ("int16", "uint8", "uint4")
+    ):
+        # One input is MX and the annotated output is affine: bring the affine
+        # input into the MX domain, run the mul in MX and requantize the output
+        # back to the affine grid.
+        mx_node = x
+        if qparam_dtype(y) != qparam_dtype(x):
+            if qparam_dtype(x) in ("int16", "uint8", "uint4"):
+                _insert_mx_quantize_op_after(x, y.meta[QPARAM_KEY])
+                mx_node = y
+                logger.debug(f"quantize_mx.default is inserted after {x.name}.")
+            if qparam_dtype(y) in ("int16", "uint8", "uint4"):
+                _insert_mx_quantize_op_after(y, x.meta[QPARAM_KEY])
+                logger.debug(f"quantize_mx.default is inserted after {y.name}.")
+
+        _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(mx_node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (
+        qparam_dtype(x) in ("int16", "uint8", "uint4")
+        or qparam_dtype(y) in ("int16", "uint8", "uint4")
+    ) and is_mx_dtype(qparam_dtype(node)):
+        # Affine input(s) with an annotated MX output: convert the affine
+        # operand(s) to the MX domain.
+        if qparam_dtype(y) in ("int16", "uint8", "uint4"):
+            _insert_mx_quantize_op_after(y, node.meta[QPARAM_KEY])
+            logger.debug(f"quantize_mx.default is inserted after {y.name}.")
+        if qparam_dtype(x) in ("int16", "uint8", "uint4"):
+            _insert_mx_quantize_op_after(x, node.meta[QPARAM_KEY])
+            logger.debug(f"quantize_mx.default is inserted after {x.name}.")
+    elif (
+        qparam_dtype(x) == qparam_dtype(y)
+        and qparam_dtype(x) in ("uint8", "int16")
+        and qparam_dtype(node) in ("uint8", "int16")
+    ):
+        # Same-family mismatch in the opposite direction: compute in the
+        # inputs' domain and requantize the output to the annotated domain.
+        # Example: x=uint8, y=uint8, out=int16
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = copy.deepcopy(x.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     else:
-        raise NotYetSupportedError("Unsupported dtype")
+        raise NotYetSupportedError(
+            f"Unsupported dtype mismatch at {node.name}: "
+            f"x={qparam_dtype(x)}, y={qparam_dtype(y)}, out={qparam_dtype(node)}"
+        )
+
+
+def _sub_handler(node, logger):
+    sub_args = SubTensorArgs(*node.args, **node.kwargs)
+    x = sub_args.input
+    y = sub_args.other
+
+    if not isinstance(x, torch.fx.Node):
+        return
+    if not isinstance(y, torch.fx.Node):
+        return
+
+    if QPARAM_KEY not in x.meta:
+        return
+    if QPARAM_KEY not in y.meta:
+        return
+    if QPARAM_KEY not in node.meta:
+        return
+
+    x_dtype = qparam_dtype(x)
+    y_dtype = qparam_dtype(y)
+    out_dtype = qparam_dtype(node)
+
+    if not (
+        x_dtype in _DTYPE_WIDTH
+        and y_dtype in _DTYPE_WIDTH
+        and out_dtype in _DTYPE_WIDTH
+    ):
+        raise NotYetSupportedError(
+            f"Unsupported dtype: x={x_dtype}, y={y_dtype}, "
+            f"out={out_dtype} (node {node.name})"
+        )
+
+    if _DTYPE_WIDTH[y_dtype] <= _DTYPE_WIDTH[x_dtype]:
+        if x_dtype == out_dtype:
+            return
+
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], x_dtype)
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+        return
+
+    if _DTYPE_WIDTH[out_dtype] >= _DTYPE_WIDTH[y_dtype]:
+        op_dtype = out_dtype
+    else:
+        op_dtype = y_dtype
+
+    if out_dtype != op_dtype:
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], op_dtype)
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+
+    _insert_quantize_op_before(node, x, copy.deepcopy(node.meta[QPARAM_KEY]))
+    logger.debug(
+        f"quantize_per_tensor.default is inserted before {node.name} for {x.name}."
+    )
 
 
 def _same_domain(lhs: QuantParam, rhs: QuantParam) -> bool:
@@ -304,6 +576,35 @@ def _cat_handler(node, logger):
     if all(_same_domain(source, destination) for source in sources):
         return
 
+    # MX legalization. An affine requantize cannot enter or leave the MX
+    # domain, so MX boundaries are converted with the MX-aware helpers before
+    # falling back to the affine logic (or the silent passthrough) below.
+    if is_mx_dtype(destination.dtype) and all(
+        source.dtype in ("int16", "uint8", "uint4") for source in sources
+    ):
+        # Affine inputs with an MX output: convert every input to the MX
+        # domain. Distinct inputs keep their own conversion.
+        for inp in dict.fromkeys(tensors):
+            _insert_mx_quantize_op_after(inp, destination)
+            logger.debug(f"quantize_mx.default is inserted after {inp.name}.")
+        return
+
+    if destination.dtype in ("int16", "uint8", "uint4") and any(
+        is_mx_dtype(source.dtype) for source in sources
+    ):
+        # MX inputs with an affine output: requantize each MX input onto the
+        # output grid, then reconcile the remaining affine domains below.
+        for inp in dict.fromkeys(tensors):
+            if is_mx_dtype(inp.meta[QPARAM_KEY].dtype):
+                _insert_quantize_op_before(node, inp)
+                logger.debug(
+                    f"quantize_per_tensor.default is inserted before {node.name}."
+                )
+        tensors = CatArgs(*node.args, **node.kwargs).tensors
+        sources = [x.meta[QPARAM_KEY] for x in tensors]
+        if all(_same_domain(source, destination) for source in sources):
+            return
+
     qparams = sources + [destination]
     # Preserve the existing treatment of incompletely annotated concats,
     # including MX domains that carry no affine scale.
@@ -359,7 +660,11 @@ def _bmm_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(x) == qparam_dtype(node):
+    # The op is directly executable when the output stays on x's grid and the
+    # second operand belongs to the same quantization family.
+    if qparam_dtype(x) == qparam_dtype(node) and is_mx_dtype(
+        qparam_dtype(y)
+    ) == is_mx_dtype(qparam_dtype(node)):
         return
 
     if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
@@ -374,8 +679,40 @@ def _bmm_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y))) and (
+        qparam_dtype(node) in ("int16", "uint8", "uint4")
+    ):
+        # One input is MX and the annotated output is affine: bring the affine
+        # input into the MX domain, run the bmm in MX and requantize the output
+        # back to the affine grid.
+        mx_node = x
+        if qparam_dtype(y) != qparam_dtype(x):
+            if qparam_dtype(x) in ("int16", "uint8", "uint4"):
+                _insert_mx_quantize_op_after(x, y.meta[QPARAM_KEY])
+                mx_node = y
+                logger.debug(f"quantize_mx.default is inserted after {x.name}.")
+            if qparam_dtype(y) in ("int16", "uint8", "uint4"):
+                _insert_mx_quantize_op_after(y, x.meta[QPARAM_KEY])
+                logger.debug(f"quantize_mx.default is inserted after {y.name}.")
+
+        _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(mx_node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (
+        qparam_dtype(x) in ("int16", "uint8", "uint4")
+        and qparam_dtype(y) in ("int16", "uint8", "uint4")
+        and is_mx_dtype(qparam_dtype(node))
+    ):
+        # Affine inputs with an annotated MX output: convert both inputs.
+        _insert_mx_quantize_op_after(y, node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_mx.default is inserted after {y.name}.")
+        _insert_mx_quantize_op_after(x, node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_mx.default is inserted after {x.name}.")
     else:
-        raise NotYetSupportedError("Unsupported dtype")
+        raise NotYetSupportedError(
+            f"Unsupported dtype mismatch at {node.name}: "
+            f"x={qparam_dtype(x)}, y={qparam_dtype(y)}, out={qparam_dtype(node)}"
+        )
 
 
 def _permute_handler(node, logger):
@@ -404,8 +741,21 @@ def _permute_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Quantize the MX input onto the output's plain grid before permute.
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
     else:
-        raise NotYetSupportedError("Unsupported dtype")
+        raise NotYetSupportedError(
+            f"Unsupported dtype mismatch at {node.name}: "
+            f"in={qparam_dtype(inp)}, out={qparam_dtype(node)}"
+        )
 
 
 def _reshape_handler(node, logger):
@@ -434,8 +784,21 @@ def _reshape_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Quantize the MX input onto the output's plain grid before reshape.
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
     else:
-        raise NotYetSupportedError("Unsupported dtype")
+        raise NotYetSupportedError(
+            f"Unsupported dtype mismatch at {node.name}: "
+            f"in={qparam_dtype(inp)}, out={qparam_dtype(node)}"
+        )
 
 
 def _relu_handler(node, logger):
@@ -463,19 +826,214 @@ def _relu_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Quantize the MX input onto the output's plain grid before relu.
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
     else:
-        raise NotYetSupportedError("Unsupported dtype")
+        raise NotYetSupportedError(
+            f"Unsupported dtype mismatch at {node.name}: "
+            f"in={qparam_dtype(inp)}, out={qparam_dtype(node)}"
+        )
+
+
+def _split_handler(node, logger):
+    split_args = SplitWithSizesArgs(*node.args, **node.kwargs)
+    inp = split_args.input
+
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and is_mx_dtype(qparam_dtype(node)):
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_mx.default is inserted after {inp.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
+    elif qparam_dtype(inp) in ("int16", "uint8", "uint4") and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # split is dtype agnostic: quantize the input onto the output's grid
+        # so that no extra conversion is needed afterwards.
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
+    else:
+        raise NotYetSupportedError(
+            f"Unsupported dtype: From {qparam_dtype(inp)} to {qparam_dtype(node)} "
+            f"(node {node.name})"
+        )
+
+
+def _sigmoid_handler(node, logger):
+    sigmoid_args = SigmoidArgs(*node.args, **node.kwargs)
+    inp = sigmoid_args.input
+
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and is_mx_dtype(qparam_dtype(node)):
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_mx.default is inserted after {inp.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Quantize the MX input onto the output's plain grid before sigmoid.
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
+    elif qparam_dtype(inp) in ("int16", "uint8", "uint4") and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Run sigmoid on the input's grid; the inserted quantize converts
+        # the output back to the node's original grid.
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    else:
+        raise NotYetSupportedError(
+            f"Unsupported dtype: From {qparam_dtype(inp)} to {qparam_dtype(node)} "
+            f"(node {node.name})"
+        )
+
+
+def _rmsnorm_handler(node, logger):
+    rms_args = RMSNormArgs(*node.args, **node.kwargs)
+    inp = rms_args.input
+
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and is_mx_dtype(qparam_dtype(node)):
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_mx.default is inserted after {inp.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Quantize the MX input onto the output's plain grid before rms_norm.
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
+    elif qparam_dtype(inp) in ("int16", "uint8", "uint4") and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # Run rmsnorm on the input's grid; the inserted quantize converts
+        # the output back to the node's original grid.
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    else:
+        raise NotYetSupportedError(
+            f"Unsupported dtype: From {qparam_dtype(inp)} to {qparam_dtype(node)} "
+            f"(node {node.name})"
+        )
+
+
+def _get_item_handler(node, logger):
+    inp = node.args[0]
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and is_mx_dtype(qparam_dtype(node)):
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_mx.default is inserted after {inp.name}.")
+    elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(inp.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) in ("int16", "uint8", "uint4") and qparam_dtype(node) in (
+        "int16",
+        "uint8",
+        "uint4",
+    ):
+        # getitem is dtype agnostic: run it on the input's grid and convert
+        # the output back with the inserted quantize.
+        quantize = _insert_quantize_op_after(node)
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = copy.deepcopy(inp.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    else:
+        raise NotYetSupportedError(
+            f"Unsupported dtype: From {qparam_dtype(inp)} to {qparam_dtype(node)} "
+            f"(node {node.name})"
+        )
 
 
 _op_handler: defaultdict[Any, Any | None] = defaultdict(lambda: None)
 _op_handler[torch.ops.aten.linear.default] = _linear_handler
 _op_handler[torch.ops.aten.add.Tensor] = _add_handler
+_op_handler[torch.ops.aten.sub.Tensor] = _sub_handler
 _op_handler[torch.ops.aten.mul.Tensor] = _mul_handler
 _op_handler[torch.ops.aten.cat.default] = _cat_handler
 _op_handler[torch.ops.aten.bmm.default] = _bmm_handler
 _op_handler[torch.ops.aten.permute.default] = _permute_handler
 _op_handler[torch.ops.aten.reshape.default] = _reshape_handler
 _op_handler[torch.ops.aten.relu.default] = _relu_handler
+_op_handler[torch.ops.aten.split_with_sizes.default] = _split_handler
+_op_handler[torch.ops.aten.sigmoid.default] = _sigmoid_handler
+_op_handler[torch.ops.aten.rms_norm.default] = _rmsnorm_handler
+_op_handler[operator.getitem] = _get_item_handler
 
 
 @trace_graph_diff_on_pass

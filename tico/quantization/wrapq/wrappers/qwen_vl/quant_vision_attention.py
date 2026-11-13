@@ -114,6 +114,12 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         self.obs_softmax = mk("softmax")
         self.obs_attn_out = mk("attn_out")
 
+        # Layout-op brackets: keep reshape/permute/transpose inside the affine
+        # domain so the exported graph has no MX layout ops.
+        self.obs_qkv_reshape = mk("qkv_reshape")
+        self.obs_pre_proj_transpose = mk("pre_proj_transpose")
+        self.obs_pre_proj_reshape = mk("pre_proj_reshape")
+
     def _rot(self, t, o_x1, o_x2, o_neg, o_cat):
         x1, x2 = torch.chunk(t, 2, dim=-1)
         x1 = self._fq(x1, o_x1)
@@ -153,11 +159,11 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         hidden_states = self._fq(hidden_states, self.obs_hidden)
 
         seq_length = hidden_states.shape[0]
+        # Bracket the projection output so the whole head-split layout chain
+        # (reshape/permute/unbind) stays in the affine domain.
+        qkv = self._fq(self.qkv(hidden_states), self.obs_qkv_reshape)
         query_states, key_states, value_states = (
-            self.qkv(hidden_states)
-            .reshape(seq_length, 3, self.num_heads, -1)
-            .permute(1, 0, 2, 3)
-            .unbind(0)
+            qkv.reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
         )
         cos, sin = position_embeddings  # type: ignore[misc]
         cos = self._fq(cos, self.obs_cos)
@@ -199,9 +205,12 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
 
             head_outputs = []
             for n_head in range(self.num_heads):
-                q_i = q_c[:, n_head : n_head + 1, :, :]
-                k_i = k_c[:, n_head : n_head + 1, :, :]
-                v_i = v_c[:, n_head : n_head + 1, :, :]
+                # 3-D slices keep the attention matmuls native bmm; 4-D matmuls
+                # would be lowered through reshape ops that inherit the MX
+                # softmax domain and become illegal MX layout ops.
+                q_i = q_c[:, n_head, :, :]
+                k_i = k_c[:, n_head, :, :]
+                v_i = v_c[:, n_head, :, :]
                 logits_i = self._fq(q_i @ k_i.transpose(-2, -1), self.obs_logits)
                 # softmax
                 attn_i = torch.softmax(logits_i, -1, dtype=torch.float32).to(q_i.dtype)
@@ -209,12 +218,17 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
                 out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
                 head_outputs.append(out_i)
 
-            # Concatenate heads: [1, num_heads, chunk_len, head_dim]
-            chunk_out = torch.cat(head_outputs, dim=1)
+            # Stack heads back: [1, num_heads, chunk_len, head_dim]
+            chunk_out = torch.stack(head_outputs, dim=1)
             # [1, chunk_len, num_heads, head_dim] -> [chunk_len, num_heads*head_dim]
-            chunk_out = chunk_out.transpose(1, 2).contiguous()
+            # (bracketed to keep transpose/reshape in the affine domain)
+            chunk_out = self._fq(
+                chunk_out.transpose(1, 2).contiguous(), self.obs_pre_proj_transpose
+            )
             chunk_len = chunk_out.shape[1]
-            chunk_out = chunk_out.reshape(chunk_len, -1).contiguous()
+            chunk_out = self._fq(
+                chunk_out.reshape(chunk_len, -1).contiguous(), self.obs_pre_proj_reshape
+            )
             chunk_outputs.append(chunk_out)
 
         # Concatenate all chunks back into the full sequence
@@ -245,4 +259,7 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
             self.obs_logits,
             self.obs_softmax,
             self.obs_attn_out,
+            self.obs_qkv_reshape,
+            self.obs_pre_proj_transpose,
+            self.obs_pre_proj_reshape,
         )
