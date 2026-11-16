@@ -333,8 +333,11 @@ The second graph snapshot is emitted after this phase when graph dumping is enab
 ### 5.6 Conditional quantization bundle
 
 TICO detects whether the graph contains quantization operations. Only then it runs
-the following bundle, prepending `PreserveEmbeddingQuantization` when
-`config.get("preserve_embedding_quantization") is True`:
+the following bundle. `PreserveEmbeddingQuantization` is prepended when
+`config.get("preserve_embedding_quantization") is True`. When
+`config.get("move_affine_quantize_before_layout") is True`,
+`MoveAffineQuantizeBeforeLayout` runs after that boundary-preservation policy and
+before `FoldQuantOps`:
 
 ```text
 FoldQuantOps
@@ -364,6 +367,38 @@ affine and MX Q/DQ pairs in graph order and preserves a `QUANTIZE` boundary when
 the MX axis or element format changes, including changes after layout operations.
 The Circle transpose-region optimization conservatively preserves MX regions;
 see the [Circle pass contracts](../tico/circle/README.md).
+
+`move_affine_quantize_before_layout` is enabled by default (`True`) as the current
+NPU deployment export policy for
+`MXINT8 -> static reshape/permute chain -> existing per-tensor INT16 Q/DQ`.
+It moves the existing matching affine Q/DQ pair before the complete layout chain,
+so that chain exports with the original INT16 scale and zero point. It adds no
+observer, calibration, or quantization stage and retains the original MX quantizer
+and its rounding/grouping. The pass runs before folding can propagate an MX domain
+into a reshape that would require regrouping MX blocks.
+
+The layout chain must have a single use at every step, counting graph outputs;
+the MX producer and final dequantized result may have multiple users. Unsupported
+layouts, dynamic shapes or qparams, per-channel/group quantization, non-MXINT8
+sources, intervening computation or quantizers, shared integer Q outputs, mismatched
+Q/DQ settings, effectful operations crossed by the move, explicit DQ `out_dtype`
+arguments, and protected embedding boundaries are left unchanged. The initial
+implementation requires float32 FX values, positive static dimensions, and the
+existing signed INT16 ranges `[-32768, 32767]` or `[-32767, 32767]`; it keeps the
+selected range unchanged. The source MX pair must use matching `int8`,
+`shared_exp_method="max"`, and `round="nearest"` arguments.
+
+The target backend must support the MXINT8-to-INT16 conversion at the new position
+and the selected INT16 layouts. This option makes no general claim about MX layout
+support on Circle or NPUs. Circle structural verification and CPU graph equivalence
+are separate from NPU compilation and execution validation. This limited rewrite
+does not solve general mixed-domain legalization. Set the option to `False` to
+disable the policy and retain the previous export behavior:
+
+```python
+config = tico.CompileConfigV1(move_affine_quantize_before_layout=False)
+circle_model = tico.convert(quantized_model.eval(), example_args, config=config)
+```
 
 This phase legalizes and completes a graph that has already been prepared as quantized.
 It is not a replacement for model calibration or the public quantization workflow.
@@ -465,6 +500,7 @@ At the end of conversion:
 | `eliminate_rank_round_trip` | `False` | Currently not consumed; the pass is instantiated with `enabled=True`. |
 | `circle_optimize` | `True` | Shared Circle O1 document pipeline, after packing on the bytes path and before final packing on the file path. |
 | `preserve_embedding_quantization` | `False` | Conditionally inserts `PreserveEmbeddingQuantization` before `FoldQuantOps` to preserve explicit quantization boundaries in supported embedding paths during Circle export. |
+| `move_affine_quantize_before_layout` | `True` | Conditionally inserts `MoveAffineQuantizeBeforeLayout` after embedding-boundary preservation and before `FoldQuantOps`, moving existing INT16 affine Q/DQ ahead of supported static MXINT8 layout chains. |
 
 `CompileConfigBase.from_dict()` applies only keys already present on the dataclass. The
 current implementation ignores unknown fields rather than rejecting them. Configuration
