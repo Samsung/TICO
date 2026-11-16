@@ -73,6 +73,9 @@ from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
 )
 from tico.quantization.passes.legalize_quantized_clamp import LegalizeQuantizedClamp
+from tico.quantization.passes.move_affine_quantize_before_layout import (
+    MoveAffineQuantizeBeforeLayout,
+)
 from tico.quantization.passes.preserve_embedding_quantization import (
     PreserveEmbeddingQuantization,
 )
@@ -332,6 +335,10 @@ def _prepare_exported_program(
         quantization_passes: list[PassBase] = []
         if config.get("preserve_embedding_quantization") is True:
             quantization_passes.append(PreserveEmbeddingQuantization())
+        # Commute explicit Q/DQ only after layout normalization and boundary
+        # protection, before folding attempts to propagate MX blocks through views.
+        if config.get("move_affine_quantize_before_layout") is True:
+            quantization_passes.append(MoveAffineQuantizeBeforeLayout())
         quantization_passes.extend(
             [
                 FoldQuantOps(),
