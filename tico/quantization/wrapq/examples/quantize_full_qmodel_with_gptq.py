@@ -73,6 +73,7 @@ from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.cle import CLEConfig
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.llama_gptq import LlamaGPTQConfig
+from tico.quantization.config.traced_gptq import TracedGPTQConfig
 from tico.quantization.config.llama_attention import (
     DEFAULT_EXECUTION_PROFILE,
     SUPPORTED_EXECUTION_PROFILES,
@@ -557,6 +558,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Use LlamaGPTQConfig instead of GPTQConfig for Llama-specific GPTQ quantization.",
+    )
+    parser.add_argument(
+        "--traced_gptq",
+        action="store_true",
+        default=False,
+        help="Use TracedGPTQConfig: structure-free whole-model GPTQ driven by a "
+        "torch.export trace of the model (no model.model.layers assumption). "
+        "Roughly one forward pass per calibration sample in total; sequential "
+        "error feedback is preserved. Calibration batches must share one "
+        "static shape (the script pads them already).",
+    )
+    parser.add_argument(
+        "--traced_gptq_layer_group_regex",
+        type=str,
+        default=None,
+        help="Regex with one capture group mapping a linear weight FQN to its "
+        "decoder-layer id, used by --traced_gptq with "
+        "--gptq_use_orig_model_inference to locate decoder-layer boundaries "
+        "in the traced graph. Default: matches model.layers.N.* FQNs.",
     )
     parser.add_argument(
         "--gptq_adaptive_percdamp",
@@ -1125,11 +1145,59 @@ def build_gptq_config(
 
     If `--llama_gptq` or `--llama_gptq_sequential` is specified, returns a LlamaGPTQConfig instead of
     GPTQConfig for Llama-specific GPTQ quantization.
+
+    If `--traced_gptq` is specified, returns a TracedGPTQConfig for the
+    structure-free, whole-model traced GPTQ quantization. It cannot be
+    combined with the Llama-specific options or parallel workers.
+    `--gptq_use_orig_model_inference` is supported: quantized linears are
+    re-evaluated with their float weights so ALL Hessians are measured
+    against the float-model activation chain (plain-GPTQ parity).
+    `--gptq_v2` is supported: a float shadow chain feeds native (FP) inputs
+    to GPTQv2's dXXT correction. Combined with
+    `--gptq_use_orig_model_inference` the Hessian chain resets to the float
+    chain at decoder-layer boundaries and stays quantized within a layer
+    (LlamaGPTQ parity); under v2 alone the Hessian chain stays quantized
+    throughout, otherwise the correction would be zero.
     """
     weight_bits_overrides: dict[str, int] = {}
 
     if args.gptq_lm_head:
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
+
+    if args.traced_gptq:
+        if args.llama_gptq or args.llama_gptq_sequential:
+            raise ValueError(
+                "--traced_gptq cannot be combined with --llama_gptq or "
+                "--llama_gptq_sequential"
+            )
+        if args.gptq_parallel_workers > 0:
+            raise ValueError(
+                "--traced_gptq does not support --gptq_parallel_workers"
+            )
+        config = TracedGPTQConfig(
+            show_progress=not args.no_tqdm,
+            weight_bits=args.linear_weight_bits,
+            weight_bits_overrides=weight_bits_overrides,
+            mse=args.gptq_mse,
+            sensitivity=sensitivity,
+            quantize_lm_head=args.gptq_lm_head,
+            percdamp=args.gptq_percdamp,
+            verbose=args.verbose,
+            adaptive_percdamp=args.gptq_adaptive_percdamp,
+            cond_threshold_good=args.gptq_cond_threshold_good,
+            use_iterate=args.gptq_use_iterate,
+            saturation_threshold=args.gptq_saturation_threshold,
+            double_precision=args.gptq_double_precision,
+            chunk_size=args.gptq_mse_chunk_size,
+            use_orig_model_inference=args.gptq_use_orig_model_inference,
+            gptq_v2=args.gptq_v2,
+            layer_group_regex=(
+                args.traced_gptq_layer_group_regex
+                if args.traced_gptq_layer_group_regex is not None
+                else TracedGPTQConfig().layer_group_regex
+            ),
+        )
+        return config
 
     if args.llama_gptq or args.llama_gptq_sequential:
         config = LlamaGPTQConfig(

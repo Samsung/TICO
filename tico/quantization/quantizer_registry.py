@@ -58,6 +58,11 @@ def get_quantizer(cfg: BaseConfig) -> BaseQuantizer:
         elif name == "llama_gptq":
             # LlamaGPTQConfig uses a separate quantizer file within the gptq module
             importlib.import_module(f"tico.quantization.algorithm.gptq.llama_quantizer")
+        elif name == "traced_gptq":
+            # TracedGPTQConfig: structure-free, whole-model traced GPTQ
+            importlib.import_module(
+                f"tico.quantization.algorithm.gptq.traced_quantizer"
+            )
         else:
             try:
                 importlib.import_module(f"tico.quantization.algorithm.{name}.quantizer")
