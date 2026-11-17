@@ -226,6 +226,26 @@ class _Cat(torch.nn.Module):
         return (result, raw) if self.shared else (result, left, right)
 
 
+class _NativeAffineSharedCat(torch.nn.Module):
+    def forward(self, x, y, z):
+        source = torch.cat((_affine(x), _affine(y)), dim=-1)
+        a = _affine(source * quantize_mx(z, "int8", -1), 0.017, -3)
+        b = _affine(source + quantize_mx(z, "int8", -1), 0.031, 13)
+        return a, b
+
+
+class _RewrittenMixedSharedCat(torch.nn.Module):
+    def forward(self, x, y, z):
+        source = _affine(
+            torch.cat((quantize_mx(x, "int8", -1), _affine(y)), dim=-1),
+            0.017,
+            -3,
+        )
+        a = quantize_mx(source * quantize_mx(z, "int8", -1), "int8", -1)
+        b = quantize_mx(source + quantize_mx(z, "int8", -1), "int8", -1)
+        return a, b
+
+
 class _Split(torch.nn.Module):
     def forward(self, x):
         source = quantize_mx(x, "int8", -1)
@@ -621,6 +641,177 @@ class LegalizeMxAffineDomainsTest(unittest.TestCase):
         self.assertEqual(list(cat.args[0]), original_inputs)
         ep.graph.lint()
         ep.validate()
+
+    def _assert_shared_cat_stable(self, module, rewritten):
+        x = torch.linspace(-40.1, 40.3, 32).reshape(1, 32)
+        y = torch.linspace(-0.03, 0.05, 32).reshape(1, 32)
+        z = torch.linspace(-3.1, 3.3, 64).reshape(1, 64)
+        ep = _export(module, x, y, z)
+        cat = _nodes(ep, torch.ops.aten.cat.default)[0]
+        original_quantizers = {
+            n: (_grid(n), n.args[0]) for n in _nodes(ep, _Q) + _nodes(ep, _MQ)
+        }
+        moved_output = [n for n in _nodes(ep, _Q) if n.args[0] is cat]
+        self.assertEqual(len(moved_output), int(rewritten))
+        self.assertTrue(_legalize(ep).modified)
+        self.assertEqual(bool(cat.meta.get("_mx_affine_domains_legalized")), rewritten)
+        cat_grid = (0.017, -3) if rewritten else (0.13, 7)
+        full_grid = (*cat_grid, -32768, 32767, torch.int16)
+        for source in cat.args[0]:
+            self.assertEqual(source.target, _DQ)
+            self.assertEqual(_grid(source.args[0]), full_grid)
+        for node, (grid, source) in original_quantizers.items():
+            if node in moved_output:
+                self.assertNotIn(node, ep.graph.nodes)
+                continue
+            self.assertIn(node, ep.graph.nodes)
+            self.assertEqual(_grid(node), grid)
+            if source.target not in {
+                torch.ops.aten.mul.Tensor,
+                torch.ops.aten.add.Tensor,
+            }:
+                self.assertIs(node.args[0], source)
+        adapters = [n for n in cat.users if n.target == _MQ]
+        self.assertEqual(len(adapters), 2)
+        for adapter in adapters:
+            self.assertEqual(_grid(adapter), ("int8", 1, "max", "nearest"))
+            self.assertEqual(len(adapter.users), 1)
+            dq = next(iter(adapter.users))
+            self.assertEqual(dq.target, _MDQ)
+            self.assertEqual(len(dq.users), 1)
+            consumer = next(iter(dq.users))
+            self.assertIn(
+                consumer.target, {torch.ops.aten.mul.Tensor, torch.ops.aten.add.Tensor}
+            )
+            self.assertIs(consumer.args[0], dq)
+        output = next(n for n in ep.graph.nodes if n.op == "output")
+        self.assertNotIn(cat, output.args[0])
+        cat_value = (
+            _affine(torch.cat((quantize_mx(x, "int8", -1), _affine(y)), -1), 0.017, -3)
+            if rewritten
+            else torch.cat((_affine(x), _affine(y)), -1)
+        )
+        mx_cat = quantize_mx(cat_value, "int8", -1)
+        mx_other = quantize_mx(z, "int8", -1)
+        native_a = quantize_mx(mx_cat * mx_other, "int8", -1)
+        native_b = quantize_mx(mx_cat + mx_other, "int8", -1)
+        expected = (
+            (native_a, native_b)
+            if rewritten
+            else (_affine(native_a, 0.017, -3), _affine(native_b, 0.031, 13))
+        )
+        first = _execute(ep, x, y, z)
+        for actual, reference in zip(first, expected):
+            self.assertTrue(torch.equal(actual, reference))
+        counts = (len(_nodes(ep, _Q)), len(_nodes(ep, _MQ)))
+        for _ in range(2):
+            self._assert_idempotent(ep)
+            self.assertEqual((len(_nodes(ep, _Q)), len(_nodes(ep, _MQ))), counts)
+            self.assertEqual([n for n in cat.users if n.target == _MQ], adapters)
+            for actual, previous in zip(_execute(ep, x, y, z), first):
+                self.assertTrue(torch.equal(actual, previous))
+            for source in cat.args[0]:
+                self.assertEqual(_grid(source.args[0]), full_grid)
+
+    def test_native_affine_cat_keeps_two_consumer_adapters_on_reexecution(self):
+        self._assert_shared_cat_stable(_NativeAffineSharedCat(), rewritten=False)
+
+    def test_rewritten_mixed_cat_keeps_two_consumer_adapters_on_reexecution(self):
+        self._assert_shared_cat_stable(_RewrittenMixedSharedCat(), rewritten=True)
+
+    def test_mixed_cat_with_ambiguous_output_domains_is_still_rejected(self):
+        class AmbiguousCat(torch.nn.Module):
+            def __init__(self, mx_first):
+                super().__init__()
+                self.mx_first = mx_first
+
+            def forward(self, x, y):
+                source = torch.cat((quantize_mx(x, "int8", -1), _affine(y)), -1)
+                if self.mx_first:
+                    mx_result = quantize_mx(source, "int8", -1)
+                    affine_result = _affine(source, 0.017, -3)
+                else:
+                    affine_result = _affine(source, 0.017, -3)
+                    mx_result = quantize_mx(source, "int8", -1)
+                return mx_result, affine_result
+
+        x = torch.linspace(-40.1, 40.3, 32).reshape(1, 32)
+        y = torch.linspace(-0.03, 0.05, 32).reshape(1, 32)
+        for mx_first in (False, True):
+            with self.subTest(mx_first=mx_first):
+                ep = _export(AmbiguousCat(mx_first), x, y)
+                original = str(ep.graph)
+                with self.assertRaisesRegex(
+                    NotYetSupportedError, "cat.*multiple output"
+                ):
+                    _legalize(ep)
+                self.assertEqual(str(ep.graph), original)
+                ep.validate()
+
+    def test_native_mx_cat_multiple_boundaries_require_intact_blocks(self):
+        class MultipleCatOutputs(torch.nn.Module):
+            def forward(self, x, y):
+                source = torch.cat(
+                    (quantize_mx(x, "int8", -1), quantize_mx(y, "int8", -1)), -1
+                )
+                return _affine(source, 0.017, -3), quantize_mx(source, "int8", -1)
+
+        y = torch.linspace(-0.03, 0.05, 32).reshape(1, 32)
+        for first_length in (16, 32):
+            with self.subTest(first_length=first_length):
+                x = torch.linspace(-40.1, 40.3, first_length).reshape(1, first_length)
+                ep = _export(MultipleCatOutputs(), x, y)
+                original = str(ep.graph)
+                if first_length == 16:
+                    with self.assertRaisesRegex(NotYetSupportedError, "block|multiple"):
+                        _legalize(ep)
+                    self.assertEqual(str(ep.graph), original)
+                    continue
+                self.assertFalse(_legalize(ep).modified)
+                self.assertEqual(str(ep.graph), original)
+                cat = _nodes(ep, torch.ops.aten.cat.default)[0]
+                self.assertEqual(len(cat.users), 2)
+                self.assertFalse(cat.meta.get("_mx_affine_domains_legalized"))
+                source = torch.cat(
+                    (quantize_mx(x, "int8", -1), quantize_mx(y, "int8", -1)), -1
+                )
+                expected = (_affine(source, 0.017, -3), quantize_mx(source, "int8", -1))
+                for actual, reference in zip(_execute(ep, x, y), expected):
+                    self.assertTrue(torch.equal(actual, reference))
+                self._assert_idempotent(ep)
+
+    def test_private_affine_cat_fallback_preserves_incomplete_mx_inputs(self):
+        class AffineFallback(torch.nn.Module):
+            def forward(self, x, y):
+                source = torch.cat(
+                    (quantize_mx(x, "int8", -1), quantize_mx(y, "int8", -1)), -1
+                )
+                return _affine(source, 0.017, -3)
+
+        x = torch.linspace(-40.1, 40.3, 16).reshape(1, 16)
+        y = torch.linspace(-0.03, 0.05, 32).reshape(1, 32)
+        ep = _export(AffineFallback(), x, y)
+        original_mx = {n: (_grid(n), n.args[0]) for n in _nodes(ep, _MQ)}
+        expected = _affine(
+            torch.cat((quantize_mx(x, "int8", -1), quantize_mx(y, "int8", -1)), -1),
+            0.017,
+            -3,
+        )
+        self.assertTrue(_legalize(ep).modified)
+        cat = _nodes(ep, torch.ops.aten.cat.default)[0]
+        self.assertTrue(cat.meta.get("_mx_affine_domains_legalized"))
+        for source in cat.args[0]:
+            self.assertEqual(source.target, _DQ)
+            self.assertEqual(
+                _grid(source.args[0]), (0.017, -3, -32768, 32767, torch.int16)
+            )
+            self.assertEqual(source.args[0].args[0].target, _MDQ)
+        for node, (grid, source) in original_mx.items():
+            self.assertIn(node, ep.graph.nodes)
+            self.assertEqual(_grid(node), grid)
+            self.assertIs(node.args[0], source)
+        self.assertTrue(torch.equal(_execute(ep, x, y), expected))
+        self._assert_idempotent(ep)
 
     def test_uint4_activation_is_rejected_before_mx_adaptation(self):
         class UInt4Activation(torch.nn.Module):

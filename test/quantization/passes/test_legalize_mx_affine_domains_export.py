@@ -52,6 +52,26 @@ class _MixedCat(torch.nn.Module):
         return result, left, right
 
 
+class _NativeAffineSharedCat(torch.nn.Module):
+    def forward(self, x, y, z):
+        cat = torch.cat((_affine(x, 0.13, 7), _affine(y, 0.13, 7)), dim=-1)
+        multiply = _affine(cat * quantize_mx(z, "int8", -1), 0.017, -3)
+        addition = _affine(cat + quantize_mx(z, "int8", -1), 0.031, 13)
+        return multiply, addition
+
+
+class _RewrittenMixedSharedCat(torch.nn.Module):
+    def forward(self, x, y, z):
+        cat = _affine(
+            torch.cat((quantize_mx(x, "int8", -1), _affine(y, 0.13, 7)), dim=-1),
+            0.017,
+            -3,
+        )
+        multiply = quantize_mx(cat * quantize_mx(z, "int8", -1), "int8", -1)
+        addition = quantize_mx(cat + quantize_mx(z, "int8", -1), "int8", -1)
+        return multiply, addition
+
+
 class _AffineMxSigmoid(torch.nn.Module):
     def forward(self, value):
         original = torch.fake_quantize_per_tensor_affine(value, 0.3, 127, 0, 255)
@@ -482,6 +502,114 @@ class LegalizeMxAffineDomainsExportTest(unittest.TestCase):
                         for conversion in conversions:
                             self.assertIn(conversion.inputs[0], graph.outputs[1:])
                             self.assertIn(conversion.outputs[0], cat.inputs)
+
+    def _assert_shared_affine_cat(self, document, *, rewritten, optimize):
+        graph = document.model.subgraphs[0]
+        self.assertEqual(len(graph.inputs), 3)
+        self.assertEqual(len(graph.outputs), 2)
+        cats = _operators(document, _OPS.CONCATENATION)
+        self.assertEqual(len(cats), 1)
+        cat = cats[0][1]
+        cat_output = cat.outputs[0]
+        self.assertNotIn(cat_output, graph.outputs)
+        self.assertEqual(list(graph.tensors[cat_output].shape), [1, 64])
+        scale, zero_point = (0.017, -3) if rewritten else (0.13, 7)
+        for index in (*cat.inputs, cat_output):
+            self._assert_affine(graph.tensors[index], np.float32(scale), zero_point)
+            self.assertEqual(graph.tensors[index].quantization.quantizedDimension, 0)
+        quantizers = [op for _, op in _operators(document, _OPS.QUANTIZE)]
+        cat_adapters = [op for op in quantizers if op.inputs[0] == cat_output]
+        # O1 can CSE identical serialized adapters. The pre-fold regressions
+        # separately require two distinct Q/DQ boundaries to remain at CAT.
+        if optimize:
+            self.assertIn(len(cat_adapters), (1, 2))
+        else:
+            self.assertEqual(len(cat_adapters), 2)
+        adapter_outputs = {op.outputs[0] for op in cat_adapters}
+        for adapter in cat_adapters:
+            self._assert_mx(graph.tensors[adapter.outputs[0]])
+            self.assertEqual(list(graph.tensors[adapter.outputs[0]].shape), [1, 64])
+        self._assert_mx(graph.tensors[graph.inputs[2]])
+        arithmetic = []
+        for code in (_OPS.MUL, _OPS.ADD):
+            operations = _operators(document, code)
+            self.assertEqual(len(operations), 1)
+            operation = operations[0][1]
+            arithmetic.append(operation)
+            for index in (*operation.inputs, *operation.outputs):
+                self._assert_mx(graph.tensors[index])
+            self.assertIn(graph.inputs[2], operation.inputs)
+            self.assertEqual(len(set(operation.inputs) & adapter_outputs), 1)
+        if not optimize:
+            self.assertNotEqual(arithmetic[0].inputs[0], arithmetic[1].inputs[0])
+        self.assertEqual(len(quantizers), len(cat_adapters) + 2)
+        if rewritten:
+            self._assert_mx(graph.tensors[graph.inputs[0]])
+            self._assert_affine(graph.tensors[graph.inputs[1]], np.float32(0.13), 7)
+            for source, destination in zip(graph.inputs[:2], cat.inputs):
+                conversions = [
+                    op
+                    for op in quantizers
+                    if op.inputs[0] == source and op.outputs[0] == destination
+                ]
+                self.assertEqual(len(conversions), 1)
+            for output, operation in zip(graph.outputs, arithmetic):
+                self.assertEqual(operation.outputs[0], output)
+                self._assert_mx(graph.tensors[output])
+        else:
+            self.assertEqual(list(cat.inputs), list(graph.inputs[:2]))
+            for source in graph.inputs[:2]:
+                self._assert_affine(graph.tensors[source], np.float32(0.13), 7)
+            for output, operation, destination_scale, destination_zero in zip(
+                graph.outputs, arithmetic, (0.017, 0.031), (-3, 13)
+            ):
+                conversions = [
+                    op
+                    for op in quantizers
+                    if op.inputs[0] == operation.outputs[0] and op.outputs[0] == output
+                ]
+                self.assertEqual(len(conversions), 1)
+                self._assert_affine(
+                    graph.tensors[output],
+                    np.float32(destination_scale),
+                    destination_zero,
+                )
+
+    def test_native_affine_cat_shared_by_mixed_arithmetic_keeps_native_domain(self):
+        values = (
+            torch.linspace(-40.1, 40.3, 32).reshape(1, 32),
+            torch.linspace(-0.03, 0.05, 32).reshape(1, 32),
+            torch.linspace(-3.1, 3.3, 64).reshape(1, 64),
+        )
+        for optimize in (False, True):
+            with self.subTest(optimize=optimize):
+                document = _export(
+                    _NativeAffineSharedCat(),
+                    values,
+                    optimize=optimize,
+                    move_layout=True,
+                )
+                self._assert_shared_affine_cat(
+                    document, rewritten=False, optimize=optimize
+                )
+
+    def test_rewritten_mixed_cat_shared_by_mx_arithmetic_keeps_native_domain(self):
+        values = (
+            torch.linspace(-40.1, 40.3, 32).reshape(1, 32),
+            torch.linspace(-0.03, 0.05, 32).reshape(1, 32),
+            torch.linspace(-3.1, 3.3, 64).reshape(1, 64),
+        )
+        for optimize in (False, True):
+            with self.subTest(optimize=optimize):
+                document = _export(
+                    _RewrittenMixedSharedCat(),
+                    values,
+                    optimize=optimize,
+                    move_layout=True,
+                )
+                self._assert_shared_affine_cat(
+                    document, rewritten=True, optimize=optimize
+                )
 
     def test_sigmoid_keeps_original_input_and_native_output_quantization(self):
         value = torch.linspace(-3, 3, 32).reshape(1, 32)

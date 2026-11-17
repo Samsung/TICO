@@ -835,10 +835,22 @@ BMM(x,x) can therefore adapt only its right operand. Conversion sharing is local
 to one consumer and requires identical source and complete destination arguments.
 Raw shared operation outputs that cannot safely adopt a native output domain
 are rejected. Policy admission inspects every relevant output Q/DQ for MX,
-independently of selecting a single private output boundary. When an activation
+independently of selecting a single private output boundary. A completed native
+domain plan is restored first. A CAT whose inputs share a domain also keeps its
+native copy domain when the existing axis/block-preservation proof succeeds.
+These established outputs may feed several consumer-specific MX Q/DQ adapters;
+restarting the pre-fold manager does not reinterpret those adapters as ambiguous
+native output requests. This applies both to a previously rewritten CAT and to
+an unchanged same-domain CAT without a completed-plan marker. MX CATs must still
+pass the full axis and block checks, and a private destination boundary can still
+commute to the inputs when a native copy cannot preserve blocks.
+
+When native output selection or rewriting is still necessary and an activation
 input or any output boundary is MX, multiple output Q/DQ boundaries are rejected
 with node/op and native-output-selection context, regardless of quantizer creation
-order. No branch is selected arbitrarily and no existing quantizer is retargeted.
+order. In particular, affine-input SIGMOID with MX and affine output boundaries
+remains unsupported. No branch is selected arbitrarily, no quantizer is retargeted,
+and no adapter deduplication is required to accept a proven native domain.
 Affine-only multiple-boundary paths retain their existing behavior.
 QuantParam objects are copied instead of mutated across branches.
 The MX fake kernels also return independent fake tensors in accordance with the

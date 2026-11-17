@@ -385,20 +385,10 @@ class LegalizeMxAffineDomains(PassBase):
                 domain and domain.family == "mx"
                 for domain in source_domains + output_domains
             )
-            # Policy admission must inspect ALL boundaries. Ambiguous output
-            # selection must not erase the fact that an MX output was requested.
-            if has_mx and len(boundaries) > 1:
-                raise _error(
-                    node,
-                    "output",
-                    output_domains,
-                    "a single private native output domain",
-                    f"multiple output quantization boundaries ({len(boundaries)}) "
-                    "share this output; cannot safely select a native output "
-                    "domain while preserving every existing quantizer and consumer",
-                )
             output_domain = boundary[2] if boundary else None
             if node.meta.get(_DONE):
+                # Reuse the proven plan before interpreting consumer adapters
+                # as requests to choose a new native output domain.
                 domains[node] = node.meta[_DONE]
                 continue
             if (
@@ -419,6 +409,20 @@ class LegalizeMxAffineDomains(PassBase):
                     # the inputs and make the native CAT block-preserving.
                 else:
                     continue
+            # Only unresolved native outputs need one private boundary. A
+            # completed plan or proven CAT copy above already fixes that domain;
+            # its consumers may own several independent conversion boundaries.
+            # Admission still includes MX requests from EVERY output Q/DQ.
+            if has_mx and len(boundaries) > 1:
+                raise _error(
+                    node,
+                    "output",
+                    output_domains,
+                    "a single private native output domain",
+                    f"multiple output quantization boundaries ({len(boundaries)}) "
+                    "share this output; cannot safely select a native output "
+                    "domain while preserving every existing quantizer and consumer",
+                )
             if not has_mx:
                 continue
             if any(node.meta.get(key) for key in (EXPLICIT_EMBEDDING, FLOAT_EMBEDDING)):
