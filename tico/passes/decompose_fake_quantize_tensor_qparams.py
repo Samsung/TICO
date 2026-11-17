@@ -39,6 +39,46 @@ from tico.utils.trace_decorators import (
 from tico.utils.validate_args_kwargs import FakeQuantizePerTensorTQParamArgs
 
 
+class _BufferLookup:
+    """Precomputed buffer/constant maps for one ExportedProgram.
+
+    ``torch._export.utils.is_buffer`` and friends rebuild
+    ``graph_signature.inputs_to_*`` dictionaries on every call, which makes
+    per-node constant resolution quadratic in the number of buffers. Build
+    the maps once per pass run and answer the same queries in O(1).
+    """
+
+    def __init__(self, ep: ExportedProgram):
+        signature = ep.graph_signature
+        self._inputs_to_buffers = dict(signature.inputs_to_buffers)
+        self._non_persistent = set(signature.non_persistent_buffers)
+        self._inputs_to_lifted = dict(signature.inputs_to_lifted_tensor_constants)
+        self._constants = ep.constants
+        self._state_dict = ep.state_dict
+
+    def is_buffer(self, node: torch.fx.Node) -> bool:
+        return node.name in self._inputs_to_buffers
+
+    def get_buffer(self, node: torch.fx.Node) -> Union[torch.Tensor, None]:
+        buffer_name = self._inputs_to_buffers.get(node.name)
+        if buffer_name is None:
+            return None
+        if buffer_name in self._non_persistent:
+            return self._constants[buffer_name]
+        return self._state_dict[buffer_name]
+
+    def is_lifted_tensor_constant(self, node: torch.fx.Node) -> bool:
+        return node.name in self._inputs_to_lifted
+
+    def get_lifted_tensor_constant(
+        self, node: torch.fx.Node
+    ) -> Union[torch.Tensor, None]:
+        lifted_name = self._inputs_to_lifted.get(node.name)
+        if lifted_name is None:
+            return None
+        return self._constants[lifted_name]
+
+
 def get_constant_from_tensor(
     node: Union[torch.fx.Node, bool, int, float],
     ep: ExportedProgram,
@@ -46,6 +86,7 @@ def get_constant_from_tensor(
     _cache: Union[
         Dict[Union[str, bool, int, float], Union[bool, int, float]], None
     ] = None,
+    _buffers: Union[_BufferLookup, None] = None,
 ) -> Union[bool, int, float]:
     """Memoizing wrapper around `_get_constant_from_tensor_impl`.
 
@@ -54,17 +95,21 @@ def get_constant_from_tensor(
 
     `_cache` is internal and keyword-only: pass one dict per pass run to
     share memoized values across calls, or omit it for a one-off lookup.
+    `_buffers` precomputes the program's buffer maps once; without it the
+    (quadratic on torch 2.13) torch helpers are used per node.
     """
     if _cache is None:
-        return _get_constant_from_tensor_impl(node, ep)
+        return _get_constant_from_tensor_impl(node, ep, _buffers)
     key = node if isinstance(node, (bool, int, float)) else node.name
     if key not in _cache:
-        _cache[key] = _get_constant_from_tensor_impl(node, ep)
+        _cache[key] = _get_constant_from_tensor_impl(node, ep, _buffers)
     return _cache[key]
 
 
 def _get_constant_from_tensor_impl(
-    node: Union[torch.fx.Node, bool, int, float], ep: ExportedProgram
+    node: Union[torch.fx.Node, bool, int, float],
+    ep: ExportedProgram,
+    _buffers: Union[_BufferLookup, None] = None,
 ) -> Union[bool, int, float]:
     """Evaluate supported singleton constant expressions, then extract a scalar.
 
@@ -78,7 +123,14 @@ def _get_constant_from_tensor_impl(
         if isinstance(value, (bool, int, float)):
             return value
         assert isinstance(value, torch.fx.Node)
-        if is_buffer(ep, value):
+        if _buffers is not None:
+            if _buffers.is_buffer(value):
+                tensor = _buffers.get_buffer(value)
+            elif _buffers.is_lifted_tensor_constant(value):
+                tensor = _buffers.get_lifted_tensor_constant(value)
+            else:
+                tensor = None
+        elif is_buffer(ep, value):
             tensor = get_buffer(ep, value)
         elif is_lifted_tensor_constant(ep, value):
             tensor = get_lifted_tensor_constant(ep, value)
@@ -223,6 +275,7 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
         g = gm.graph
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
         _const_cache: Dict[Union[str, bool, int, float], Union[bool, int, float]] = {}
+        _buffers = _BufferLookup(exported_program)
 
         # Validate live tuple uses before rewriting any cachemask operation.
         # Dead masks and their dead consumers do not restrict inference export.
@@ -247,7 +300,10 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
             assert len(node.args) == 6
             try:
                 enabled = get_constant_from_tensor(
-                    node.args[3], exported_program, _cache=_const_cache
+                    node.args[3],
+                    exported_program,
+                    _cache=_const_cache,
+                    _buffers=_buffers,
                 )
             except (AssertionError, AttributeError, RuntimeError, ValueError) as exc:
                 raise RuntimeError(
@@ -335,8 +391,14 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                     continue
                 # Get constant tensors
                 ep = exported_program
-                s_value = get_constant_from_tensor(s, ep, _cache=_const_cache)
-                zp_value = int(get_constant_from_tensor(zp, ep, _cache=_const_cache))
+                s_value = get_constant_from_tensor(
+                    s, ep, _cache=_const_cache, _buffers=_buffers
+                )
+                zp_value = int(
+                    get_constant_from_tensor(
+                        zp, ep, _cache=_const_cache, _buffers=_buffers
+                    )
+                )
                 quant_kwargs = {
                     **node.kwargs,
                     **{"dtype": get_quant_type(quant_min, quant_max)},
@@ -372,8 +434,14 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
 
                 # Get constant tensors
                 ep = exported_program
-                s_value = get_constant_from_tensor(s, ep, _cache=_const_cache)
-                zp_value = int(get_constant_from_tensor(zp, ep, _cache=_const_cache))
+                s_value = get_constant_from_tensor(
+                    s, ep, _cache=_const_cache, _buffers=_buffers
+                )
+                zp_value = int(
+                    get_constant_from_tensor(
+                        zp, ep, _cache=_const_cache, _buffers=_buffers
+                    )
+                )
                 quant_kwargs = {
                     **node.kwargs,
                     **{"dtype": get_quant_type(quant_min, quant_max)},
