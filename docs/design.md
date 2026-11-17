@@ -368,8 +368,9 @@ the MX axis or element format changes, including changes after layout operations
 The Circle transpose-region optimization conservatively preserves MX regions;
 see the [Circle pass contracts](../tico/circle/README.md).
 
-`move_affine_quantize_before_layout` is an opt-in export policy (default: `False`)
-for `MXINT8 -> static reshape/permute chain -> existing per-tensor INT16 Q/DQ`.
+`move_affine_quantize_before_layout` is enabled by default (`True`) as the current
+NPU deployment export policy for
+`MXINT8 -> static reshape/permute chain -> existing per-tensor INT16 Q/DQ`.
 It moves the existing matching affine Q/DQ pair before the complete layout chain,
 so that chain exports with the original INT16 scale and zero point. It adds no
 observer, calibration, or quantization stage and retains the original MX quantizer
@@ -390,10 +391,12 @@ selected range unchanged. The source MX pair must use matching `int8`,
 The target backend must support the MXINT8-to-INT16 conversion at the new position
 and the selected INT16 layouts. This option makes no general claim about MX layout
 support on Circle or NPUs. Circle structural verification and CPU graph equivalence
-are separate from NPU compilation and execution validation.
+are separate from NPU compilation and execution validation. This limited rewrite
+does not solve general mixed-domain legalization. Set the option to `False` to
+disable the policy and retain the previous export behavior:
 
 ```python
-config = tico.CompileConfigV1(move_affine_quantize_before_layout=True)
+config = tico.CompileConfigV1(move_affine_quantize_before_layout=False)
 circle_model = tico.convert(quantized_model.eval(), example_args, config=config)
 ```
 
@@ -497,7 +500,7 @@ At the end of conversion:
 | `eliminate_rank_round_trip` | `False` | Currently not consumed; the pass is instantiated with `enabled=True`. |
 | `circle_optimize` | `True` | Shared Circle O1 document pipeline, after packing on the bytes path and before final packing on the file path. |
 | `preserve_embedding_quantization` | `False` | Conditionally inserts `PreserveEmbeddingQuantization` before `FoldQuantOps` to preserve explicit quantization boundaries in supported embedding paths during Circle export. |
-| `move_affine_quantize_before_layout` | `False` | Conditionally inserts `MoveAffineQuantizeBeforeLayout` after embedding-boundary preservation and before `FoldQuantOps`, moving existing INT16 affine Q/DQ ahead of supported static MXINT8 layout chains. |
+| `move_affine_quantize_before_layout` | `True` | Conditionally inserts `MoveAffineQuantizeBeforeLayout` after embedding-boundary preservation and before `FoldQuantOps`, moving existing INT16 affine Q/DQ ahead of supported static MXINT8 layout chains. |
 
 `CompileConfigBase.from_dict()` applies only keys already present on the dataclass. The
 current implementation ignores unknown fields rather than rejecting them. Configuration

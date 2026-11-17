@@ -20,16 +20,16 @@ import tico
 
 
 class MoveAffineCompileConfigTest(unittest.TestCase):
-    def test_default_and_missing_dictionary_key_are_disabled(self):
+    def test_default_and_missing_dictionary_key_are_enabled(self):
         for config in (
             tico.get_default_config(),
             tico.CompileConfigV1(),
             tico.CompileConfigV1.from_dict({"version": "1.0"}),
         ):
             with self.subTest(config=config):
-                self.assertIs(config.get("move_affine_quantize_before_layout"), False)
+                self.assertIs(config.get("move_affine_quantize_before_layout"), True)
                 self.assertIs(
-                    config.to_dict()["move_affine_quantize_before_layout"], False
+                    config.to_dict()["move_affine_quantize_before_layout"], True
                 )
 
     def test_constructor_get_set_and_dictionary_roundtrip(self):

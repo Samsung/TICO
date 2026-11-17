@@ -141,7 +141,14 @@ class MoveAffineQuantizeBeforeLayoutExportTest(unittest.TestCase):
             for enabled in (None, False, True):
                 with self.subTest(optimize=optimize, enabled=enabled):
                     document = _export(_AttentionProjection(), value, optimize, enabled)
-                    self._assert_contracts(document, 32, moved=enabled is True)
+                    self._assert_contracts(document, 32, moved=enabled is not False)
+
+    def test_omitted_compile_config_uses_default_layout_policy(self):
+        value = torch.linspace(-3, 3, 192).reshape(1, 3, 64)
+        converted = tico.convert(_AttentionProjection(head_dim=16).eval(), (value,))
+        document = CircleDocument.from_bytes(converted.circle_binary)
+        document.verify(raise_on_error=True)
+        self._assert_contracts(document, 16, moved=True)
 
     def test_shared_projection_keeps_unrelated_mx_layout_and_output(self):
         value = torch.linspace(-3.01, 3.03, 192).reshape(1, 3, 64)

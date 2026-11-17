@@ -19,6 +19,7 @@ import unittest
 import tico
 import torch
 from circle_schema import circle
+from tico.circle import CircleDocument
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.mx.mx_ops import quantize_mx
 
@@ -107,15 +108,20 @@ class _MXPadToAffine(torch.nn.Module):
         return torch.fake_quantize_per_tensor_affine(value, 0.5, 0, -32768, 32767)
 
 
-def _export(module, value, optimize):
+def _export(module, value, optimize, *, move_affine_quantize_before_layout=None):
+    config = tico.CompileConfigV1(circle_optimize=optimize)
+    if move_affine_quantize_before_layout is not None:
+        config.set(
+            "move_affine_quantize_before_layout", move_affine_quantize_before_layout
+        )
     converted = tico.convert(
         module.eval(),
         (value,),
-        config=tico.CompileConfigV1(circle_optimize=optimize),
+        config=config,
     )
-    return circle.Model.ModelT.InitFromObj(
-        circle.Model.Model.GetRootAsModel(converted.circle_binary, 0)
-    )
+    document = CircleDocument.from_bytes(converted.circle_binary)
+    document.verify(raise_on_error=True)
+    return document.model
 
 
 def _quantize_operators(model):
@@ -231,29 +237,80 @@ class MXAxisExportTest(unittest.TestCase):
 
     def test_mixed_affine_and_mx_boundaries_preserve_the_transposed_axis(self):
         for optimize in (False, True):
-            with self.subTest(optimize=optimize):
-                model = _export(_MixedMXAffine(), torch.ones(1, 2, 3, 64), optimize)
-                graph = model.subgraphs[0]
-                quantizes = _quantize_operators(model)
-                self.assertEqual(len(quantizes), 2)
-                transitions = [
-                    (graph.tensors[op.inputs[0]], graph.tensors[op.outputs[0]])
-                    for op in quantizes
-                ]
-                into_mx = next(
-                    pair
-                    for pair in transitions
-                    if pair[1].type == circle.TensorType.TensorType.MXINT8
-                )
-                from_mx = next(
-                    pair
-                    for pair in transitions
-                    if pair[0].type == circle.TensorType.TensorType.MXINT8
-                )
-                self.assertEqual(into_mx[0].type, circle.TensorType.TensorType.INT16)
-                self._assert_tensor(into_mx[1], (1, 2, 3, 64), 3)
-                self._assert_tensor(from_mx[0], (1, 2, 64, 3), 2)
-                self.assertEqual(from_mx[1].type, circle.TensorType.TensorType.INT16)
+            for move_before_layout in (False, True):
+                with self.subTest(
+                    optimize=optimize, move_before_layout=move_before_layout
+                ):
+                    model = _export(
+                        _MixedMXAffine(),
+                        torch.ones(1, 2, 3, 64),
+                        optimize,
+                        move_affine_quantize_before_layout=move_before_layout,
+                    )
+                    graph = model.subgraphs[0]
+                    quantizes = _quantize_operators(model)
+                    self.assertEqual(len(quantizes), 2)
+                    into_mx = next(
+                        op
+                        for op in quantizes
+                        if graph.tensors[op.outputs[0]].type
+                        == circle.TensorType.TensorType.MXINT8
+                    )
+                    from_mx = next(
+                        op
+                        for op in quantizes
+                        if graph.tensors[op.inputs[0]].type
+                        == circle.TensorType.TensorType.MXINT8
+                    )
+                    self.assertEqual(len(graph.inputs), 1)
+                    self.assertEqual(len(graph.outputs), 1)
+                    self.assertEqual(graph.inputs[0], into_mx.inputs[0])
+                    source = graph.tensors[into_mx.inputs[0]]
+                    self._assert_tensor(
+                        source, (1, 2, 3, 64), 0, circle.TensorType.TensorType.INT16
+                    )
+                    self.assertEqual(list(source.quantization.scale), [0.25])
+                    self.assertEqual(list(source.quantization.zeroPoint), [0])
+                    self._assert_tensor(
+                        graph.tensors[into_mx.outputs[0]],
+                        (1, 2, 3, 64),
+                        3,
+                        circle.TensorType.TensorType.MXINT8,
+                    )
+                    conversion_shape = (
+                        (1, 2, 3, 64) if move_before_layout else (1, 2, 64, 3)
+                    )
+                    self._assert_tensor(
+                        graph.tensors[from_mx.inputs[0]],
+                        conversion_shape,
+                        3 if move_before_layout else 2,
+                        circle.TensorType.TensorType.MXINT8,
+                    )
+                    for tensor, shape in (
+                        (graph.tensors[from_mx.outputs[0]], conversion_shape),
+                        (graph.tensors[graph.outputs[0]], (1, 2, 64, 3)),
+                    ):
+                        self._assert_tensor(
+                            tensor, shape, 0, circle.TensorType.TensorType.INT16
+                        )
+                        self.assertEqual(list(tensor.quantization.scale), [0.5])
+                        self.assertEqual(list(tensor.quantization.zeroPoint), [0])
+                    transposes = [
+                        op
+                        for op in graph.operators
+                        if model.operatorCodes[op.opcodeIndex].builtinCode
+                        == circle.BuiltinOperator.BuiltinOperator.TRANSPOSE
+                    ]
+                    self.assertEqual(len(transposes), 1)
+                    transpose = transposes[0]
+                    if move_before_layout:
+                        self.assertEqual(into_mx.outputs[0], from_mx.inputs[0])
+                        self.assertEqual(from_mx.outputs[0], transpose.inputs[0])
+                        self.assertEqual(transpose.outputs[0], graph.outputs[0])
+                    else:
+                        self.assertEqual(into_mx.outputs[0], transpose.inputs[0])
+                        self.assertEqual(transpose.outputs[0], from_mx.inputs[0])
+                        self.assertEqual(from_mx.outputs[0], graph.outputs[0])
 
     def test_shared_quantized_input_requantizes_after_transpose(self):
         for optimize in (False, True):
