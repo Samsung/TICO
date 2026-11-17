@@ -207,6 +207,59 @@ class _NarrowOutput(torch.nn.Module):
         )
 
 
+class _WithIndependentClamp(torch.nn.Module):
+    def __init__(self, include_clamp):
+        super().__init__()
+        self.include_clamp = include_clamp
+
+    def forward(self, x, y):
+        affine_source = _affine(x, 0.125, 0)
+        mx_source = quantize_mx(y, "int8", -1)
+        first = quantize_mx(affine_source * mx_source, "int8", -1)
+        second = quantize_mx(first.relu(), "int8", -1)
+        if self.include_clamp:
+            other = _affine(torch.clamp(affine_source, -0.22, 0.88), 0.125, 0)
+            return second, other
+        return second
+
+
+class _MultipleOutputBoundaries(torch.nn.Module):
+    def __init__(self, mx_first, include_mx=True):
+        super().__init__()
+        self.mx_first = mx_first
+        self.include_mx = include_mx
+
+    def forward(self, x):
+        source = _affine(x, 0.125, 0)
+        raw = source.sigmoid()
+        if self.mx_first:
+            first = (
+                quantize_mx(raw, "int8", -1)
+                if self.include_mx
+                else _affine(raw, 0.007, 0)
+            )
+            affine_result = _affine(raw, 0.003, 0)
+        else:
+            affine_result = _affine(raw, 0.003, 0)
+            first = (
+                quantize_mx(raw, "int8", -1)
+                if self.include_mx
+                else _affine(raw, 0.007, 0)
+            )
+        return first, affine_result
+
+
+class _SingleMxOutputBoundary(torch.nn.Module):
+    def __init__(self, shared_raw=False):
+        super().__init__()
+        self.shared_raw = shared_raw
+
+    def forward(self, x):
+        raw = _affine(x, 0.125, 0).sigmoid()
+        result = quantize_mx(raw, "int8", -1)
+        return (result, raw) if self.shared_raw else result
+
+
 def _operators(document, code):
     return [
         (index, op)
@@ -643,6 +696,155 @@ class LegalizeMxAffineDomainsExportTest(unittest.TestCase):
                     self.assertEqual(quantizers[0][1].inputs[0], split.outputs[0])
                     self.assertEqual(quantizers[0][1].outputs[0], graph.outputs[0])
                     self._assert_affine(graph.tensors[graph.outputs[0]], 0.125, 5)
+
+    def test_independent_clamp_restart_preserves_mx_path_and_affine_output(self):
+        x = torch.linspace(-4, 4, 64).reshape(1, 64)
+        y = torch.linspace(0.01, 2, 64).reshape(1, 64)
+        for include_clamp in (False, True):
+            for optimize in (False, True):
+                with self.subTest(include_clamp=include_clamp, optimize=optimize):
+                    document = _export(
+                        _WithIndependentClamp(include_clamp),
+                        (x, y),
+                        optimize=optimize,
+                        move_layout=True,
+                    )
+                    graph = document.model.subgraphs[0]
+                    self.assertEqual(len(graph.inputs), 2)
+                    self.assertEqual(len(graph.outputs), 2 if include_clamp else 1)
+                    self._assert_affine(graph.tensors[graph.inputs[0]], 0.125, 0)
+                    self._assert_mx(graph.tensors[graph.inputs[1]])
+                    self._assert_mx(graph.tensors[graph.outputs[0]])
+                    multiplies = _operators(document, _OPS.MUL)
+                    relus = _operators(document, _OPS.RELU)
+                    self.assertEqual(len(multiplies), 1)
+                    self.assertEqual(len(relus), 1)
+                    multiply, relu = multiplies[0][1], relus[0][1]
+                    for operation in (multiply, relu):
+                        for index in (*operation.inputs, *operation.outputs):
+                            self._assert_mx(graph.tensors[index])
+                    self.assertEqual(multiply.outputs[0], relu.inputs[0])
+                    self.assertEqual(relu.outputs[0], graph.outputs[0])
+                    quantizers = _operators(document, _OPS.QUANTIZE)
+                    self.assertEqual(len(quantizers), 1)
+                    adapter = quantizers[0][1]
+                    self.assertEqual(adapter.inputs[0], graph.inputs[0])
+                    self.assertEqual(adapter.outputs[0], multiply.inputs[0])
+                    self.assertEqual(multiply.inputs[1], graph.inputs[1])
+                    minimums = _operators(document, _OPS.MINIMUM)
+                    maximums = _operators(document, _OPS.MAXIMUM)
+                    self.assertEqual(len(minimums), 1 if include_clamp else 0)
+                    self.assertEqual(len(maximums), 1 if include_clamp else 0)
+                    if include_clamp:
+                        self._assert_affine(graph.tensors[graph.outputs[1]], 0.125, 0)
+                        minimum, maximum = minimums[0][1], maximums[0][1]
+                        self.assertEqual(minimum.inputs[0], graph.inputs[0])
+                        self.assertEqual(minimum.outputs[0], maximum.inputs[0])
+                        self.assertEqual(maximum.outputs[0], graph.outputs[1])
+                        for operation in (minimum, maximum):
+                            for index in (*operation.inputs, *operation.outputs):
+                                self._assert_affine(graph.tensors[index], 0.125, 0)
+                        # Bounds are rounded independently in the preserved .125 grid:
+                        # -.22 -> code -2, .88 -> code 7.
+                        for operation, expected_code in ((minimum, 7), (maximum, -2)):
+                            bound = graph.tensors[operation.inputs[1]]
+                            codes = np.frombuffer(
+                                document.model.buffers[bound.buffer].data,
+                                dtype=np.int16,
+                            )
+                            np.testing.assert_array_equal(codes, [expected_code])
+
+    def test_multiple_output_boundaries_detect_mx_with_affine_only_input(self):
+        value = torch.linspace(-4, 4, 64).reshape(1, 64)
+        for mx_first in (False, True):
+            for optimize in (False, True):
+                with self.subTest(mx_first=mx_first, optimize=optimize):
+                    with self.assertRaises(NotYetSupportedError) as caught:
+                        _export(
+                            _MultipleOutputBoundaries(mx_first),
+                            (value,),
+                            optimize=optimize,
+                            move_layout=True,
+                        )
+                    message = str(caught.exception).lower()
+                    self.assertIn("sigmoid", message)
+                    self.assertIn("aten.sigmoid.default", message)
+                    self.assertIn("multiple", message)
+                    self.assertIn("output", message)
+                    self.assertIn("boundar", message)
+                    self.assertIn("native", message)
+
+    def test_single_private_mx_output_boundary_still_legalizes_affine_input(self):
+        value = torch.linspace(-4, 4, 64).reshape(1, 64)
+        for optimize in (False, True):
+            with self.subTest(optimize=optimize):
+                document = _export(
+                    _SingleMxOutputBoundary(),
+                    (value,),
+                    optimize=optimize,
+                    move_layout=True,
+                )
+                graph = document.model.subgraphs[0]
+                self.assertEqual(len(graph.inputs), 1)
+                self.assertEqual(len(graph.outputs), 1)
+                self._assert_affine(graph.tensors[graph.inputs[0]], 0.125, 0)
+                logistic = _operators(document, _OPS.LOGISTIC)
+                self.assertEqual(len(logistic), 1)
+                operation = logistic[0][1]
+                for index in (*operation.inputs, *operation.outputs):
+                    self._assert_mx(graph.tensors[index])
+                self.assertEqual(operation.outputs[0], graph.outputs[0])
+                quantizers = _operators(document, _OPS.QUANTIZE)
+                self.assertEqual(len(quantizers), 1)
+                adapter = quantizers[0][1]
+                self.assertEqual(adapter.inputs[0], graph.inputs[0])
+                self.assertEqual(adapter.outputs[0], operation.inputs[0])
+
+    def test_private_boundary_requirement_still_rejects_shared_raw_output(self):
+        value = torch.linspace(-4, 4, 64).reshape(1, 64)
+        for optimize in (False, True):
+            with self.subTest(optimize=optimize):
+                with self.assertRaises(NotYetSupportedError) as caught:
+                    _export(
+                        _SingleMxOutputBoundary(shared_raw=True),
+                        (value,),
+                        optimize=optimize,
+                        move_layout=True,
+                    )
+                message = str(caught.exception).lower()
+                self.assertIn("sigmoid", message)
+                self.assertIn("shared", message)
+                self.assertIn("output", message)
+                self.assertIn("native", message)
+
+    def test_affine_only_multiple_output_boundaries_remain_supported(self):
+        value = torch.linspace(-4, 4, 64).reshape(1, 64)
+        for mx_first in (False, True):
+            for optimize in (False, True):
+                with self.subTest(first_grid_first=mx_first, optimize=optimize):
+                    document = _export(
+                        _MultipleOutputBoundaries(mx_first, include_mx=False),
+                        (value,),
+                        optimize=optimize,
+                        move_layout=True,
+                    )
+                    graph = document.model.subgraphs[0]
+                    self.assertEqual(len(graph.inputs), 1)
+                    self.assertEqual(len(graph.outputs), 2)
+                    self._assert_affine(graph.tensors[graph.inputs[0]], 0.125, 0)
+                    self._assert_affine(
+                        graph.tensors[graph.outputs[0]], np.float32(0.007), 0
+                    )
+                    self._assert_affine(
+                        graph.tensors[graph.outputs[1]], np.float32(0.003), 0
+                    )
+                    logistic = _operators(document, _OPS.LOGISTIC)
+                    self.assertEqual(len(logistic), 1)
+                    for index in (*logistic[0][1].inputs, *logistic[0][1].outputs):
+                        self.assertEqual(graph.tensors[index].type, _TYPES.INT16)
+                    self.assertFalse(
+                        any(tensor.type == _TYPES.MXINT8 for tensor in graph.tensors)
+                    )
 
 
 if __name__ == "__main__":

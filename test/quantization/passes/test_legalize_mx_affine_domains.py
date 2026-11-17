@@ -100,6 +100,31 @@ class _Unary(torch.nn.Module):
         return result
 
 
+class _MultipleOutputBoundaries(torch.nn.Module):
+    def __init__(self, mx_first, include_mx=True):
+        super().__init__()
+        self.mx_first, self.include_mx = mx_first, include_mx
+
+    def forward(self, x):
+        source = _affine(x, 0.125, 0)
+        raw = source.sigmoid()
+        if self.mx_first:
+            first = (
+                quantize_mx(raw, "int8", -1)
+                if self.include_mx
+                else _affine(raw, 0.005, 1)
+            )
+            second = _affine(raw, 0.003, 0)
+        else:
+            second = _affine(raw, 0.003, 0)
+            first = (
+                quantize_mx(raw, "int8", -1)
+                if self.include_mx
+                else _affine(raw, 0.005, 1)
+            )
+        return first, second
+
+
 class _Binary(torch.nn.Module):
     def __init__(self, kind="mul", mx_input=True, mx_output=False, alpha=1):
         super().__init__()
@@ -1116,6 +1141,58 @@ class LegalizeMxAffineDomainsTest(unittest.TestCase):
                 message = str(caught.exception).lower()
                 self.assertIn("sigmoid", message)
                 self.assertTrue("shared" in message or "user" in message)
+
+    def test_multiple_output_boundaries_find_mx_after_affine_only_input(self):
+        x = torch.linspace(-4, 4, 64).reshape(1, 64)
+        for mx_first in (False, True):
+            with self.subTest(mx_first=mx_first):
+                ep = _export(_MultipleOutputBoundaries(mx_first), x)
+                sigmoid = _nodes(ep, torch.ops.aten.sigmoid.default)[0]
+                self.assertEqual(sigmoid.args[0].target, _DQ)
+                quantizers = _nodes(ep, _Q) + _nodes(ep, _MQ)
+                original_arguments = {
+                    node: (node.args, dict(node.kwargs)) for node in quantizers
+                }
+                original_graph = str(ep.graph)
+                original_signature = copy.deepcopy(ep.graph_signature)
+                original_state = {
+                    name: value.clone() for name, value in ep.state_dict.items()
+                }
+                with self.assertRaises(NotYetSupportedError) as caught:
+                    _legalize(ep)
+                message = str(caught.exception)
+                self.assertIn(sigmoid.name, message)
+                self.assertIn(str(sigmoid.target), message)
+                self.assertIn("multiple", message.lower())
+                self.assertIn("output", message.lower())
+                self.assertIn("boundar", message.lower())
+                self.assertIn("native", message.lower())
+                self.assertNotIn("missing quantization boundary", message.lower())
+                self.assertEqual(str(ep.graph), original_graph)
+                self.assertEqual(ep.graph_signature, original_signature)
+                for node, arguments in original_arguments.items():
+                    self.assertIn(node, ep.graph.nodes)
+                    self.assertEqual((node.args, dict(node.kwargs)), arguments)
+                self.assertEqual(set(ep.state_dict), set(original_state))
+                for name, value in original_state.items():
+                    self.assertTrue(torch.equal(ep.state_dict[name], value))
+                ep.graph.lint()
+                ep.validate()
+
+    def test_affine_only_multiple_output_boundaries_remain_a_noop(self):
+        x = torch.linspace(-4, 4, 64).reshape(1, 64)
+        for first_boundary_first in (False, True):
+            with self.subTest(first_boundary_first=first_boundary_first):
+                ep = _export(
+                    _MultipleOutputBoundaries(first_boundary_first, include_mx=False), x
+                )
+                original_graph = str(ep.graph)
+                original = _execute(ep, x)
+                self.assertFalse(_legalize(ep).modified)
+                self.assertEqual(str(ep.graph), original_graph)
+                for actual, expected in zip(_execute(ep, x), original):
+                    self.assertTrue(torch.equal(actual, expected))
+                self._assert_idempotent(ep)
 
     def test_mx_gamma_is_not_reinterpreted_as_affine_weight(self):
         class Gamma(torch.nn.Module):

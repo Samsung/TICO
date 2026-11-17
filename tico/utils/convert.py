@@ -333,19 +333,23 @@ def _prepare_exported_program(
     # TODO Give an option to enable quantiztion to user
     enable_quantization = has_quantization_ops(exported_program.graph)
     if enable_quantization:
-        quantization_passes: list[PassBase] = []
+        pre_fold_passes: list[PassBase] = []
         if config.get("preserve_embedding_quantization") is True:
-            quantization_passes.append(PreserveEmbeddingQuantization())
+            pre_fold_passes.append(PreserveEmbeddingQuantization())
         # Commute explicit Q/DQ only after layout normalization and boundary
         # protection, before folding attempts to propagate MX blocks through views.
         if config.get("move_affine_quantize_before_layout") is True:
-            quantization_passes.append(MoveAffineQuantizeBeforeLayout())
+            pre_fold_passes.append(MoveAffineQuantizeBeforeLayout())
         # Additional native rounding is an opt-in policy. Keep Q/DQ provenance
         # for executable reference semantics, and select activation before bias.
         if config.get("legalize_mx_affine_domains") is True:
-            quantization_passes.append(LegalizeMxAffineDomains())
-        quantization_passes.extend(
-            [
+            pre_fold_passes.append(LegalizeMxAffineDomains())
+        # Complete Q/DQ rewrites before entering the folded representation.
+        # Each manager retains RESTART within its phase. A downstream change
+        # (e.g. Clamp legalization) must never re-enter pre-fold legalization.
+        PassManager(passes=pre_fold_passes).run(exported_program)
+        quantize_graph = PassManager(
+            passes=[
                 FoldQuantOps(),
                 RemoveWeightDequantOp(),
                 PropagateQParamForward(),
@@ -357,7 +361,6 @@ def _prepare_exported_program(
                 InsertQuantizeOnDtypeMismatch(),
             ]
         )
-        quantize_graph = PassManager(passes=quantization_passes)
         quantize_graph.run(exported_program)
 
         # For `torch.ops.aten.split_with_sizes`, the qparam is attached to the corresponding `getitem` nodes.

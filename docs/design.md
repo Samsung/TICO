@@ -333,11 +333,17 @@ The second graph snapshot is emitted after this phase when graph dumping is enab
 ### 5.6 Conditional quantization bundle
 
 TICO detects whether the graph contains quantization operations. Only then it runs
-the following bundle. `PreserveEmbeddingQuantization` is prepended when
-`config.get("preserve_embedding_quantization") is True`. When
-`config.get("move_affine_quantize_before_layout") is True`,
-`MoveAffineQuantizeBeforeLayout` runs after that boundary-preservation policy and
-before `FoldQuantOps`:
+two separate pass managers, each using the default `RESTART` strategy. The first
+manager completes the pre-fold Q/DQ rewrites in this order:
+
+```text
+PreserveEmbeddingQuantization       (preserve_embedding_quantization=True)
+MoveAffineQuantizeBeforeLayout      (move_affine_quantize_before_layout=True)
+LegalizeMxAffineDomains             (legalize_mx_affine_domains=True)
+```
+
+Q/DQ provenance is still available throughout this phase. Once this manager
+finishes, conversion crosses into the folded representation using a second manager:
 
 ```text
 FoldQuantOps
@@ -350,6 +356,14 @@ QuantizeBias
 RemoveUnusedPlaceholder
 InsertQuantizeOnDtypeMismatch
 ```
+
+A modification by a downstream pass restarts only this second manager at
+`FoldQuantOps`; it cannot re-enter embedding protection, layout movement or MX/affine
+pre-fold legalization after their Q/DQ provenance has been removed. This retains
+normal downstream fixed-point processing, including quantized Clamp legalization,
+and determines activation domains before bias quantization. The phase boundary
+also applies when the MX/affine option is disabled; the existing enabled pre-fold
+policies keep their order and downstream passes retain their restart behavior.
 
 `LegalizeQuantizedClamp` converts constant Clamp bounds to the activation's
 per-tensor integer domain, aligns the Clamp input to that same scale and zero point,
@@ -739,8 +753,9 @@ its integer boundaries; it must not use fabricated qparams to satisfy NPU checks
 
 Explicit embedding preservation is an opt-in export policy:
 `preserve_embedding_quantization=True` inserts `PreserveEmbeddingQuantization`
-immediately before `FoldQuantOps`; omission or `False` retains the existing policy
-and following pass order. It keeps the supported lookup's float region and explicit
+first in the pre-fold manager, before optional layout movement and domain
+legalization; omission or `False` retains the existing policy and following pass
+order. It keeps the supported lookup's float region and explicit
 Q/DQ boundaries while preserving shared integer weights and the output ABI.
 GATHER remains a selection operation and does not requantize codes across domains.
 
@@ -758,8 +773,11 @@ external backend validation remain separate checks; see
 
 `CompileConfigV1(legalize_mx_affine_domains=True)` inserts
 `LegalizeMxAffineDomains` after embedding protection and
-`MoveAffineQuantizeBeforeLayout`, before `FoldQuantOps`, propagation and
-`QuantizeBias`. Its initial default is **False**. The independent layout option
+`MoveAffineQuantizeBeforeLayout` in the pre-fold manager. That manager completes
+before `FoldQuantOps`, propagation and `QuantizeBias` enter their separate restart
+scope; downstream changes cannot execute this Q/DQ-dependent policy on a folded
+graph. See [quantization phase ordering](#56-conditional-quantization-bundle).
+Its initial default is **False**. The independent layout option
 still defaults to **True**: #1130 commutes an existing quantizer equivalently;
 this policy can introduce additional rounding. This change is based on #1130
 head `22caefedf503d990d195f2b9d49d93c4c8f94eac` and depends on that PR until it
@@ -816,7 +834,13 @@ grid is copied from an input. Source connections are updated by operand position
 BMM(x,x) can therefore adapt only its right operand. Conversion sharing is local
 to one consumer and requires identical source and complete destination arguments.
 Raw shared operation outputs that cannot safely adopt a native output domain
-are rejected. QuantParam objects are copied instead of mutated across branches.
+are rejected. Policy admission inspects every relevant output Q/DQ for MX,
+independently of selecting a single private output boundary. When an activation
+input or any output boundary is MX, multiple output Q/DQ boundaries are rejected
+with node/op and native-output-selection context, regardless of quantizer creation
+order. No branch is selected arbitrarily and no existing quantizer is retargeted.
+Affine-only multiple-boundary paths retain their existing behavior.
+QuantParam objects are copied instead of mutated across branches.
 The MX fake kernels also return independent fake tensors in accordance with the
 non-aliasing custom-op schema, preserving shared affine/MX graph outputs.
 

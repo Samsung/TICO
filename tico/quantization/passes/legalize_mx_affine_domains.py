@@ -232,17 +232,15 @@ def _supported_range(node, domain, role):
         )
 
 
-def _boundary(node):
-    """Return the sole output Q/DQ. Changing raw shared outputs is unsafe."""
+def _boundaries(node):
+    """Discover every supported output Q/DQ before selecting a private one."""
     pairs = []
     for q in node.users:
         for dq in q.users:
             pair = _pair(dq)
             if pair is not None and pair[0] is q:
                 pairs.append((q, dq, pair[1]))
-    if len(pairs) != 1:
-        return None
-    return pairs[0]
+    return pairs
 
 
 def _exclusive(node, q, dq):
@@ -373,7 +371,8 @@ class LegalizeMxAffineDomains(PassBase):
                 continue
             if node.target not in _BINARY | _UNARY | {torch.ops.aten.cat.default}:
                 continue
-            boundary = _boundary(node)
+            boundaries = _boundaries(node)
+            boundary = boundaries[0] if len(boundaries) == 1 else None
             args = _arguments(node)
             sources = (
                 list(args[0])
@@ -381,6 +380,23 @@ class LegalizeMxAffineDomains(PassBase):
                 else (list(args[:2]) if node.target in _BINARY else [args[0]])
             )
             source_domains = [domains.get(source) for source in sources]
+            output_domains = [pair[2] for pair in boundaries]
+            has_mx = any(
+                domain and domain.family == "mx"
+                for domain in source_domains + output_domains
+            )
+            # Policy admission must inspect ALL boundaries. Ambiguous output
+            # selection must not erase the fact that an MX output was requested.
+            if has_mx and len(boundaries) > 1:
+                raise _error(
+                    node,
+                    "output",
+                    output_domains,
+                    "a single private native output domain",
+                    f"multiple output quantization boundaries ({len(boundaries)}) "
+                    "share this output; cannot safely select a native output "
+                    "domain while preserving every existing quantizer and consumer",
+                )
             output_domain = boundary[2] if boundary else None
             if node.meta.get(_DONE):
                 domains[node] = node.meta[_DONE]
@@ -403,9 +419,7 @@ class LegalizeMxAffineDomains(PassBase):
                     # the inputs and make the native CAT block-preserving.
                 else:
                     continue
-            if not any(
-                d and d.family == "mx" for d in source_domains + [output_domain]
-            ):
+            if not has_mx:
                 continue
             if any(node.meta.get(key) for key in (EXPLICIT_EMBEDDING, FLOAT_EMBEDDING)):
                 raise _error(
