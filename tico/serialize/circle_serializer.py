@@ -294,11 +294,37 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
     logger.debug("---------------Export tensors--------------")
     buf_name_to_data = {name: buf for name, buf in ep.named_buffers()}
     shared_tensors: SharedTensorRegistry = {}
+    split_results: dict[tuple[torch.fx.Node, int], torch.fx.Node] = {}
 
     for node in ep.graph.nodes:
         if node.op == "call_function":
             if node.target in multiple_output_ops:
                 continue
+            if node.target == operator.getitem:
+                source, index = node.args
+                if (
+                    isinstance(source, torch.fx.Node)
+                    and source.target == torch.ops.aten.split_with_sizes.default
+                ):
+                    count = len(source.meta["val"])
+                    if type(index) is not int or not -count <= index < count:
+                        raise NotYetSupportedError(
+                            f"{node.name}: invalid split tensor output index {index!r}."
+                        )
+                    key = source, index % count
+                    canonical = split_results.get(key)
+                    if canonical is not None:
+                        if _get_quantization_alias_key(
+                            node
+                        ) != _get_quantization_alias_key(canonical):
+                            raise NotYetSupportedError(
+                                f"{node.name}: repeated split output {key[1]} has a "
+                                "different quantization domain; keep an explicit "
+                                "Quantize after the split result."
+                            )
+                        _register_tensor_alias(graph, node, canonical.name)
+                        continue
+                    split_results[key] = node
             node_val = node.meta["val"]
             if node_val.layout != torch.strided:
                 raise RuntimeError(

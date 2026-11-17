@@ -24,6 +24,8 @@ from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.quant_param import QPARAM_KEY
+from tico.utils.errors import NotYetSupportedError
 from tico.utils.validate_args_kwargs import AddTensorArgs
 
 
@@ -42,6 +44,13 @@ class AddVisitor(NodeVisitor):
         node: torch.fx.Node,
     ) -> circle.Operator.OperatorT:
         args = AddTensorArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+        if args.alpha != 1:
+            raise NotYetSupportedError(
+                f"{node.name} ({node.target}): operand other has alpha={args.alpha}; "
+                f"source={getattr(args.other, 'meta', {}).get(QPARAM_KEY)}, "
+                "required=Circle ADD(alpha=1); no native alpha operand. Preserve an explicit multiply "
+                "with its own quantization boundary before exporting."
+            )
         input = args.input
         other = args.other
 
