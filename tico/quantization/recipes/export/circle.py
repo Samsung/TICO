@@ -29,11 +29,20 @@ from tico.utils.utils import SuppressWarning
 
 
 def resolve_compile_config(export_config: Mapping[str, Any]) -> CompileConfigV1:
-    """Resolve the recipe's explicit Circle embedding preservation policy."""
-    preserve = export_config.get("preserve_embedding_quantization", False)
-    if not isinstance(preserve, bool):
-        raise TypeError("export.preserve_embedding_quantization must be a boolean.")
-    return CompileConfigV1(preserve_embedding_quantization=preserve)
+    """Resolve explicit recipe policies while retaining public compile defaults."""
+    config = CompileConfigV1()
+    for name in (
+        "preserve_embedding_quantization",
+        "move_affine_quantize_before_layout",
+        "legalize_mx_affine_domains",
+    ):
+        if name not in export_config:
+            continue
+        value = export_config[name]
+        if not isinstance(value, bool):
+            raise TypeError(f"export.{name} must be a boolean.")
+        setattr(config, name, value)
+    return config
 
 
 def convert_and_save_circle(

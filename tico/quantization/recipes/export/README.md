@@ -81,8 +81,23 @@ converts and saves it, and returns `None`. Callers own input preparation,
 device placement, output-directory creation, and staged I/O contracts. Its optional
 `config=` argument forwards the public compile configuration. The LLaMA, Qwen3-VL,
 and Gemma4 staged exporters accept `compile_config=` and forward it to each stage;
-`export_full_circle()` accepts `config=`. Recipe adapters resolve the boolean
-`export.preserve_embedding_quantization` (default `false`) into that configuration.
+`export_full_circle()` accepts `config=`. Recipe adapters use
+`resolve_compile_config(export_cfg)` to resolve these boolean policies:
+
+| Recipe export option | Default | Effect |
+|---|---|---|
+| `preserve_embedding_quantization` | `false` | Preserve supported explicit embedding grids. |
+| `move_affine_quantize_before_layout` | `true` | Move existing fixed per-tensor INT16 Q/DQ before private reshape/permute chains. |
+| `legalize_mx_affine_domains` | `false` | Add operand MX adapters and native MX output rounding at supported explicit quantization boundaries. |
+
+Omitted keys retain `CompileConfigV1` defaults; explicit `false` is preserved.
+Strings, numbers, and `null` are rejected rather than converted to booleans. The
+same resolved configuration reaches every staged conversion, including Qwen3-VL
+vision, embedding, prefill/decode, DeepStack, and LM-head artifacts. Enabling the
+MX legalizer can add rounding; it preserves frozen source quantizers and requested
+output grids and does not calibrate missing affine grids. Layout domain analysis
+and movement of quantizers are separate operations.
+
 See [CPU token embedding](../../../../docs/cpu_token_embedding.md) for the supported
 explicit embedding policy and its limits.
 
