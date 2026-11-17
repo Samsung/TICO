@@ -19,6 +19,7 @@ from tico.circle.graph import as_indices
 from tico.circle.passes import CirclePassContext, FuseOutputRequantizePass
 from tico.circle.passes.optimization._utils import operator_builtin_code
 from tico.circle.value import TensorQuantization
+from tico.circle.value.dtype import circle_tensor_type_value
 
 from test.unit_test.circle.infrastructure_fixture import make_empty_document, UINT8
 from test.unit_test.circle.passes.optimization._fixture import (
@@ -208,6 +209,37 @@ class FuseOutputRequantizeTest(unittest.TestCase):
 
         self.assertFalse(result.modified)
         self.assertEqual(len(document.subgraph().operators), 2)
+
+    def test_keeps_mx_output_adapters(self) -> None:
+        """Native MX rounding must survive output requantization fusion."""
+
+        for tensor_type in ("MXINT8", "MXFP4"):
+            for position in ("source", "target"):
+                for scale in ([], [0.002]):
+                    with self.subTest(
+                        tensor_type=tensor_type, position=position, scale=scale
+                    ):
+                        document, mid, target = self._build_conv_quantize(
+                            producer_code=FULLY_CONNECTED
+                        )
+                        index = mid if position == "source" else target
+                        tensor = document.subgraph().tensors[index]
+                        tensor.type = circle_tensor_type_value(tensor_type)
+                        tensor.quantization.scale = scale
+                        tensor.quantization.zeroPoint = [0] if scale else []
+                        before_outputs = as_indices(
+                            document.subgraph().operators[0].outputs
+                        )
+
+                        result = self._run(document)
+
+                        self.assertFalse(result.modified)
+                        self.assertEqual(len(document.subgraph().operators), 2)
+                        self.assertEqual(
+                            as_indices(document.subgraph().operators[0].outputs),
+                            before_outputs,
+                        )
+                        self.assertEqual(document.subgraph().outputs, [target])
 
     def test_keeps_quantize_reading_graph_input(self) -> None:
         """Keep QUANTIZE when its source tensor has no producer."""

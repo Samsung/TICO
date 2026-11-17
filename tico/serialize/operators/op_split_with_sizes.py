@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import operator as py_operator
 from typing import Dict, List, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
@@ -62,7 +64,11 @@ class SplitWithSizesVisitor(NodeVisitor):
                 for idx in range(len(split_sizes))
             ]
             if input_qparam is not None and is_mx_dtype(input_qparam.dtype)
-            else [None] * len(split_sizes)
+            else (
+                [copy.deepcopy(input_qparam) for _ in split_sizes]
+                if input_qparam is not None and input_qparam.quantized_dimension is None
+                else [None for _ in split_sizes]
+            )
         )
 
         split_sizes_i32 = [
@@ -83,22 +89,34 @@ class SplitWithSizesVisitor(NodeVisitor):
         So, let's add unused output tensors to compensate this restriction.
         """
         outputs: List[Union[circle.Tensor.TensorT, torch.fx.node.Node]] = []
-        sorted_users = sorted(node.users.keys(), key=lambda x: x.args[1])  # type: ignore[arg-type, return-value]
-        users_indices = list(usrnode.args[1] for usrnode in sorted_users)
-        user_it = iter(sorted_users)
+        users_by_index: dict[int, list[torch.fx.Node]] = {}
+        for user in node.users:
+            if user.target != py_operator.getitem or len(user.args) != 2:
+                raise NotYetSupportedError(
+                    f"{node.name}: only tensor-result getitem users of SplitV are supported."
+                )
+            index = user.args[1]
+            if type(index) is not int or not -len(split_sizes) <= index < len(
+                split_sizes
+            ):
+                raise NotYetSupportedError(
+                    f"{user.name}: invalid split tensor output index {index!r}."
+                )
+            users_by_index.setdefault(index % len(split_sizes), []).append(user)
         for idx, _ in enumerate(split_sizes):
             output_qparam = mx_qparams[idx]
-            if idx in users_indices:
-                user_node = next(user_it)
-                if (
-                    output_qparam is not None
-                    and user_node.meta.get(QPARAM_KEY) != output_qparam
-                ):
-                    raise NotYetSupportedError(
-                        f"MX SplitV output {user_node.name} must preserve its input "
-                        "domain; keep an explicit Quantize for a different domain."
-                    )
-                outputs.append(user_node)
+            if idx in users_by_index:
+                users = users_by_index[idx]
+                for user_node in users:
+                    if (
+                        output_qparam is not None
+                        and user_node.meta.get(QPARAM_KEY) != output_qparam
+                    ):
+                        raise NotYetSupportedError(
+                            f"SplitV output {user_node.name} must preserve its input "
+                            "domain; keep an explicit Quantize for a different domain."
+                        )
+                outputs.append(users[0])
             else:
                 # Let's add unused output tensor to satisfy circle split_v operator scheme
                 node_val = node.meta.get("val")

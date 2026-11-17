@@ -36,6 +36,7 @@ from tico.circle.passes.rules import (
     RewriteDiagnostic,
     RewritePlan,
 )
+from tico.circle.value.dtype import is_mx_tensor_type
 
 # Operators whose output tensor carries a free requantization target: the
 # runtime rescales an integer accumulator into the output quantization, so a
@@ -121,6 +122,11 @@ class _FuseOutputRequantizeRule(CircleRewriteRule[_RequantizeFoldPlan]):
         if source_contract.shape_signature != target_contract.shape_signature:
             return None
         for contract in (source_contract, target_contract):
+            # MX output rounding and block exponent selection are observable.
+            # A trailing adapter cannot become a different native producer
+            # contract, even if optional affine metadata happens to be present.
+            if is_mx_tensor_type(contract.tensor_type):
+                return None
             quantization = contract.quantization
             if quantization is None or len(quantization.scale) != 1:
                 return None

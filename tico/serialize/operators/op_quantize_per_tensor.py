@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -91,7 +92,31 @@ class QuantizePerTensorDefaultVisitor(NodeVisitor):
             assert quant_min in (-32768, -32767) and quant_max == 32767
 
         inputs = [tensor]
-        outputs = [node]
+        outputs: List[torch.fx.Node | circle.Tensor.TensorT] = [node]
+        # Circle QUANTIZE saturates to the storage dtype endpoints and has no
+        # quant_min field. Domain legalization marks boundaries requiring its
+        # supported symmetric narrow INT16 range. Existing embedding islands
+        # already clamp before QUANTIZE and keep their independent policy.
+        narrow_int16 = (
+            output_tensor.type == circle.TensorType.TensorType.INT16
+            and quant_min == -32767
+            and node.meta.get("_preserve_affine_clipping", False)
+            and not tensor.meta.get("_embedding_range_clamp_", False)
+        )
+        if narrow_int16:
+            intermediate = self.graph.add_tensor_from_scratch(
+                prefix=f"{node.name}_full_int16",
+                shape=list(output_tensor.shape),
+                shape_signature=(
+                    list(output_tensor.shapeSignature)
+                    if output_tensor.shapeSignature is not None
+                    else None
+                ),
+                dtype=output_tensor.type,
+                qparam=copy.deepcopy(node.meta[QPARAM_KEY]),
+                source_node=node,
+            )
+            outputs = [intermediate]
 
         op_index = get_op_index(
             circle.BuiltinOperator.BuiltinOperator.QUANTIZE, self._op_codes
@@ -104,6 +129,26 @@ class QuantizePerTensorDefaultVisitor(NodeVisitor):
         )
         option = circle.QuantizeOptions.QuantizeOptionsT()
         operator.builtinOptions = option
+
+        if narrow_int16:
+            self.graph.add_operator(operator)
+            lower_bound = self.graph.add_const_tensor(
+                torch.tensor(-32767, dtype=torch.int16), source_node=node
+            )
+            lower_bound.quantization = copy.deepcopy(output_tensor.quantization)
+            maximum_index = get_op_index(
+                circle.BuiltinOperator.BuiltinOperator.MAXIMUM, self._op_codes
+            )
+            maximum = create_builtin_operator(
+                self.graph, maximum_index, [intermediate, lower_bound], [node]
+            )
+            maximum.builtinOptionsType = (
+                circle.BuiltinOptions.BuiltinOptions.MaximumMinimumOptions
+            )
+            maximum.builtinOptions = (
+                circle.MaximumMinimumOptions.MaximumMinimumOptionsT()
+            )
+            return maximum
 
         return operator
 

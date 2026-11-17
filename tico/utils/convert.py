@@ -72,6 +72,7 @@ from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
 )
+from tico.quantization.passes.legalize_mx_affine_domains import LegalizeMxAffineDomains
 from tico.quantization.passes.legalize_quantized_clamp import LegalizeQuantizedClamp
 from tico.quantization.passes.move_affine_quantize_before_layout import (
     MoveAffineQuantizeBeforeLayout,
@@ -339,6 +340,10 @@ def _prepare_exported_program(
         # protection, before folding attempts to propagate MX blocks through views.
         if config.get("move_affine_quantize_before_layout") is True:
             quantization_passes.append(MoveAffineQuantizeBeforeLayout())
+        # Additional native rounding is an opt-in policy. Keep Q/DQ provenance
+        # for executable reference semantics, and select activation before bias.
+        if config.get("legalize_mx_affine_domains") is True:
+            quantization_passes.append(LegalizeMxAffineDomains())
         quantization_passes.extend(
             [
                 FoldQuantOps(),

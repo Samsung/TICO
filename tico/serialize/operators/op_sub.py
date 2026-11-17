@@ -24,6 +24,7 @@ from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.validate_args_kwargs import SubTensorArgs
 
@@ -49,9 +50,12 @@ class SubVisitor(NodeVisitor):
         other = args.other
         alpha = args.alpha
 
-        if alpha is not None:
+        if alpha not in (None, 1):
             raise NotYetSupportedError(
-                "'alpha' of aten::sub.Tensor is not supported yet"
+                f"{node.name} ({node.target}): operand other has alpha={alpha}; "
+                f"source={getattr(other, 'meta', {}).get(QPARAM_KEY)}, "
+                "required=Circle SUB(alpha=1); no native alpha operand. Preserve an explicit multiply "
+                "with its own quantization boundary before exporting."
             )
 
         inputs = [input, other]
