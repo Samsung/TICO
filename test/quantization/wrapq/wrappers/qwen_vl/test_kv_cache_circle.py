@@ -93,6 +93,45 @@ class TestQwenKVCacheCircle(unittest.TestCase):
         rng.__enter__()
         self.addCleanup(rng.__exit__, None, None, None)
         torch.manual_seed(20261024)
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+            Qwen3VLTextConfig,
+        )
+
+        self.config = Qwen3VLTextConfig.from_dict(
+            {
+                "hidden_size": 8,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "max_position_embeddings": 8,
+            }
+        )
+        self.config._attn_implementation = "eager"
+
+    @staticmethod
+    def _tensor_qparam(tensor) -> tuple[float, int] | None:
+        quantization = tensor.quantization
+        if quantization is None or not quantization.scale:
+            return None
+        return float(quantization.scale[0]), int(quantization.zero_point[0])
+
+    @staticmethod
+    def _producer_map(program):
+        producers = {}
+        for operator_index, operator in enumerate(program.operators):
+            for tensor_index in operator.outputs:
+                producers[tensor_index] = (operator_index, operator)
+        return producers
+
+    @staticmethod
+    def _find_named_tensor(program, indices, suffix: str):
+        for index in indices:
+            tensor = program.tensor(index)
+            if tensor.name and tensor.name.endswith(suffix):
+                return tensor
+        raise AssertionError(f"Tensor ending with {suffix!r} was not found")
 
     def _convert(self, module, args, *, optimize: bool):
         converted = tico.convert(

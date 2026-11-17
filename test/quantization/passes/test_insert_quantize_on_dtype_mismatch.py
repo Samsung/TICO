@@ -31,6 +31,8 @@ from test.modules.op.mul import SimpleMulWithTensor
 from test.modules.op.permute import SimplePermute
 from test.modules.op.relu import SimpleRelu
 from test.modules.op.reshape import ReshapeTorchAPI
+from test.modules.op.sigmoid import SimpleSigmoid
+from test.modules.op.sub import SimpleSub
 
 
 class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
@@ -931,3 +933,260 @@ class ReluDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
         target_pass = InsertQuantizeOnDtypeMismatch()
         with self.assertRaises(NotYetSupportedError):
             target_pass.call(self.ep)
+
+
+def _mx_qparam(axis=-1):
+    qparam = QuantParam()
+    qparam.dtype = "mxint8"
+    qparam.quantized_dimension = axis
+    return qparam
+
+
+def _affine_qparam(dtype, scale=0.03, zp=0):
+    qparam = QuantParam()
+    qparam.scale = [scale]
+    qparam.zero_point = [zp]
+    qparam.dtype = dtype
+    return qparam
+
+
+class MxLegalizationTest(unittest.TestCase):
+    """Cross-domain MX/affine ops must be legalized explicitly.
+
+    The NPU backend forbids MX/affine mixed-type ops, so the pass must move
+    the affine operand into the MX domain (``quantize_mx``) and requantize
+    the result back (``quantize_per_tensor``), or vice versa.
+    """
+
+    def _export(self, mod, target):
+        args, kwargs = mod.get_example_inputs()
+        with torch.no_grad():
+            ep = torch.export.export(mod.eval(), args, kwargs)
+        node = next(
+            n for n in ep.graph.nodes if n.op == "call_function" and n.target == target
+        )
+        return ep, node
+
+    def _quant_ops(self, ep, target):
+        return [
+            n for n in ep.graph.nodes if n.op == "call_function" and n.target == target
+        ]
+
+    def _quantize_mx_nodes(self, ep):
+        return self._quant_ops(ep, torch.ops.circle_custom.quantize_mx.default)
+
+    def _requant_nodes(self, ep):
+        return self._quant_ops(
+            ep, torch.ops.quantized_decomposed.quantize_per_tensor.default
+        )
+
+    def test_mul_mx_input_affine_output(self):
+        # x=mxint8, y=int16, out=int16 (the Qwen3-VL mul_3 case): the affine
+        # input enters the MX domain, the mul runs in MX and its output is
+        # requantized back to int16.
+        ep, mul = self._export(SimpleMulWithTensor(), torch.ops.aten.mul.Tensor)
+        x, y = mul.args[0], mul.args[1]
+        x.meta[QPARAM_KEY] = _mx_qparam()
+        y.meta[QPARAM_KEY] = _affine_qparam("int16", scale=1e-4)
+        mul.meta[QPARAM_KEY] = _affine_qparam("int16", scale=2e-4)
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        self.assertEqual(mul.meta[QPARAM_KEY].dtype, "mxint8")
+        q_mx_nodes = self._quantize_mx_nodes(ep)
+        self.assertEqual(len(q_mx_nodes), 1)
+        q_mx = q_mx_nodes[0]
+        self.assertIs(q_mx.args[0], y)
+        self.assertEqual(q_mx.args[1], "int8")  # elem_format of mxint8
+        self.assertEqual(q_mx.args[2], -1)  # block axis
+        self.assertEqual(q_mx.meta[QPARAM_KEY].dtype, "mxint8")
+        self.assertIn(q_mx, mul.args)
+
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(requants[0].args[0], mul)
+        self.assertEqual(requants[0].meta[QPARAM_KEY].dtype, "int16")
+
+    def test_mul_affine_inputs_mx_output(self):
+        # x=int16, y=int16, out=mxint8: both inputs are converted to MX.
+        ep, mul = self._export(SimpleMulWithTensor(), torch.ops.aten.mul.Tensor)
+        x, y = mul.args[0], mul.args[1]
+        x.meta[QPARAM_KEY] = _affine_qparam("int16")
+        y.meta[QPARAM_KEY] = _affine_qparam("int16")
+        mul.meta[QPARAM_KEY] = _mx_qparam()
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        self.assertEqual(mul.meta[QPARAM_KEY].dtype, "mxint8")
+        q_mx_nodes = self._quantize_mx_nodes(ep)
+        self.assertEqual(len(q_mx_nodes), 2)
+        self.assertEqual({n.args[0] for n in q_mx_nodes}, {x, y})
+        self.assertEqual(len(self._requant_nodes(ep)), 0)
+
+    def test_mul_same_mx_family_passthrough(self):
+        # x=y=out=mxint8: already backend-legal, nothing is inserted.
+        ep, mul = self._export(SimpleMulWithTensor(), torch.ops.aten.mul.Tensor)
+        mul.args[0].meta[QPARAM_KEY] = _mx_qparam()
+        mul.args[1].meta[QPARAM_KEY] = _mx_qparam()
+        mul.meta[QPARAM_KEY] = _mx_qparam()
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        self.assertEqual(len(self._quantize_mx_nodes(ep)), 0)
+        self.assertEqual(len(self._requant_nodes(ep)), 0)
+
+    def test_add_mx_input_affine_output(self):
+        # x=mxint8, y=int16, out=int16: same legalization as mul.
+        ep, add = self._export(SimpleAdd(), torch.ops.aten.add.Tensor)
+        x, y = add.args[0], add.args[1]
+        x.meta[QPARAM_KEY] = _mx_qparam()
+        y.meta[QPARAM_KEY] = _affine_qparam("int16", scale=1e-4)
+        add.meta[QPARAM_KEY] = _affine_qparam("int16", scale=2e-4)
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        self.assertEqual(add.meta[QPARAM_KEY].dtype, "mxint8")
+        q_mx_nodes = self._quantize_mx_nodes(ep)
+        self.assertEqual(len(q_mx_nodes), 1)
+        self.assertIs(q_mx_nodes[0].args[0], y)
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(requants[0].args[0], add)
+
+    def test_bmm_mx_input_affine_output(self):
+        # x=mxint8, y=int16, out=int16: same legalization as mul.
+        ep, bmm = self._export(SimpleBatchMatMul(), torch.ops.aten.bmm.default)
+        x, y = bmm.args[0], bmm.args[1]
+        x.meta[QPARAM_KEY] = _mx_qparam()
+        y.meta[QPARAM_KEY] = _affine_qparam("int16", scale=1e-4)
+        bmm.meta[QPARAM_KEY] = _affine_qparam("int16", scale=2e-4)
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        self.assertEqual(bmm.meta[QPARAM_KEY].dtype, "mxint8")
+        q_mx_nodes = self._quantize_mx_nodes(ep)
+        self.assertEqual(len(q_mx_nodes), 1)
+        self.assertIs(q_mx_nodes[0].args[0], y)
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(requants[0].args[0], bmm)
+
+    def test_relu_mx_input_affine_output(self):
+        # inp=mxint8, out=int16: the MX input is requantized onto the int16
+        # grid before relu, so relu stays affine end-to-end.
+        ep, relu = self._export(SimpleRelu(), torch.ops.aten.relu.default)
+        inp = relu.args[0]
+        inp.meta[QPARAM_KEY] = _mx_qparam()
+        relu.meta[QPARAM_KEY] = _affine_qparam("int16")
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        self.assertEqual(relu.meta[QPARAM_KEY].dtype, "int16")
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(requants[0].args[0], inp)
+        self.assertIs(relu.args[0], requants[0])
+        self.assertEqual(len(self._quantize_mx_nodes(ep)), 0)
+
+    def test_permute_mx_input_affine_output(self):
+        # inp=mxint8, out=int16: requantize before permute.
+        ep, permute = self._export(SimplePermute(), torch.ops.aten.permute.default)
+        inp = permute.args[0]
+        inp.meta[QPARAM_KEY] = _mx_qparam()
+        permute.meta[QPARAM_KEY] = _affine_qparam("int16")
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(permute.args[0], requants[0])
+        self.assertEqual(len(self._quantize_mx_nodes(ep)), 0)
+
+    def test_reshape_affine_input_mx_output(self):
+        # inp=int16, out=mxint8: converting the input to MX before reshape
+        # would produce an MX-domain reshape, which the target runtime does
+        # not support, so the mismatch must be rejected loudly.
+        ep, reshape = self._export(ReshapeTorchAPI(), torch.ops.aten.reshape.default)
+        inp = reshape.args[0]
+        inp.meta[QPARAM_KEY] = _affine_qparam("int16")
+        reshape.meta[QPARAM_KEY] = _mx_qparam()
+
+        with self.assertRaises(NotYetSupportedError):
+            InsertQuantizeOnDtypeMismatch().call(ep)
+
+    def test_cat_affine_inputs_mx_output(self):
+        # inputs=int16, out=mxint8: every input enters the MX domain.
+        ep, cat = self._export(SimpleCatDefault(), torch.ops.aten.cat.default)
+        from tico.utils.validate_args_kwargs import CatArgs
+
+        tensors = CatArgs(*cat.args, **cat.kwargs).tensors
+        for inp in tensors:
+            inp.meta[QPARAM_KEY] = _affine_qparam("int16")
+        cat.meta[QPARAM_KEY] = _mx_qparam()
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        q_mx_nodes = self._quantize_mx_nodes(ep)
+        self.assertEqual(len(q_mx_nodes), 2)
+        self.assertEqual({n.args[0] for n in q_mx_nodes}, set(tensors))
+        self.assertEqual(len(self._requant_nodes(ep)), 0)
+
+    def test_cat_mx_inputs_affine_output(self):
+        # one input mxint8, the other int16 (same grid as the int16 output):
+        # only the MX input is requantized onto the output grid before cat.
+        ep, cat = self._export(SimpleCatDefault(), torch.ops.aten.cat.default)
+        from tico.utils.validate_args_kwargs import CatArgs
+
+        out_qparam = _affine_qparam("int16", scale=2e-4)
+        tensors = CatArgs(*cat.args, **cat.kwargs).tensors
+        tensors[0].meta[QPARAM_KEY] = _mx_qparam()
+        tensors[1].meta[QPARAM_KEY] = _affine_qparam("int16", scale=2e-4)
+        cat.meta[QPARAM_KEY] = copy.deepcopy(out_qparam)
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(requants[0].args[0], tensors[0])
+        self.assertEqual(requants[0].meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(len(self._quantize_mx_nodes(ep)), 0)
+
+    def test_sigmoid_mx_input_affine_output(self):
+        # inp=mxint8, out=int16: requantize before sigmoid.
+        ep, sigmoid = self._export(SimpleSigmoid(), torch.ops.aten.sigmoid.default)
+        inp = sigmoid.args[0]
+        inp.meta[QPARAM_KEY] = _mx_qparam()
+        sigmoid.meta[QPARAM_KEY] = _affine_qparam("int16")
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(sigmoid.args[0], requants[0])
+        self.assertEqual(len(self._quantize_mx_nodes(ep)), 0)
+
+    def test_sub_int16_inputs_uint8_output(self):
+        # x=y=int16, out=uint8: run sub in int16 and requantize the output.
+        ep, sub = self._export(SimpleSub(), torch.ops.aten.sub.Tensor)
+        x, y = sub.args[0], sub.args[1]
+        x.meta[QPARAM_KEY] = _affine_qparam("int16", scale=1e-4)
+        y.meta[QPARAM_KEY] = _affine_qparam("int16", scale=1e-4)
+        sub.meta[QPARAM_KEY] = _affine_qparam("uint8", scale=1e-3, zp=128)
+
+        InsertQuantizeOnDtypeMismatch().call(ep)
+
+        self.assertEqual(sub.meta[QPARAM_KEY].dtype, "int16")
+        requants = self._requant_nodes(ep)
+        self.assertEqual(len(requants), 1)
+        self.assertIs(requants[0].args[0], sub)
+        self.assertEqual(requants[0].meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_sub_mx_output_unsupported(self):
+        # MX output for sub is not legalized yet: must fail explicitly.
+        ep, sub = self._export(SimpleSub(), torch.ops.aten.sub.Tensor)
+        sub.args[0].meta[QPARAM_KEY] = _affine_qparam("int16")
+        sub.args[1].meta[QPARAM_KEY] = _affine_qparam("int16")
+        sub.meta[QPARAM_KEY] = _mx_qparam()
+
+        with self.assertRaises(NotYetSupportedError):
+            InsertQuantizeOnDtypeMismatch().call(ep)

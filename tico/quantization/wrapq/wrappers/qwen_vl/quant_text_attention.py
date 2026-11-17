@@ -189,6 +189,14 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         self.obs_attn_weights = mk("attn_weights")
         self.obs_attn_out_h = mk("attn_out_h")
 
+        # Layout-op brackets: keep view/transpose/reshape inside the affine
+        # domain so the exported graph has no MX layout ops.
+        self.obs_q_view = mk("q_view")
+        self.obs_k_view = mk("k_view")
+        self.obs_v_view = mk("v_view")
+        self.obs_pre_o_proj_transpose = mk("pre_o_proj_transpose")
+        self.obs_pre_o_proj_reshape = mk("pre_o_proj_reshape")
+
         # Persistent storage (S) and independent attention computation (C).
         # Both prefill output and decode input/delta use the new_* storage ABI.
         self.obs_new_k = mk("new_k")
@@ -837,8 +845,10 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         )
         attn_out_h = self._fq(torch.stack(attn_out_parts, dim=2), self.obs_attn_out_h)
 
-        # Attention output
-        attn_out = attn_out_h.reshape(batch_size, q_len, -1)  # (B, S, n_h * H)
+        # Attention output (bracket the merge-heads reshape to keep it affine)
+        attn_out = self._fq(
+            attn_out_h.reshape(batch_size, q_len, -1), self.obs_pre_o_proj_reshape
+        )  # (B, S, n_h * H)
 
         # Final projection
         out = self.o_proj(attn_out)
@@ -881,8 +891,11 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         )
         attn_out_h = self._fq(attn_out_h, self.obs_attn_out_h)
 
-        attn_out = (
-            attn_out_h.transpose(1, 2).contiguous().reshape(batch_size, q_len, -1)
+        attn_out = self._fq(
+            attn_out_h.transpose(1, 2).contiguous(), self.obs_pre_o_proj_transpose
+        )
+        attn_out = self._fq(
+            attn_out.reshape(batch_size, q_len, -1), self.obs_pre_o_proj_reshape
         )
         out = self.o_proj(attn_out)
 
@@ -926,10 +939,23 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         B, S, _ = hidden.shape
         H = self.head_dim
 
-        # Projections
-        q = self.q_proj(hidden).view(B, S, -1, H).transpose(1, 2)  # (B, n_h,  S, H)
-        k = self.k_proj(hidden).view(B, S, -1, H).transpose(1, 2)  # (B, n_kv, S, H)
-        v = self.v_proj(hidden).view(B, S, -1, H).transpose(1, 2)  # (B, n_kv, S, H)
+        # Projections (bracket the projection outputs so the head-split
+        # view/transpose chain stays in the affine domain)
+        q = (
+            self._fq(self.q_proj(hidden), self.obs_q_view)
+            .view(B, S, -1, H)
+            .transpose(1, 2)
+        )  # (B, n_h,  S, H)
+        k = (
+            self._fq(self.k_proj(hidden), self.obs_k_view)
+            .view(B, S, -1, H)
+            .transpose(1, 2)
+        )  # (B, n_kv, S, H)
+        v = (
+            self._fq(self.v_proj(hidden), self.obs_v_view)
+            .view(B, S, -1, H)
+            .transpose(1, 2)
+        )  # (B, n_kv, S, H)
 
         # Head-dim RMSNorms
         q = self.q_norm(q)
@@ -1030,11 +1056,18 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             self.obs_attn_out,
             self.obs_attn_weights,
             self.obs_attn_out_h,
+            self.obs_q_view,
+            self.obs_k_view,
+            self.obs_v_view,
+            self.obs_pre_o_proj_reshape,
             self.obs_new_k,
             self.obs_new_v,
             self.obs_present_key,
             self.obs_present_value,
         )
+        if self.attn_options.layout == "batched":
+            # Only the batched path runs the pre-o_proj transpose.
+            yield self.obs_pre_o_proj_transpose
         if self.attn_options.scale_fusion == "none":
             yield from (self.obs_logits_raw, self.obs_scale)
 
