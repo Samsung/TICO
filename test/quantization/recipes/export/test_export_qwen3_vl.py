@@ -35,6 +35,7 @@ import torch
 from tico.config import CompileConfigV1
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.export.circle import resolve_compile_config
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
@@ -206,12 +207,21 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
     def test_exports_all_static_runtime_stages(self):
         """The exporter should emit prefill, decode, and DeepStack graphs."""
         calls = []
+        compile_configs = []
+        compile_config = resolve_compile_config(
+            {
+                "preserve_embedding_quantization": True,
+                "move_affine_quantize_before_layout": False,
+                "legalize_mx_affine_domains": True,
+            }
+        )
         vision_inputs = []
         export_model = FakeExportModel()
         dynamic_shapes = {"input_ids": {1: "S"}}
 
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
             calls.append((save_path.name, kwargs.get("dynamic_shapes")))
+            compile_configs.append(kwargs.get("config"))
             if save_path.name.startswith("vision_prefill_"):
                 vision_inputs.append((module, example_inputs))
 
@@ -239,8 +249,11 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
                 output_dir=tmpdir,
                 model_args=_model_args(),
                 prefill_decode=True,
+                compile_config=compile_config,
             )
 
+        self.assertEqual(len(compile_configs), 7)
+        self.assertTrue(all(config is compile_config for config in compile_configs))
         self.assertEqual(
             [name for name, _ in calls],
             [
@@ -371,6 +384,37 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
             strict=True,
             compile_config=CompileConfigV1(),
         )
+
+    def test_adapter_forwards_all_compile_policies(self):
+        for enabled in (True, False):
+            options = {
+                "preserve_embedding_quantization": enabled,
+                "move_affine_quantize_before_layout": enabled,
+                "legalize_mx_affine_domains": enabled,
+            }
+            ctx = RecipeContext(
+                cfg={
+                    "model_args": _model_args(),
+                    "export": {
+                        "enabled": True,
+                        "max_seq_len": 4,
+                        "artifacts": ["circle_per_layer"],
+                        **options,
+                    },
+                },
+                adapter=Qwen3VLAdapter(),
+                model=torch.nn.Identity(),
+            )
+            with (
+                self.subTest(enabled=enabled),
+                patch.object(
+                    qwen_adapter_mod, "export_qwen3_vl_per_layer"
+                ) as export_per_layer,
+            ):
+                Qwen3VLAdapter().export(ctx)
+                result = export_per_layer.call_args.kwargs["compile_config"]
+                for name in options:
+                    self.assertIs(getattr(result, name), enabled)
 
 
 if __name__ == "__main__":

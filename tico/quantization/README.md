@@ -362,3 +362,15 @@ algorithm, its configuration parameters, and usage examples.
 To expose the new algorithm through the CLI examples as a pipeline stage, follow the
 [recipes developer guide](./recipes/README.md) — most new workflows should be added as
 YAML presets, not new scripts.
+
+### MXINT8 / affine export policy
+
+`CompileConfigV1(legalize_mx_affine_domains=True)` explicitly converts activation
+connections and rounds native MX outputs before retaining the requested affine
+output boundary. Weights remain affine; bias and gamma have independent roles.
+The default is `False`, independent of `move_affine_quantize_before_layout=True`.
+This policy adds no calibration at export and can change eager-model results.
+Use the pre-fold target Q/DQ reference to evaluate it; MX Circle serialization
+is not proof of NPU compilation or execution. Supported signatures, quantization
+order, diagnostics and backend limits are documented in the
+[conversion design](../../docs/design.md#103-opt-in-mxint8--affine-activation-policy).

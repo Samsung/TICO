@@ -413,6 +413,38 @@ class TestRegisterCustomOp(unittest.TestCase):
             torch.ops.circle_custom.quantize_mx(input_tensor, "int8", -1)
         self.assertIn("internal logical quantize op", str(context.exception))
 
+    def test_mx_fake_kernels_produce_independent_tensor_values(self):
+        """MX Q/DQ must not alias or replace a shared input during export."""
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            source = torch.empty(1, 32)
+            for target in (
+                torch.ops.circle_custom.mx_fake_quantize.default,
+                torch.ops.circle_custom.quantize_mx.default,
+                torch.ops.circle_custom.dequantize_mx.default,
+            ):
+                with self.subTest(target=target):
+                    result = target(source, "int8", -1)
+                    self.assertIsNot(result, source)
+                    self.assertEqual(result.shape, source.shape)
+                    self.assertEqual(result.dtype, source.dtype)
+
+        class SharedBoundary(torch.nn.Module):
+            def forward(self, value):
+                affine = torch.fake_quantize_per_tensor_affine(value, 0.25, 3, 0, 255)
+                mx = torch.ops.circle_custom.mx_fake_quantize(affine, "int8", -1)
+                return mx, affine
+
+        program = torch.export.export(SharedBoundary(), (torch.ones(1, 32),))
+        outputs = next(node for node in program.graph.nodes if node.op == "output")
+        mx, affine = outputs.args[0]
+        self.assertEqual(mx.target, torch.ops.circle_custom.mx_fake_quantize.default)
+        self.assertEqual(
+            affine.target, torch.ops.aten.fake_quantize_per_tensor_affine.default
+        )
+        self.assertIsNot(mx, affine)
+
     def test_circle_rms_norm_basic(self):
         """Test CircleRMSNorm basic functionality"""
         hidden_states = torch.randn(2, 32, 3)

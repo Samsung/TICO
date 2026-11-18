@@ -332,7 +332,14 @@ class FoldQuantOps(PassBase):
                 qparam.dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
                 op.meta[QPARAM_KEY] = qparam
 
-                dq.replace_all_uses_with(op, propagate_meta=False)
+                if q.meta.get("_preserve_affine_clipping"):
+                    # Native full-storage rounding followed by an explicit
+                    # same-grid narrow clamp equals the original narrow Q.
+                    # Keep the producer quantized: this is not a float fallback.
+                    q.meta[QPARAM_KEY] = copy.deepcopy(qparam)
+                    dq.replace_all_uses_with(q, propagate_meta=False)
+                else:
+                    dq.replace_all_uses_with(op, propagate_meta=False)
 
                 logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
             # ───────────────────────────────────────────
@@ -349,6 +356,12 @@ class FoldQuantOps(PassBase):
                     and op_qparam.zero_point == [q_args.zero_p]
                     and op_qparam.quantized_dimension is None
                 )
+
+                # A pre-fold adapter may carry narrower saturation than the
+                # source despite identical affine scale/ZP. Keep its executable
+                # clipping boundary; Circle lowers it to QUANTIZE + MAXIMUM.
+                if q.meta.get("_preserve_affine_clipping"):
+                    same_qparams = False
 
                 if not same_qparams:
                     if QPARAM_KEY not in q.meta:

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.utils.linear_folding import (
     _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR,
 )
@@ -121,6 +122,16 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         x2n = self._fq(-x2, o_neg)
         return self._fq(torch.cat((x2n, x1), -1), o_cat)
 
+    def _rank3_attention(self) -> bool:
+        # Per-tensor grids and a trailing MX axis are independent of the
+        # removed singleton head dimension. Keep the original rank for other
+        # policies, including frozen checkpoints with rank-specific axes.
+        return all(
+            not obs.qscheme.is_per_channel()
+            and (not isinstance(obs, MXObserver) or obs.axis == -1)
+            for obs in (self.obs_logits, self.obs_softmax, self.obs_attn_out)
+        )
+
     def _apply_rope(
         self, q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -192,6 +203,7 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         # This handles both single-image (1 chunk) and video (multiple
         # chunks) inputs.
         chunk_outputs = []
+        rank3 = self._rank3_attention()
         for chunk_idx in range(num_chunks):
             q_c = q_splits[chunk_idx]
             k_c = k_splits[chunk_idx]
@@ -199,21 +211,35 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
 
             head_outputs = []
             for n_head in range(self.num_heads):
-                q_i = q_c[:, n_head : n_head + 1, :, :]
-                k_i = k_c[:, n_head : n_head + 1, :, :]
-                v_i = v_c[:, n_head : n_head + 1, :, :]
-                logits_i = self._fq(q_i @ k_i.transpose(-2, -1), self.obs_logits)
+                # Keep the batch dimension, but remove the selected head axis.
+                # Rank-3 BMM avoids matmul's batch flatten/unflatten copies at
+                # the MX softmax -> PV boundary.
+                if rank3:
+                    q_i = q_c[:, n_head, :, :]
+                    k_i = k_c[:, n_head, :, :]
+                    v_i = v_c[:, n_head, :, :]
+                    scores = torch.bmm(q_i, k_i.transpose(-2, -1))
+                else:
+                    q_i = q_c[:, n_head : n_head + 1, :, :]
+                    k_i = k_c[:, n_head : n_head + 1, :, :]
+                    v_i = v_c[:, n_head : n_head + 1, :, :]
+                    scores = q_i @ k_i.transpose(-2, -1)
+                logits_i = self._fq(scores, self.obs_logits)
                 # softmax
                 attn_i = torch.softmax(logits_i, -1, dtype=torch.float32).to(q_i.dtype)
                 attn_i = self._fq(attn_i, self.obs_softmax)
-                out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
+                product = torch.bmm(attn_i, v_i) if rank3 else attn_i @ v_i
+                out_i = self._fq(product, self.obs_attn_out)
+                if not rank3:
+                    out_i = out_i.squeeze(1)
                 head_outputs.append(out_i)
 
-            # Concatenate heads: [1, num_heads, chunk_len, head_dim]
-            chunk_out = torch.cat(head_outputs, dim=1)
-            # [1, chunk_len, num_heads, head_dim] -> [chunk_len, num_heads*head_dim]
-            chunk_out = chunk_out.transpose(1, 2).contiguous()
-            chunk_len = chunk_out.shape[1]
+            # Each output is [1, chunk_len, head_dim]. Concatenation preserves
+            # head order; the existing attn_out grid precedes the head merge.
+            chunk_out = torch.cat(head_outputs, dim=0)
+            # [chunk_len, num_heads, head_dim] -> [chunk_len, num_heads*head_dim]
+            chunk_out = chunk_out.transpose(0, 1).contiguous()
+            chunk_len = chunk_out.shape[0]
             chunk_out = chunk_out.reshape(chunk_len, -1).contiguous()
             chunk_outputs.append(chunk_out)
 

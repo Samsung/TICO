@@ -30,6 +30,10 @@ class CompileConfigV1(CompileConfigBase):
     circle_optimize: bool = True
     # Preserve explicit quantization boundaries in supported embedding paths during Circle export.
     preserve_embedding_quantization: bool = False
+    # Move an existing INT16 affine boundary ahead of supported MXINT8 layouts.
+    move_affine_quantize_before_layout: bool = True
+    # Opt in to target domain adapters, including additional MX rounding.
+    legalize_mx_affine_domains: bool = False
 
     def get(self, name: str):
         return super().get(name)

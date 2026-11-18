@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import pathlib
 import tempfile
 import unittest
@@ -25,9 +26,12 @@ import warnings
 import tico
 
 import torch
+from tico.circle import CircleDocument
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.specs import affine, mx
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.nn.quant_layernorm import QuantLayerNorm
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
@@ -36,6 +40,7 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_patch_merger import (
 )
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
+from test.support.quantization.mx_layout import assert_qwen_mx_layout
 
 skip_msg = (
     "required transformers not installed — skipping Qwen3VLVisionPatchMerger tests"
@@ -255,6 +260,79 @@ class TestQuantQwen3VLVisionPatchMerger(unittest.TestCase):
             self.assertEqual(fp_out.shape, expected_shape)
             diff = (fp_out - q_out).abs().mean().item()
             self.assertLess(diff, 0.7)
+
+    def test_mx_fc_preserves_affine_norm_view_and_frozen_grids(self):
+        """Both norm/view modes keep layout affine and preserve checkpoint grids."""
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+            Qwen3VLVisionConfig,
+        )
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+            Qwen3VLVisionPatchMerger,
+        )
+
+        for postshuffle in (False, True):
+            with self.subTest(postshuffle=postshuffle):
+                torch.manual_seed(79)
+                config = Qwen3VLVisionConfig(
+                    hidden_size=32, spatial_merge_size=2, out_hidden_size=64
+                )
+                fp = Qwen3VLVisionPatchMerger(
+                    config, use_postshuffle_norm=postshuffle
+                ).eval()
+                qcfg = PTQConfig(
+                    activation=affine(DType.int(16)),
+                    weight=affine(DType.uint(8)),
+                    overrides={
+                        f"{fc}.{site}": mx(axis=-1)
+                        for fc in ("linear_fc1", "linear_fc2")
+                        for site in ("act_in", "act_out")
+                    },
+                )
+                merger = QuantQwen3VLVisionPatchMerger(fp, qcfg=qcfg).eval()
+                x = torch.linspace(-2, 3, 8 * 32).reshape(8, 32)
+                merger.enable_calibration()
+                merger(x)
+                merger.freeze_qparams()
+                expected = merger(x)
+                restored = QuantQwen3VLVisionPatchMerger(
+                    copy.deepcopy(fp), qcfg=qcfg
+                ).eval()
+                restored.load_state_dict(copy.deepcopy(merger.state_dict()))
+                self.assertTrue(torch.equal(restored(x), expected))
+                before = {
+                    name: observer.require_frozen()
+                    for name, observer in restored.named_modules()
+                    if isinstance(observer, ObserverBase)
+                }
+                for optimize in (False, True):
+                    with self.subTest(circle_optimize=optimize):
+                        converted = tico.convert(
+                            restored,
+                            (x,),
+                            config=tico.CompileConfigV1(
+                                legalize_mx_affine_domains=True,
+                                move_affine_quantize_before_layout=True,
+                                circle_optimize=optimize,
+                            ),
+                        )
+                        document = CircleDocument.from_bytes(converted.circle_binary)
+                        document.verify()
+                        counts = assert_qwen_mx_layout(self, document)
+                        self.assertGreater(counts["FULLY_CONNECTED"], 0)
+                        self.assertGreater(counts["RESHAPE"], 0)
+                for name, observer in restored.named_modules():
+                    if not isinstance(observer, ObserverBase):
+                        continue
+                    old, new = before[name], observer.require_frozen()
+                    self.assertEqual(old.policy, new.policy, name)
+                    self.assertEqual(old.kind, new.kind, name)
+                    for field in ("scale", "zero_point"):
+                        a, b = getattr(old, field), getattr(new, field)
+                        if a is None:
+                            self.assertIsNone(b, name)
+                        else:
+                            self.assertTrue(torch.equal(a, b), name)
+                self.assertTrue(torch.equal(restored(x), expected))
 
     def test_subgraph_export(self):
         """

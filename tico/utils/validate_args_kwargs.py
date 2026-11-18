@@ -60,6 +60,7 @@ class AddTensorArgs:
 
     input: Union[torch.fx.Node, float, int, torch.Tensor]
     other: Union[torch.fx.Node, float, int, torch.Tensor]
+    alpha: Union[int, float] = 1
 
 
 @enforce_type
@@ -1223,7 +1224,7 @@ class SubTensorArgs:
 
     input: Union[torch.fx.Node, torch.Tensor, float, int]
     other: Union[torch.fx.Node, torch.Tensor, float, int]
-    alpha: Optional[int] = None
+    alpha: Optional[Union[int, float]] = None
 
 
 @enforce_type

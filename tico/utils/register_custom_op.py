@@ -1016,7 +1016,9 @@ def CircleMXFakeQuantize():
         round: str = "nearest",
     ) -> torch.Tensor:
         normalize_mx_axis(axis, input_.ndim)
-        return input_
+        # The custom-op schema declares a fresh result. Returning the input
+        # aliases independent graph outputs during torch.export tracing.
+        return torch.empty_like(input_)
 
 
 def CircleQuantizeMX():
@@ -1044,7 +1046,7 @@ def CircleQuantizeMX():
         shared_exp_method: str = "max",
         round: str = "nearest",
     ) -> torch.Tensor:
-        return input_
+        return torch.empty_like(input_)
 
 
 def CircleDequantizeMX():
@@ -1071,7 +1073,7 @@ def CircleDequantizeMX():
         shared_exp_method: str = "max",
         round: str = "nearest",
     ) -> torch.Tensor:
-        return input_
+        return torch.empty_like(input_)
 
 
 def CircleRMSNorm():

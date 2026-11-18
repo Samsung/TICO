@@ -333,8 +333,17 @@ The second graph snapshot is emitted after this phase when graph dumping is enab
 ### 5.6 Conditional quantization bundle
 
 TICO detects whether the graph contains quantization operations. Only then it runs
-the following bundle, prepending `PreserveEmbeddingQuantization` when
-`config.get("preserve_embedding_quantization") is True`:
+two separate pass managers, each using the default `RESTART` strategy. The first
+manager completes the pre-fold Q/DQ rewrites in this order:
+
+```text
+PreserveEmbeddingQuantization       (preserve_embedding_quantization=True)
+MoveAffineQuantizeBeforeLayout      (move_affine_quantize_before_layout=True)
+LegalizeMxAffineDomains             (legalize_mx_affine_domains=True)
+```
+
+Q/DQ provenance is still available throughout this phase. Once this manager
+finishes, conversion crosses into the folded representation using a second manager:
 
 ```text
 FoldQuantOps
@@ -347,6 +356,14 @@ QuantizeBias
 RemoveUnusedPlaceholder
 InsertQuantizeOnDtypeMismatch
 ```
+
+A modification by a downstream pass restarts only this second manager at
+`FoldQuantOps`; it cannot re-enter embedding protection, layout movement or MX/affine
+pre-fold legalization after their Q/DQ provenance has been removed. This retains
+normal downstream fixed-point processing, including quantized Clamp legalization,
+and determines activation domains before bias quantization. The phase boundary
+also applies when the MX/affine option is disabled; the existing enabled pre-fold
+policies keep their order and downstream passes retain their restart behavior.
 
 `LegalizeQuantizedClamp` converts constant Clamp bounds to the activation's
 per-tensor integer domain, aligns the Clamp input to that same scale and zero point,
@@ -364,6 +381,38 @@ affine and MX Q/DQ pairs in graph order and preserves a `QUANTIZE` boundary when
 the MX axis or element format changes, including changes after layout operations.
 The Circle transpose-region optimization conservatively preserves MX regions;
 see the [Circle pass contracts](../tico/circle/README.md).
+
+`move_affine_quantize_before_layout` is enabled by default (`True`) as the current
+NPU deployment export policy for
+`MXINT8 -> static reshape/permute chain -> existing per-tensor INT16 Q/DQ`.
+It moves the existing matching affine Q/DQ pair before the complete layout chain,
+so that chain exports with the original INT16 scale and zero point. It adds no
+observer, calibration, or quantization stage and retains the original MX quantizer
+and its rounding/grouping. The pass runs before folding can propagate an MX domain
+into a reshape that would require regrouping MX blocks.
+
+The layout chain must have a single use at every step, counting graph outputs;
+the MX producer and final dequantized result may have multiple users. Unsupported
+layouts, dynamic shapes or qparams, per-channel/group quantization, non-MXINT8
+sources, intervening computation or quantizers, shared integer Q outputs, mismatched
+Q/DQ settings, effectful operations crossed by the move, explicit DQ `out_dtype`
+arguments, and protected embedding boundaries are left unchanged. The initial
+implementation requires float32 FX values, positive static dimensions, and the
+existing signed INT16 ranges `[-32768, 32767]` or `[-32767, 32767]`; it keeps the
+selected range unchanged. The source MX pair must use matching `int8`,
+`shared_exp_method="max"`, and `round="nearest"` arguments.
+
+The target backend must support the MXINT8-to-INT16 conversion at the new position
+and the selected INT16 layouts. This option makes no general claim about MX layout
+support on Circle or NPUs. Circle structural verification and CPU graph equivalence
+are separate from NPU compilation and execution validation. This limited rewrite
+does not solve general mixed-domain legalization. Set the option to `False` to
+disable the policy and retain the previous export behavior:
+
+```python
+config = tico.CompileConfigV1(move_affine_quantize_before_layout=False)
+circle_model = tico.convert(quantized_model.eval(), example_args, config=config)
+```
 
 This phase legalizes and completes a graph that has already been prepared as quantized.
 It is not a replacement for model calibration or the public quantization workflow.
@@ -465,6 +514,8 @@ At the end of conversion:
 | `eliminate_rank_round_trip` | `False` | Currently not consumed; the pass is instantiated with `enabled=True`. |
 | `circle_optimize` | `True` | Shared Circle O1 document pipeline, after packing on the bytes path and before final packing on the file path. |
 | `preserve_embedding_quantization` | `False` | Conditionally inserts `PreserveEmbeddingQuantization` before `FoldQuantOps` to preserve explicit quantization boundaries in supported embedding paths during Circle export. |
+| `legalize_mx_affine_domains` | `False` | Opt-in pre-fold target quantization policy: explicit MXINT8 activation adapters and native output rounding; no export-time calibration. |
+| `move_affine_quantize_before_layout` | `True` | Conditionally inserts `MoveAffineQuantizeBeforeLayout` after embedding-boundary preservation and before `FoldQuantOps`, moving existing INT16 affine Q/DQ ahead of supported static MXINT8 layout chains. |
 
 `CompileConfigBase.from_dict()` applies only keys already present on the dataclass. The
 current implementation ignores unknown fields rather than rejecting them. Configuration
@@ -702,8 +753,9 @@ its integer boundaries; it must not use fabricated qparams to satisfy NPU checks
 
 Explicit embedding preservation is an opt-in export policy:
 `preserve_embedding_quantization=True` inserts `PreserveEmbeddingQuantization`
-immediately before `FoldQuantOps`; omission or `False` retains the existing policy
-and following pass order. It keeps the supported lookup's float region and explicit
+first in the pre-fold manager, before optional layout movement and domain
+legalization; omission or `False` retains the existing policy and following pass
+order. It keeps the supported lookup's float region and explicit
 Q/DQ boundaries while preserving shared integer weights and the output ABI.
 GATHER remains a selection operation and does not requantize codes across domains.
 
@@ -717,7 +769,123 @@ Structural verification, native reference execution, fake-quant evaluation, and
 external backend validation remain separate checks; see
 [reference execution modes](../tico/circle/README.md#quantized-models).
 
-### 10.3 Recipe architecture
+### 10.3 Opt-in MXINT8 / affine activation policy
+
+`CompileConfigV1(legalize_mx_affine_domains=True)` inserts
+`LegalizeMxAffineDomains` after embedding protection and
+`MoveAffineQuantizeBeforeLayout` in the pre-fold manager. That manager completes
+before `FoldQuantOps`, propagation and `QuantizeBias` enter their separate restart
+scope; downstream changes cannot execute this Q/DQ-dependent policy on a folded
+graph. See [quantization phase ordering](#56-conditional-quantization-bundle).
+Its initial default is **False**. The independent layout option
+still defaults to **True**: #1130 commutes an existing quantizer equivalently;
+this policy can introduce additional rounding. This change is based on #1130
+head `22caefedf503d990d195f2b9d49d93c4c8f94eac` and depends on that PR until it
+is merged. #1129 implementation is not a source of this policy.
+
+The target activation contract is same-family inputs and native output (MX or
+affine), with affine weights independently represented. Type compatibility is
+not grid equality. In particular, arithmetic may have different input/output
+scales and zero points. Serializer support alone is not evidence of NPU support;
+the native MX activation/affine weight contract here is the target requirement,
+not a result of running an NPU compiler.
+
+| Operation | Opt-in cross-domain behavior | Constraints |
+|---|---|---|
+| `linear` | Select MX activation/native output when activation input or requested output is MX; preserve affine weight and float32 bias | Existing affine per-tensor/channel/group weight lowering is reused without retargeting its bit width, axis or sharing; integer bias cannot be reinterpreted |
+| `add.Tensor`, `sub.Tensor`, `mul.Tensor` | Convert each affine operand **after** its existing Q/DQ to MX; preserve existing MX input; quantize native output in MX before requested affine output | Broadcasting preserved; ADD/SUB alpha remains in the Q/DQ reference; Circle alpha other than 1 is explicitly unsupported rather than silently dropped |
+| `bmm` | Separate operand adapters: left contraction axis 2, right contraction axis 1, native output axis 2 | Existing MX quantizers remain; a different required axis adds another Q/DQ; original output axis is retained as an explicit conversion |
+| `relu`, `sigmoid` | MX input/native output; retain original requested affine output conversion | Input and output boundaries are independent; neither activation is a layout quantizer mover |
+| `aten.rms_norm`, `circle_custom.rms_norm` | MX activation/native output with independently affine gamma | Preserve eps/normalized_shape and existing serializer limitations (one normalized dimension, explicit eps and weight); no output grid reused at input |
+| `cat` | Commute the original output quantizer onto each input connection | Per-tensor affine commutes pointwise; MX destination requires compatible axis and intact block boundaries; every nonfinal input on the concat MX axis must end at a complete block |
+| `split_with_sizes` / tensor `getitem` | Preserve input domain; keep conversion on each selected result | Validate unused slots as well; repeated/negative indices alias the correct result; no shape/Python indexing inference |
+| `slice.Tensor` | Carry known per-tensor affine or MX domains through lowered indexing/unbind paths | Reuse `remap_mx_qparam()` for MX axis/block proofs; reject cuts or regrouping, preserve unknown inputs as unknown; this does not move Q/DQ across slices |
+| `reshape`, `permute` | Reuse #1130 boundary movement and existing MX remapping | Does not legalize arbitrary regrouping or prohibit all existing MX layouts; explicit `move_affine_quantize_before_layout=False` retains that option's behavior |
+
+For newly converted elementwise operands the MX axis is their last tensor axis.
+Existing MX operands keep their axis, grouping and quantizer; BMM's explicit
+role-dependent reblocking is chained after them. Native output uses the requested
+MX axis when already provided, otherwise its last axis (BMM always axis 2).
+MX export remains block32, `int8`, `shared_exp_method="max"`, `round="nearest"`.
+Full UINT8/INT16 and narrow INT16 [-32767,32767] output adapters retain
+exact quantizer arguments. Narrow INT16 adapters carry a clipping marker through
+folding and serialize as QUANTIZE followed by same-grid MAXIMUM(code=-32767),
+since the Circle QUANTIZE options do not encode quant_min. The same marker preserves original narrow input boundaries before an MX adapter:
+full-storage native rounding followed by a same-grid clamp equals the original
+narrow rounding. Existing embedding float clamps retain their own handling
+without a second clamp. Arbitrary narrower
+activation ranges are diagnosed rather than widened.
+Other MX formats, dynamic qparams and per-channel activation adapters are outside
+this policy. Already legal affine/float graphs and same-domain MX graphs remain
+unchanged. Same-family copy operations still require grid/group preservation.
+
+For example, with two independent grids A and B and requested output grid C:
+
+```text
+before: DQ_A(Q_A(x)) ---- MUL ---- Q_C ---- DQ_C
+        DQ_M(Q_M(y)) -----/
+
+after:  DQ_A(Q_A(x)) -- Q_M -- DQ_M -- MUL -- Q_M -- DQ_M -- Q_C -- DQ_C
+        DQ_M(Q_M(y)) ----------------/
+```
+
+The original A, M and C boundaries stay intact. `Q_M(MUL(...))` is native
+output rounding, not an equivalent algebraic optimization. No arithmetic output
+grid is copied from an input. Source connections are updated by operand position;
+BMM(x,x) can therefore adapt only its right operand. Conversion sharing is local
+to one consumer and requires identical source and complete destination arguments.
+Raw shared operation outputs that cannot safely adopt a native output domain
+are rejected. Policy admission inspects every relevant output Q/DQ for MX,
+independently of selecting a single private output boundary. A completed native
+domain plan is restored first. A CAT whose inputs share a domain also keeps its
+native copy domain when the existing axis/block-preservation proof succeeds.
+These established outputs may feed several consumer-specific MX Q/DQ adapters;
+restarting the pre-fold manager does not reinterpret those adapters as ambiguous
+native output requests. This applies both to a previously rewritten CAT and to
+an unchanged same-domain CAT without a completed-plan marker. MX CATs must still
+pass the full axis and block checks, and a private destination boundary can still
+commute to the inputs when a native copy cannot preserve blocks.
+
+When native output selection or rewriting is still necessary and an activation
+input or any output boundary is MX, multiple output Q/DQ boundaries are rejected
+with node/op and native-output-selection context, regardless of quantizer creation
+order. In particular, affine-input SIGMOID with MX and affine output boundaries
+remains unsupported. No branch is selected arbitrarily, no quantizer is retargeted,
+and no adapter deduplication is required to accept a proven native domain.
+Affine-only multiple-boundary paths retain their existing behavior.
+QuantParam objects are copied instead of mutated across branches.
+The MX fake kernels also return independent fake tensors in accordance with the
+non-aliasing custom-op schema, preserving shared affine/MX graph outputs.
+
+The plan is represented solely by Q/DQ in the pre-fold graph. The internal
+`run_target_reference(program, *inputs)` executes that stage on CPU with real
+affine Q/DQ and the existing MX fake-quant kernel. It must be used **before**
+folding. There is no second reference legalizer. After folding, the same inserted
+boundaries serialize as Circle QUANTIZE, including native output metadata and
+explicit cross-domain adapters. O1 output-requantize fusion excludes MX tensors
+so it cannot absorb a required MX-to-affine output adapter.
+
+This policy never calibrates at export. No affine grid is manufactured from dtype,
+example/FakeTensor values, an unrelated operand, or output statistics. All affine
+destinations come from an existing explicit Q/DQ; an affine native input path
+would require its own independently observed/frozen boundary during preparation.
+Since all supported activation operations can execute natively in MX, no new
+observer lifecycle is required here. Missing boundaries, unknown weight family,
+shared raw outputs, unsupported grouping/options/ranges are diagnosed with node,
+operation and boundary context. Explicit float islands and embedding protection
+retain their independent policies. Round trips are never eliminated by this pass.
+
+Validation separates three questions: exact preservation when commuting CAT or
+#1130 layout boundaries; equality to an independently constructed target Q/DQ
+reference including new rounding; and error against the original eager model.
+For example, a wide-input sigmoid test changes by up to 1/256 at its UINT8 output
+because of native MX output quantization. Eager model accuracy therefore cannot
+be reported as exported target accuracy. Structural Circle verification and
+CPU Q/DQ reference tests do not establish bit-exact NPU behavior. The built-in
+reference runtime still cannot execute MX Circle tensors; no MX backend execution
+is implied by these tests.
+
+### 10.4 Recipe architecture
 
 The recipe layer keeps end-to-end model workflows separate by responsibility:
 
