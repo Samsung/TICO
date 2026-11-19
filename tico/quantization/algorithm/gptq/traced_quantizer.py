@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Whole-model, trace-based segment-major GPTQ quantizer.
+r"""Whole-model, trace-based segment-major GPTQ quantizer.
 
 Unlike :class:`LlamaGPTQQuantizer` (which assumes a ``model.model.layers``
 structure), this quantizer makes no structural assumption. The target model
@@ -1035,6 +1035,23 @@ class TracedGPTQQuantizer(BaseQuantizer):
                 mse_tolerance=cfg.mse_tolerance,
                 chunk_size=cfg.chunk_size,
             )
+            # weighted Hessian accumulation (GPTQConfig.sample_weights):
+            # one entry per calibration batch -- either a scalar (scales
+            # that batch's XX^T contribution) or a tensor([batch_size])
+            # (sqrt-weights the batch's rows).  The GPTQ core indexes
+            # g.weights[g.batch_id] inside add_batch and self-increments
+            # batch_id per call; the walk calls add_batch once per batch
+            # in global batch order, so this wiring exactly matches the
+            # plain quantizer's `gptq.weights` setup (quantizer.py).
+            if cfg.sample_weights is not None:
+                if len(cfg.sample_weights) < len(args_per_sample):
+                    raise ValueError(
+                        f"sample_weights has {len(cfg.sample_weights)} "
+                        f"entries but {len(args_per_sample)} calibration "
+                        "batches were captured; provide one weight (scalar "
+                        "or per-batch tensor) per batch."
+                    )
+                g.weights = list(cfg.sample_weights)
             # sample inputs may still live in pinned host memory (the
             # segment walk stashes them on CPU): stream one sample at a
             # time so the GPU never holds all samples' inputs at once

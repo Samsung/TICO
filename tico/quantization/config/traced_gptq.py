@@ -55,6 +55,11 @@ class TracedGPTQConfig(GPTQConfig):
     in float64 against per-segment fp64 copies of the consumed parameters,
     so Hessian accumulation and GPTQ math run in fp64 while the fake-quant
     write-back lands in the shared fp32 parameters.
+
+    ``sample_weights`` (inherited) IS honored by the traced walk: one entry
+    per calibration batch (a scalar, or a ``tensor([batch_size])`` for
+    batched weights), weighted into every linear's Hessian exactly like the
+    plain quantizer's ``gptq.weights`` wiring.
     """
 
     layer_group_regex: str | None = r"\.layers\.(\d+)\."
