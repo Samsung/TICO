@@ -129,3 +129,65 @@ pipeline:
 ```
 
 Both options default to `false`.
+
+## Qwen3-VL MXINT8 deployment policy
+
+The committed
+[`qwen3_vl_eval_suite_mx_override_polices.yaml`](qwen3_vl_eval_suite_mx_override_polices.yaml)
+preset calibrates a mixed MXINT8/INT16 policy for the `npu_export` profile.
+Its broad block-linear MX activation override is followed by explicit affine
+output overrides at these existing observation sites:
+
+| Existing observer | Policy and purpose |
+|---|---|
+| Text `self_attn.{q,k,v}_proj.act_out` | INT16 before head splitting, Q/K RMSNorm, and the shared V storage/compute branch |
+| Vision `attn.qkv.act_out` | INT16 before reshape/permute/unbind and RoPE half-splits, including head dimension 32 |
+| Text/vision `attn_out` | Base INT16 policy before head and chunk merge |
+| Patch merger `norm` output | Base/norm INT16 policy before the view and first FC |
+| Text `self_attn.o_proj.act_in`, vision `attn.proj.act_in` | MXINT8 reentry after affine head merge |
+| Text `self_attn.mask_add`, vision `attn.logits` | MXINT8 immediate inputs to native MX Softmax |
+| Text/vision `softmax` | MXINT8, including the PV operand boundary |
+
+Softmax retains matching MXINT8 input and output domains; configuring only
+its output as MX would leave an unsupported affine-to-MX Softmax signature.
+Other block-linear activation sites retain MXINT8, so this policy preserves
+native MX arithmetic. The `axis: -1` policy continues to mean the logical
+feature axis for Q/K/V and the key-token axis for Softmax. The attention
+sequence length and head dimension may differ; they must not share a grid
+merely because their tensors have the same rank. Vision uses rank-3 per-head
+BMM with this trailing-axis MX and scalar-affine attention policy. Rank-sensitive
+legacy per-channel or explicitly non-trailing MX policies retain their original
+rank-4 attention path; adopting the rank-3 policy requires fresh calibration
+rather than reinterpreting frozen axes. KV `new_k`/`new_v` storage
+and `present_key`/`present_value` compute observers remain independent.
+
+Circle export of this policy requires both explicit options:
+
+```yaml
+export:
+  move_affine_quantize_before_layout: true
+  legalize_mx_affine_domains: true
+```
+
+The first moves eligible existing private affine grids; the second retains
+source quantization and adds the native MX operation rounding plus conversion
+to the requested affine output. Neither option calibrates an observer. Their
+global defaults remain `true` and `false`, respectively.
+
+These observer policy changes apply when preparing and calibrating a new PTQ
+model. Reprepare the original float model and recalibrate to adopt them. Loading
+an older frozen checkpoint and changing its export YAML does not change its
+frozen grids or create the required affine projection outputs. Such a checkpoint
+can retain unsupported MX layouts; successful generic Circle verification does
+not establish this NPU layout contract. Export never retags its MX quantizers
+as INT16 or fabricates an affine scale. No observer sites or checkpoint schema
+were added for this policy: existing frozen affine policies continue to load
+and use their exact grids, and source quantizers are preserved during export.
+
+The preset retains its evaluation and artifact selection settings. To request
+Circle stages after calibration, enable export and select `circle_per_layer`;
+for a separate export-only invocation use the saved checkpoint and the same
+compile options. See the [export reference](README.md#export) for static profiles
+and staged artifact settings. CPU regression tests inspect final Circle layout
+and conversion domains with O1 off/on; they do not validate an NPU toolchain or
+full-model accuracy.

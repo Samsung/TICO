@@ -908,10 +908,22 @@ equivalent is `--preserve-embedding-quantization`. See
 [CPU embedding contracts](../../../../docs/cpu_token_embedding.md) for supported
 paths and the exact export policy.
 
+`move_affine_quantize_before_layout` defaults to `true` and moves existing fixed
+INT16 affine Q/DQ before supported private layout chains. It does not create or
+calibrate a grid. `legalize_mx_affine_domains` defaults to `false`; an MX deployment
+can opt in to operand adapters and native MX output rounding while preserving
+explicit source and output boundaries. Both options, together with embedding
+preservation, are forwarded to each staged Circle conversion through the resolved
+`CompileConfigV1`. Explicit `true`/`false` values are required; strings, numbers,
+and `null` raise a type error. Omission retains the public compile default.
+See the [export guide](../../recipes/export/README.md) for the policy contract.
+
 ```yaml
 export:
   enabled: false
   preserve_embedding_quantization: false
+  move_affine_quantize_before_layout: true
+  legalize_mx_affine_domains: false
   output_dir: ./out/llama
   artifacts:
     - ptq_checkpoint

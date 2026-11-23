@@ -23,6 +23,7 @@ calibration:
   decode_steps: 8
 
 model_args:
+  profile: npu_export
   vision:
     grid_thw: [8, 24, 24]
     visual_start_idx: 0
@@ -49,7 +50,12 @@ pipeline:
     # Default activation spec for observers not matched below.
     activation: int16
 
+    # Fresh PTQ: affine projection outputs protect shared/split layouts.
+    # Do not apply these observer policies to an already frozen MX checkpoint.
     specs:
+      int16_layout_activation:
+        kind: affine
+        dtype: int16
       mx_int8_activation:
         kind: mx
         elem_format: int8
@@ -64,6 +70,44 @@ pipeline:
           layers: all
           op_type: linear
           observer_role: activation
+        spec: mx_int8_activation
+
+      # Keep native MX linear inputs, then round/convert to the existing
+      # calibrated affine act_out before Q/K/V head splitting and KV branching.
+      - name: text_qkv_outputs_affine_before_head_split
+        target:
+          component: text
+          layers: all
+          modules: [self_attn.q_proj, self_attn.k_proj, self_attn.v_proj]
+          observers: [act_out]
+        spec: int16_layout_activation
+
+      # QKV unbind and RoPE half-splits can cut a 32-element MX block.
+      - name: vision_qkv_output_affine_before_rope_layout
+        target:
+          component: vision
+          layers: all
+          module: attn.qkv
+          observers: [act_out]
+        spec: int16_layout_activation
+
+      # attn_out keeps the base INT16 policy before head/chunk merge;
+      # o_proj/proj.act_in remains MX and starts the next native MX region.
+      # Softmax is natively MX: its immediate input boundary must also be MX.
+      - name: all_text_attention_mask_add_mx
+        target:
+          component: text
+          layers: all
+          module: self_attn
+          observers: [mask_add]
+        spec: mx_int8_activation
+
+      - name: all_vision_attention_logits_mx
+        target:
+          component: vision
+          layers: all
+          module: attn
+          observers: [logits]
         spec: mx_int8_activation
 
       - name: all_text_attention_softmax_mx
@@ -177,6 +221,9 @@ evaluation:
   max_seq_len: null  # Use the original model context; independent of calibration.
 
 export:
+  # Required when exporting the calibrated MX deployment policy above.
+  move_affine_quantize_before_layout: true
+  legalize_mx_affine_domains: true
   enabled: false
   output_dir: ./out/qwen3_vl_eval_suite_mx
   artifacts:
