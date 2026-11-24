@@ -382,6 +382,14 @@ the MX axis or element format changes, including changes after layout operations
 The Circle transpose-region optimization conservatively preserves MX regions;
 see the [Circle pass contracts](../tico/circle/README.md).
 
+An affine Quantize may feed several Dequantize nodes and direct integer consumers.
+`FoldQuantOps` assigns the destination domain to the Quantize independently of its
+consumer count, then folds each matching Dequantize separately. A genuine grid change
+remains one shared Circle `QUANTIZE`; direct integer consumers retain their codes and
+qparams even when matching Dequantize consumers fold into the source domain.
+Nonmatching Dequantize parameters are not folded or used to retarget the shared domain;
+serialization rejects a Dequantize whose arguments disagree with its input qparams.
+
 `move_affine_quantize_before_layout` is enabled by default (`True`) as the current
 NPU deployment export policy for
 `MXINT8 -> static reshape/permute chain -> existing per-tensor INT16 Q/DQ`.

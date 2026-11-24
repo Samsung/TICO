@@ -257,7 +257,9 @@ class FoldQuantOps(PassBase):
        quantization boundaries see the preceding domain.
     2. For each DQ, verify it is driven by a Quantize node `q` and that
        `q` and `dq` share identical (scale, zero-point, dtype).
-    3. a) If the producer op has **no** QPARAM, attach one, then replace
+    3. Give `q` its destination QPARAM independently of its consumer count.
+       It may survive because of another DQ or a direct integer consumer.
+       a) If the producer op has **no** QPARAM, attach one, then replace
           *this* DQ's usages with the producer op.
        b) If the producer is already quantized with different affine qparams,
           including a different scale or zero point with the same dtype, this
@@ -322,21 +324,28 @@ class FoldQuantOps(PassBase):
 
             _inherit_qparam_from_view_chain(op)
 
+            qdq_dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
+            qparam = QuantParam(
+                scale=[q_args.scale],
+                zero_point=[q_args.zero_p],
+                dtype=qdq_dtype,
+            )
+            # A matching DQ establishes the Q output's domain even when other
+            # consumers keep Q alive after this DQ is folded. Each DQ is still
+            # checked independently before rewiring its consumers.
+            if QPARAM_KEY not in q.meta:
+                q.meta[QPARAM_KEY] = qparam
+
             # ───────────────────────────────────────────
             # Case 1: op not yet quantized
             # ───────────────────────────────────────────
             if QPARAM_KEY not in op.meta:
-                qparam = QuantParam()
-                qparam.scale = [q_args.scale]
-                qparam.zero_point = [q_args.zero_p]
-                qparam.dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
-                op.meta[QPARAM_KEY] = qparam
+                op.meta[QPARAM_KEY] = copy.deepcopy(qparam)
 
                 if q.meta.get("_preserve_affine_clipping"):
                     # Native full-storage rounding followed by an explicit
                     # same-grid narrow clamp equals the original narrow Q.
                     # Keep the producer quantized: this is not a float fallback.
-                    q.meta[QPARAM_KEY] = copy.deepcopy(qparam)
                     dq.replace_all_uses_with(q, propagate_meta=False)
                 else:
                     dq.replace_all_uses_with(op, propagate_meta=False)
@@ -349,7 +358,6 @@ class FoldQuantOps(PassBase):
             # ───────────────────────────────────────────
             else:
                 op_qparam: QuantParam = op.meta[QPARAM_KEY]
-                qdq_dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
                 same_qparams = (
                     op_qparam.dtype == qdq_dtype
                     and op_qparam.scale == [q_args.scale]
@@ -364,14 +372,6 @@ class FoldQuantOps(PassBase):
                     same_qparams = False
 
                 if not same_qparams:
-                    if QPARAM_KEY not in q.meta:
-                        qparam = QuantParam()
-                        qparam.scale = [q_args.scale]
-                        qparam.zero_point = [q_args.zero_p]
-                        qparam.dtype = qdq_dtype
-                        q.meta[QPARAM_KEY] = qparam
-                        assert len(q.users) == 1, "Fix me unless"
-
                     dq.replace_all_uses_with(q, propagate_meta=False)
                     logger.debug(
                         f"{dq.name} is folded as requantization " f"({q.name} is left)."
