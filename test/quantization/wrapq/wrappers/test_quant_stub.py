@@ -24,6 +24,7 @@ from tico.quantization import QuantStub
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.quant_stub import QuantStubWrapper
 from tico.quantization.wrapq.wrappers.registry import lookup
@@ -79,6 +80,45 @@ class QuantStubTest(unittest.TestCase):
                     output = wrapper(input_)
                 self.assertEqual(tuple(output.shape), tuple(input_.shape))
                 self.assertTrue(torch.isfinite(output).all())
+
+    def test_recalibration_replaces_per_channel_extent(self) -> None:
+        """A fresh calibration cycle can grow or shrink its channel grid."""
+        wrapper = QuantStubWrapper(
+            QuantStub(),
+            qcfg=PTQConfig(
+                activation=affine(
+                    DType.uint(4),
+                    qscheme=QScheme.PER_CHANNEL_ASYMM,
+                    observer=MinMaxObserver,
+                    channel_axis=0,
+                ),
+            ),
+        )
+        for channels in (2, 3, 1):
+            with self.subTest(channels=channels):
+                scales = torch.arange(1, channels + 1, dtype=torch.float32)
+                calibration = scales[:, None] * torch.tensor([0.0, 15.0])
+                wrapper.enable_calibration()
+                torch.testing.assert_close(
+                    wrapper(calibration), calibration, rtol=0, atol=0
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "incompatible observed channel extent"
+                ):
+                    wrapper(torch.zeros(channels + 1, 2))
+                wrapper.freeze_qparams()
+                state = wrapper.obs_act_out.require_frozen()
+                assert state.scale is not None and state.zero_point is not None
+                torch.testing.assert_close(state.scale, scales, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    state.zero_point,
+                    torch.zeros(channels, dtype=torch.int32),
+                    rtol=0,
+                    atol=0,
+                )
+                inputs = scales[:, None] * torch.tensor([0.6, 14.4])
+                expected = scales[:, None] * torch.tensor([1.0, 14.0])
+                torch.testing.assert_close(wrapper(inputs), expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

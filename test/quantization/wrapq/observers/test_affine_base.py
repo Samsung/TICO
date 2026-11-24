@@ -18,6 +18,9 @@ import torch
 
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import ObserverNotReadyError
+from tico.quantization.wrapq.observers.ema import EMAObserver
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.reduce_utils import channelwise_minmax
 
@@ -131,6 +134,77 @@ class TestAffineObserverBase(unittest.TestCase):
         self.assertEqual(obs.min_val.item(), float("inf"))
         self.assertEqual(obs.max_val.item(), float("-inf"))
         self.assertFalse(obs.has_qparams)
+
+    def test_reset_allows_new_per_channel_extent(self):
+        """A fresh cycle owns only its new channels, ranges and quantization grid."""
+        for cls in (MinMaxObserver, EMAObserver):
+            for axis in (0, -1):
+                for channels in (1, 2, 3):
+                    for frozen in (False, True):
+                        with self.subTest(
+                            observer=cls.__name__,
+                            axis=axis,
+                            channels=channels,
+                            frozen=frozen,
+                        ):
+                            obs = cls(
+                                name="reset_channels",
+                                dtype=DType.uint(4),
+                                qscheme=QScheme.PER_CHANNEL_ASYMM,
+                                channel_axis=axis,
+                            )
+                            old = torch.tensor([[-100.0, 100.0], [-200.0, 200.0]])
+                            obs.collect(old)
+                            if frozen:
+                                obs.compute_qparams()
+                            obs.reset()
+                            self.assertEqual(obs.enabled, not frozen)
+                            self.assertIsNone(obs.frozen_state)
+                            self.assertFalse(obs.has_qparams)
+                            with self.assertRaisesRegex(
+                                ObserverNotReadyError, "missing or invalid calibration"
+                            ):
+                                obs.compute_qparams()
+
+                            obs.enabled = True
+                            scale = torch.arange(1, channels + 1, dtype=torch.float32)
+                            x = scale[:, None] * torch.tensor([0.0, 2.4, 15.0])
+                            expected = scale[:, None] * torch.tensor([0.0, 2.0, 15.0])
+                            if axis == -1:
+                                x, expected = x.T, expected.T
+                            obs.collect(x)
+                            actual_scale, zp = obs.compute_qparams()
+                            torch.testing.assert_close(
+                                actual_scale, scale, rtol=0, atol=0
+                            )
+                            self.assertEqual(zp.dtype, torch.int32)
+                            torch.testing.assert_close(
+                                zp, torch.zeros(channels, dtype=torch.int32)
+                            )
+                            torch.testing.assert_close(
+                                obs.fake_quant(x), expected, rtol=0, atol=0
+                            )
+
+    def test_reset_preserves_statistics_buffer_device_and_dtype(self):
+        """Reset preserves registered statistics after a dtype move."""
+        for cls in (MinMaxObserver, EMAObserver):
+            with self.subTest(observer=cls.__name__):
+                obs = cls(
+                    name="reset_buffers",
+                    qscheme=QScheme.PER_CHANNEL_ASYMM,
+                    channel_axis=0,
+                ).to(dtype=torch.float64)
+                obs.collect(torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float64))
+                obs.reset()
+                for name, value in (
+                    ("min_val", float("inf")),
+                    ("max_val", float("-inf")),
+                ):
+                    buffer = dict(obs.named_buffers())[name]
+                    self.assertEqual(buffer.device, torch.device("cpu"))
+                    self.assertEqual(buffer.dtype, torch.float64)
+                    torch.testing.assert_close(buffer, torch.full_like(buffer, value))
+                    torch.testing.assert_close(obs.state_dict()[name], buffer)
 
     def test_per_channel_fake_quant_path(self):
         # Ensure per-channel branch is exercised end-to-end
