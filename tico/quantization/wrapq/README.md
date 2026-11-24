@@ -47,6 +47,12 @@ A typical workflow consists of three conceptual stages:
 per-channel inputs and parameters. Mutating an input after collection does not
 change saved statistics; resetting the observer does not modify the observed tensor.
 
+Resetting an affine observer clears both its ranges and its recorded channel
+extent. A new calibration cycle may therefore use a different per-channel size;
+rank and channel extent must still agree within each cycle. Reset preserves buffer
+device and dtype and leaves collection and fake-quantization flags unchanged.
+`enable_calibration()` resets observers and explicitly enables collection.
+
 ### Freezing and checkpoints
 
 The common lifecycle coordinator enumerates active sites once through arbitrary

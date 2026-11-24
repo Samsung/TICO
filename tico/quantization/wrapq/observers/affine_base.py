@@ -117,8 +117,10 @@ class AffineObserverBase(ObserverBase):
         """
         assert isinstance(self.min_val, torch.Tensor)
         assert isinstance(self.max_val, torch.Tensor)
-        self.min_val.fill_(math.inf)
-        self.max_val.fill_(-math.inf)
+        # The new cycle has no channel extent yet. Retaining the old vector
+        # shape would constrain or broadcast the next cycle's statistics.
+        self.min_val = self.min_val.new_full((), math.inf)
+        self.max_val = self.max_val.new_full((), -math.inf)
         # Clear cached qparams while keeping buffer registration intact
         self._cached_scale = self._cached_scale.new_empty((0,))  # type: ignore[has-type]
         self._cached_zp = self._cached_zp.new_empty((0,), dtype=torch.int)  # type: ignore[has-type]
