@@ -163,6 +163,12 @@ so extending PTQ for a new model family simply requires subclassing and registra
 
 ### Native module semantics and dispatch
 
+`QuantLayerNorm` validates the wrapped module's current `normalized_shape`, input
+trailing dimensions, and affine parameter shapes before observation or
+normalization in every mode. Broadcastable shape mismatches and an empty
+normalized shape reject as in native LayerNorm. Leading dimensions may remain
+dynamic during export. The same `normalized_shape` determines the reduction axes.
+
 `QuantConvTranspose2d` preserves the native optional `output_size` argument in
 floating, calibration, and quantized modes. The wrapped ConvTranspose2d resolves
 spatial or full output sizes, including unbatched inputs, and rejects unreachable
@@ -184,6 +190,34 @@ boundaries raise an error or allow the existing recursive traversal to continue.
 Once a registered wrapper is selected, its constructor errors propagate unchanged
 in either mode. A wrapper's `NotImplementedError` for an unsupported model variant
 therefore fails preparation immediately, including with `strict_wrap=False`.
+
+### LayerNorm arithmetic
+
+`QuantLayerNorm` keeps its input and output observer sites in the input dtype.
+For FP16 and BF16 inputs, normalization and affine arithmetic use FP32 in all
+modes, including calibration and frozen fake quantization. Intermediate observers
+see those FP32 values; the result returns to the input dtype before the output
+site, including with FP32 affine parameters. FP32 and FP64 inputs retain their
+arithmetic precision. Unsupported affine dtype mixtures reject before observation;
+parameters must match the input dtype or uniformly use FP32 for FP16/BF16 inputs.
+Fresh calibration benefits from the corrected ranges.
+
+The wrapped native module owns epsilon as a Python scalar. The epsilon observer
+receives a tensor in the accumulator dtype and input device, so moving the wrapper
+to FP16 cannot underflow epsilon. Checkpoint metadata validates that the receiving
+module uses the same configured epsilon. Legacy epsilon buffers are consumed on
+load only when they are finite scalars matching that epsilon at their storage
+precision, preserving the exact frozen grids. Corrupt, mismatched, or underflowed
+legacy epsilon rejects with recalibration guidance, including non-strict loads.
+
+Observer storage precision remains a separate constraint. Preparing an FP16 source
+module retains FP32 observer buffers. Calling `.half()` on an entire wrapper also
+demotes those buffers; all-zero affine ranges can then underflow their scale floor
+and fail freezing. The arithmetic correction does not change that observer policy.
+
+These eager dtype contracts do not extend the Circle serializer's supported
+dtypes: FP32 LayerNorm export remains supported; FP16, BF16 and FP64 conversion
+still reject explicitly.
 
 ### Gemma4 grouped attention boundaries
 
