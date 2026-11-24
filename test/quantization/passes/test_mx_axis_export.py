@@ -108,6 +108,22 @@ class _MXPadToAffine(torch.nn.Module):
         return torch.fake_quantize_per_tensor_affine(value, 0.5, 0, -32768, 32767)
 
 
+class _MXInputLinear(torch.nn.Module):
+    """INT16 producer, MXINT8 Linear activation and INT16 Linear output."""
+
+    weight: torch.Tensor
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("weight", torch.linspace(-1, 1, 32 * 64).reshape(32, 64))
+
+    def forward(self, value):
+        value = torch.fake_quantize_per_tensor_affine(value, 0.25, 0, -32768, 32767)
+        value = quantize_mx(value, "int8", -1)
+        value = torch.nn.functional.linear(value, self.weight)
+        return torch.fake_quantize_per_tensor_affine(value, 0.5, 0, -32768, 32767)
+
+
 def _export(module, value, optimize, *, move_affine_quantize_before_layout=None):
     config = tico.CompileConfigV1(circle_optimize=optimize)
     if move_affine_quantize_before_layout is not None:
@@ -448,6 +464,45 @@ class MXAxisExportTest(unittest.TestCase):
                 quantize_mx(merged, "int8", -1),
             )
         )
+
+    def test_mx_input_linear_keeps_its_int16_output(self):
+        for optimize in (False, True):
+            with self.subTest(optimize=optimize):
+                model = _export(_MXInputLinear(), torch.ones(1, 3, 64), optimize)
+                graph = model.subgraphs[0]
+                quantizes = _quantize_operators(model)
+                self.assertEqual(len(quantizes), 1)
+                into_mx = quantizes[0]
+                self.assertEqual(into_mx.inputs[0], graph.inputs[0])
+                source = graph.tensors[into_mx.inputs[0]]
+                self._assert_tensor(
+                    source, (1, 3, 64), 0, circle.TensorType.TensorType.INT16
+                )
+                self.assertEqual(list(source.quantization.scale), [0.25])
+                self._assert_tensor(
+                    graph.tensors[into_mx.outputs[0]],
+                    (1, 3, 64),
+                    2,
+                    circle.TensorType.TensorType.MXINT8,
+                )
+                linears = [
+                    op
+                    for op in graph.operators
+                    if model.operatorCodes[op.opcodeIndex].builtinCode
+                    == circle.BuiltinOperator.BuiltinOperator.FULLY_CONNECTED
+                ]
+                self.assertEqual(len(linears), 1)
+                self.assertEqual(len(graph.operators), 2)
+                # The Linear reads the MXINT8 activation directly and produces
+                # the calibrated INT16 output without another conversion.
+                self.assertEqual(linears[0].inputs[0], into_mx.outputs[0])
+                self.assertEqual(linears[0].outputs[0], graph.outputs[0])
+                output = graph.tensors[graph.outputs[0]]
+                self._assert_tensor(
+                    output, (1, 3, 32), 0, circle.TensorType.TensorType.INT16
+                )
+                self.assertEqual(list(output.quantization.scale), [0.5])
+                self.assertEqual(list(output.quantization.zeroPoint), [0])
 
 
 if __name__ == "__main__":

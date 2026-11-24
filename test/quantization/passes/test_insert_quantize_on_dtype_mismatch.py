@@ -725,6 +725,45 @@ class LinearDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
         with self.assertRaises(NotYetSupportedError):
             target_pass.call(self.ep)
 
+    def _setup_linear_domains(self, input_qparam: QuantParam, output_qparam):
+        """Install explicit activation and output domains on one Linear."""
+        self.setup(SimpleLinear(), torch.ops.aten.linear.default)
+        self.target.args[0].meta[QPARAM_KEY] = copy.deepcopy(input_qparam)
+        self.target.meta[QPARAM_KEY] = copy.deepcopy(output_qparam)
+
+    def test_mx_to_i16_linear_keeps_both_domains(self):
+        mx_qparam = QuantParam(dtype="mxint8", quantized_dimension=1)
+        i16_qparam = QuantParam(scale=[0.5], zero_point=[0], dtype="int16")
+        self._setup_linear_domains(mx_qparam, i16_qparam)
+        nodes_before = [node.name for node in self.ep.graph.nodes]
+        users_before = list(self.target.users)
+
+        InsertQuantizeOnDtypeMismatch().call(self.ep)
+
+        # An MXINT8 activation with an INT16 output is a native Linear
+        # signature: no Quantize is inserted and neither domain is retargeted.
+        self.assertEqual([node.name for node in self.ep.graph.nodes], nodes_before)
+        self.assertEqual(list(self.target.users), users_before)
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY], mx_qparam)
+        self.assertEqual(self.target.meta[QPARAM_KEY], i16_qparam)
+
+    def test_other_mx_linear_boundaries_remain_unsupported(self):
+        mx_qparam = QuantParam(dtype="mxint8", quantized_dimension=1)
+        cases = (
+            # The reverse direction is not the admitted signature.
+            (QuantParam(scale=[0.5], zero_point=[0], dtype="int16"), mx_qparam),
+            # Only an INT16 output is admitted for an MXINT8 activation.
+            (mx_qparam, QuantParam(scale=[0.5], zero_point=[0], dtype="uint8")),
+        )
+        for input_qparam, output_qparam in cases:
+            with self.subTest(source=input_qparam.dtype, output=output_qparam.dtype):
+                self._setup_linear_domains(input_qparam, output_qparam)
+                with self.assertRaisesRegex(
+                    NotYetSupportedError,
+                    f"From {input_qparam.dtype} to {output_qparam.dtype}",
+                ):
+                    InsertQuantizeOnDtypeMismatch().call(self.ep)
+
 
 class MulDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
     def test_no_mismatch_mul(self):
