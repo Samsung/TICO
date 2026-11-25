@@ -284,10 +284,13 @@ def lookup_gemma4_selected_token_inputs(
     ).reshape(-1, width)
     if quantized:
         observer = cast(AffineObserverBase, embedding.obs_weight)
-        if observer.channel_axis is None:
+        state = observer.require_frozen()
+        # A frozen grid can be retained while weight fake quantization is
+        # disabled. Preserve that live bypass after gathering original values.
+        if state.fake_quant_enabled and observer.channel_axis is None:
             selected = observer.fake_quant(selected)
-        else:
-            state = observer.require_frozen()
+        elif state.fake_quant_enabled:
+            assert observer.channel_axis is not None
             assert state.scale is not None and state.zero_point is not None
             axis = int(observer.channel_axis) % 2
             if axis == 0:

@@ -447,6 +447,12 @@ class StaticGemma4Runtime:
         self._split_ple_stages: Optional[
             tuple[nn.Module, nn.Module, nn.Module, nn.Module]
         ] = None
+        self._model_backed_split_ple_stages: Optional[
+            tuple[nn.Module, nn.Module, nn.Module, nn.Module]
+        ] = None
+        self._selective_ple_embedding: Optional[nn.Module] = None
+        self._model_backed_selective_ple_embedding: Optional[nn.Module] = None
+        self._model_backed_selective_ple_enabled = False
         if ple_prefill_split and self._has_split_ple():
             self._get_split_ple_stages()
         self._text_pipeline: Optional["Gemma4TextPipeline"] = None
@@ -511,6 +517,7 @@ class StaticGemma4Runtime:
         self.decode_layers = nn.ModuleList(pipeline.decode_layers)
         self.lm_head = pipeline.lm_head
         self._text_pipeline = pipeline
+        self._sync_ple_frontend()
         self.reset_cache()
 
     def reset_cache(self) -> None:
@@ -557,15 +564,63 @@ class StaticGemma4Runtime:
         NPU-exportable ``ple_projection`` stage. Returns ``None`` when PLE is
         disabled for the model.
         """
+        self._sync_ple_frontend()
         if not self.text_model.hidden_size_per_layer_input:
             return None
         if self.ple_embedding is None or self.ple_projection is None:
             raise RuntimeError("Gemma4 PLE stages are not initialized.")
         lookup = self.ple_embedding
         if input_ids.shape[1] == 1:
-            lookup = getattr(self, "_selective_ple_embedding", None) or lookup
+            lookup = self._get_selective_ple_embedding() or lookup
         per_layer_token_inputs = lookup(input_ids)
         return self.ple_projection(inputs_embeds, per_layer_token_inputs)
+
+    def _sync_ple_frontend(self) -> None:
+        """Invalidate only our derived stages when installed frontend objects change.
+
+        Public frontend fields may be replaced before ``use_text_pipeline`` or
+        the next invocation. Explicit host/Circle stages installed in the private
+        phase slots belong to the caller and survive this synchronization.
+        """
+        source = (
+            self.text_model,
+            getattr(self, "ple_embedding", None),
+            getattr(self, "ple_projection", None),
+        )
+        previous = getattr(self, "_ple_cache_source", None)
+        if previous is not None and not all(
+            current is old for current, old in zip(source, previous)
+        ):
+            owned_split = getattr(self, "_model_backed_split_ple_stages", None)
+            owned_lookup = getattr(self, "_model_backed_selective_ple_embedding", None)
+            if (
+                owned_split is not None
+                and getattr(self, "_split_ple_stages", None) is owned_split
+            ):
+                self._split_ple_stages = None
+            if (
+                owned_lookup is not None
+                and getattr(self, "_selective_ple_embedding", None) is owned_lookup
+            ):
+                self._selective_ple_embedding = None
+            # Do not retain the replaced model/table through ownership records.
+            self._model_backed_split_ple_stages = None
+            self._model_backed_selective_ple_embedding = None
+        self._ple_cache_source = source
+
+    def _get_selective_ple_embedding(self) -> Optional[nn.Module]:
+        """Reuse an explicit lookup or lazily rebuild our current-source lookup."""
+        self._sync_ple_frontend()
+        lookup = getattr(self, "_selective_ple_embedding", None)
+        if (
+            lookup is None
+            and getattr(self, "_model_backed_selective_ple_enabled", False)
+            and isinstance(self.ple_embedding, Gemma4PLEEmbeddingExportAdapter)
+        ):
+            lookup = Gemma4PLEEmbeddingExportAdapter(self.text_model, selective=True)
+            self._selective_ple_embedding = lookup
+            self._model_backed_selective_ple_embedding = lookup
+        return lookup
 
     def _has_split_ple(self) -> bool:
         return bool(self.text_model.hidden_size_per_layer_input) and (
@@ -577,9 +632,17 @@ class StaticGemma4Runtime:
     ) -> tuple[nn.Module, nn.Module, nn.Module, nn.Module]:
         # All adapters reference the original shared storage. Construct once, never
         # serialize a host table or copy the text model during an invocation.
+        self._sync_ple_frontend()
         validate_gemma4_ple_slicing_state(self.text_model)
         stages = getattr(self, "_split_ple_stages", None)
         if stages is None:
+            if not isinstance(
+                self.ple_embedding, Gemma4PLEEmbeddingExportAdapter
+            ) or not isinstance(self.ple_projection, Gemma4PLEProjectionExportAdapter):
+                raise ValueError(
+                    "Custom Gemma4 PLE frontends require explicitly installed "
+                    "_split_ple_stages for split prefill."
+                )
             k = self.shared_kv_suffix_start
             stages = (
                 Gemma4PLEEmbeddingExportAdapter(self.text_model, layer_end=k),
@@ -588,9 +651,9 @@ class StaticGemma4Runtime:
                 Gemma4PLEProjectionExportAdapter(self.text_model, layer_start=k),
             )
             self._split_ple_stages = stages
-            self._selective_ple_embedding = Gemma4PLEEmbeddingExportAdapter(
-                self.text_model, selective=True
-            )
+            self._model_backed_split_ple_stages = stages
+            self._model_backed_selective_ple_enabled = True
+        self._get_selective_ple_embedding()
         return stages
 
     def _build_split_per_layer_inputs(

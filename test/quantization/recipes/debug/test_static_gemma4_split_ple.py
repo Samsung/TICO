@@ -16,6 +16,7 @@
 
 import unittest
 import weakref
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -25,8 +26,21 @@ from tico.quantization.recipes.debug.static_gemma4_runtime import (
     StaticGemma4RuntimeConfig,
 )
 
+from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_layer_type_head_dim
+
 from test.quantization.recipes.debug import test_static_gemma4_finalize as fixture
 from test.quantization.wrapq.wrappers.gemma4.test_quant_text_model import _has_gemma4
+
+
+class _ExplicitPLEStage(torch.nn.Module):
+    """A caller-owned stage that forwards one lookup or two projection inputs."""
+
+    def __init__(self, stage):
+        super().__init__()
+        self.stage = stage
+
+    def forward(self, *args):
+        return self.stage(*args)
 
 
 @unittest.skipUnless(_has_gemma4(), "transformers Gemma4 modules are required")
@@ -286,6 +300,233 @@ class TestStaticGemma4SplitPLE(unittest.TestCase):
         prefix_lookup, _, suffix_lookup, _ = runtime._get_split_ple_stages()
         self.assertEqual((prefix_lookup.layer_start, prefix_lookup.layer_end), (0, 4))
         self.assertEqual((suffix_lookup.layer_start, suffix_lookup.layer_end), (4, 6))
+
+    @staticmethod
+    def _replace_frontend(runtime, replacement, *, decoder=True):
+        """Reproduce the documented field-based calibrated frontend install."""
+        names = ["text_model", "token_embedding", "ple_embedding", "ple_projection"]
+        if decoder:
+            names += ["prefill_layers", "decode_layers", "lm_head"]
+        for name in names:
+            setattr(runtime, name, getattr(replacement, name))
+
+    def _replacement_parity(self, *, split, saved_pipeline=False):
+        runtime = fixture.make_runtime()
+        # Construction with ple_prefill_split=true performs this eager setup;
+        # it must not pin the original FP lookup or projection after replacement.
+        old_stages = runtime._get_split_ple_stages()
+        replacement = fixture.make_runtime(quantized=True)
+        frozen_before = _state_contract(replacement.text_model)
+        batch = fixture.make_batch(4)
+        expected_ple = []
+        actual_ple = []
+        expected_handle = replacement.ple_projection.register_forward_hook(
+            lambda module, args, result: expected_ple.append(result.clone())
+        )
+        with torch.no_grad():
+            expected_prefill = replacement.prefill(batch, last_token_only=False)
+            expected_prefill_cache = fixture.cache_snapshot(replacement)
+            expected_decode = []
+            for token in (17, 8):
+                logits = replacement.decode_one(torch.tensor([[token]]))
+                expected_decode.append(
+                    (
+                        logits.clone(),
+                        fixture.cache_snapshot(replacement),
+                        replacement.past_len,
+                    )
+                )
+        expected_handle.remove()
+        self._replace_frontend(runtime, replacement, decoder=not saved_pipeline)
+        if saved_pipeline:
+            specs = []
+            for kind, layer in zip(
+                replacement.text_config.layer_types, replacement.text_model.layers
+            ):
+                attention = layer.wrapped.self_attn.wrapped
+                specs.append(
+                    {
+                        "layer_type": kind,
+                        "head_dim": gemma4_layer_type_head_dim(
+                            replacement.text_config, kind
+                        ),
+                        "num_kv_heads": attention.config.num_attention_heads
+                        // attention.num_key_value_groups,
+                        "sliding_window": attention.sliding_window,
+                    }
+                )
+            pipeline = SimpleNamespace(
+                suffix_start=replacement.shared_kv_suffix_start,
+                producer_indices=replacement.shared_kv_producers,
+                hidden_size=replacement.text_config.hidden_size,
+                ple_dim=replacement.text_model.hidden_size_per_layer_input,
+                rope_convention=replacement.rope_convention,
+                layers=specs,
+                prefill_layers=replacement.prefill_layers,
+                decode_layers=replacement.decode_layers,
+                lm_head=replacement.lm_head,
+                finalize_supported=True,
+            )
+            with mock.patch(
+                "tico.quantization.recipes.export.gemma4_text_pipeline.load_gemma4_text_pipeline",
+                return_value=pipeline,
+            ) as loader:
+                runtime.use_text_pipeline("calibrated-artifacts")
+            loader.assert_called_once_with(
+                "calibrated-artifacts", expected_max_seq_len=10, expected_num_layers=4
+            )
+            self.assertEqual(runtime.past_len, 0)
+            self.assertEqual(runtime.layer_caches, [])
+        handles = [
+            runtime.ple_projection.register_forward_hook(
+                lambda module, args, result: actual_ple.append(result.clone())
+            )
+        ]
+        split_ple = []
+        if split:
+            stages = runtime._get_split_ple_stages()
+            for module in (stages[1], stages[3]):
+                handles.append(
+                    module.register_forward_hook(
+                        lambda module, args, result: split_ple.append(result.clone())
+                    )
+                )
+        with torch.no_grad():
+            actual = runtime.prefill(
+                batch, last_token_only=split, ple_prefill_split=split
+            )
+            torch.testing.assert_close(actual, expected_prefill, atol=1e-5, rtol=1e-5)
+            self.assert_caches_close(runtime, expected_prefill_cache)
+            self.assertEqual(runtime.past_len, 4)
+            if split:
+                self.assertEqual(len(split_ple), 2)
+                torch.testing.assert_close(
+                    split_ple[0], expected_ple[0][:, :, :2], atol=0, rtol=0
+                )
+                torch.testing.assert_close(
+                    split_ple[1], expected_ple[0][:, 3:4, 2:], atol=0, rtol=0
+                )
+            else:
+                torch.testing.assert_close(
+                    actual_ple[0], expected_ple[0], atol=0, rtol=0
+                )
+            for token, (expected, cache, past_len) in zip((17, 8), expected_decode):
+                result = runtime.decode_one(torch.tensor([[token]]))
+                torch.testing.assert_close(
+                    actual_ple[-1], expected_ple[past_len - 4], atol=0, rtol=0
+                )
+                torch.testing.assert_close(result, expected, atol=1e-5, rtol=1e-5)
+                self.assert_caches_close(runtime, cache)
+                self.assertEqual(runtime.past_len, past_len)
+        for handle in handles:
+            handle.remove()
+        refreshed = runtime._get_split_ple_stages()
+        self.assertIsNot(refreshed, old_stages)
+        self.assertIs(runtime._get_split_ple_stages(), refreshed)
+        self.assertEqual(_state_contract(replacement.text_model), frozen_before)
+
+    def test_replaced_calibrated_frontend_full_prefill_and_continuation(self):
+        self._replacement_parity(split=False)
+
+    def test_replaced_calibrated_frontend_split_prefill_and_continuation(self):
+        self._replacement_parity(split=True)
+
+    def test_legacy_frontend_install_with_saved_text_pipeline(self):
+        # Only file loading is mocked: real frozen frontend and decoder stages
+        # execute through the public use_text_pipeline/prefill/decode route.
+        self._replacement_parity(split=True, saved_pipeline=True)
+
+    def test_same_frontend_reuses_cached_range_and_decode_lookup_stages(self):
+        runtime = fixture.make_runtime(quantized=True)
+        stages = runtime._get_split_ple_stages()
+        selected = runtime._selective_ple_embedding
+        with torch.no_grad():
+            for _ in range(2):
+                runtime.prefill(
+                    fixture.make_batch(4), last_token_only=True, ple_prefill_split=True
+                )
+                runtime.decode_one(torch.tensor([[17]]))
+                self.assertIs(runtime._get_split_ple_stages(), stages)
+                self.assertIs(runtime._selective_ple_embedding, selected)
+        runtime.reset_cache()
+        self.assertIs(runtime._get_split_ple_stages(), stages)
+
+    def test_explicit_decode_lookup_survives_owned_split_cache_refresh(self):
+        runtime = fixture.make_runtime()
+        old_stages = runtime._get_split_ple_stages()
+        replacement = fixture.make_runtime(quantized=True)
+        replacement._get_split_ple_stages()
+        custom_lookup = torch.nn.Sequential(replacement._selective_ple_embedding)
+        self._replace_frontend(runtime, replacement)
+        runtime._selective_ple_embedding = custom_lookup
+        refreshed = runtime._get_split_ple_stages()
+        self.assertIsNot(refreshed, old_stages)
+        self.assertIs(runtime._selective_ple_embedding, custom_lookup)
+        batch = fixture.make_batch(4)
+        with torch.no_grad():
+            expected = replacement.prefill(
+                batch, last_token_only=True, ple_prefill_split=True
+            )
+            expected_decode = replacement.decode_one(torch.tensor([[17]]))
+            actual = runtime.prefill(
+                batch, last_token_only=True, ple_prefill_split=True
+            )
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+            actual_decode = runtime.decode_one(torch.tensor([[17]]))
+            torch.testing.assert_close(
+                actual_decode, expected_decode, atol=1e-5, rtol=1e-5
+            )
+        self.assertIs(runtime._get_split_ple_stages(), refreshed)
+        self.assertIs(runtime._selective_ple_embedding, custom_lookup)
+
+    def test_explicit_split_stages_survive_owned_decode_lookup_refresh(self):
+        runtime = fixture.make_runtime()
+        runtime._get_split_ple_stages()
+        old_lookup = runtime._selective_ple_embedding
+        replacement = fixture.make_runtime(quantized=True)
+        custom_stages = tuple(
+            _ExplicitPLEStage(stage) for stage in replacement._get_split_ple_stages()
+        )
+        self._replace_frontend(runtime, replacement)
+        runtime._split_ple_stages = custom_stages
+        self.assertIs(runtime._get_split_ple_stages(), custom_stages)
+        batch = fixture.make_batch(4)
+        with torch.no_grad():
+            expected = replacement.prefill(
+                batch, last_token_only=True, ple_prefill_split=True
+            )
+            expected_decode = replacement.decode_one(torch.tensor([[17]]))
+            actual = runtime.prefill(
+                batch, last_token_only=True, ple_prefill_split=True
+            )
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+            actual_decode = runtime.decode_one(torch.tensor([[17]]))
+            torch.testing.assert_close(
+                actual_decode, expected_decode, atol=1e-5, rtol=1e-5
+            )
+        self.assertIs(runtime._get_split_ple_stages(), custom_stages)
+        self.assertIsNot(runtime._selective_ple_embedding, old_lookup)
+
+    def test_custom_full_frontend_requires_explicit_split_stages(self):
+        for name in ("ple_embedding", "ple_projection"):
+            with self.subTest(stage=name):
+                runtime = fixture.make_runtime()
+                runtime._get_split_ple_stages()
+                batch = fixture.make_batch(4)
+                with torch.no_grad():
+                    expected = runtime.prefill(batch, last_token_only=False)
+                custom = _ExplicitPLEStage(getattr(runtime, name))
+                setattr(runtime, name, custom)
+                with self.assertRaisesRegex(
+                    ValueError, "explicitly installed _split_ple_stages"
+                ):
+                    runtime.prefill(batch, last_token_only=True, ple_prefill_split=True)
+                self.assertIs(getattr(runtime, name), custom)
+                self.assertIsNone(runtime._split_ple_stages)
+                with torch.no_grad():
+                    actual = runtime.prefill(batch, last_token_only=False)
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                self.assertIs(getattr(runtime, name), custom)
 
     def test_config_default_reference_override_and_type_diagnostics(self):
         self.assertFalse(StaticGemma4RuntimeConfig().ple_prefill_split)

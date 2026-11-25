@@ -204,6 +204,8 @@ class TestGemma4SplitPLECircle(unittest.TestCase):
             runtime.lm_head = self._circle(
                 root, "lm_head", runtime.lm_head, (h0[:, :1],), {}, quantized
             )
+            installed_split = runtime._split_ple_stages
+            installed_projection = runtime.ple_projection
             outcomes = []
             for last_token_only, split in ((False, False), (True, False), (True, True)):
                 logits = runtime.prefill(
@@ -220,6 +222,10 @@ class TestGemma4SplitPLECircle(unittest.TestCase):
                         )
                     )
                 outcomes.append((logits, cache, steps))
+                self.assertIs(runtime.ple_embedding, host)
+                self.assertIs(runtime._selective_ple_embedding, host)
+                self.assertIs(runtime._split_ple_stages, installed_split)
+                self.assertIs(runtime.ple_projection, installed_projection)
             baseline, baseline_cache, baseline_steps = outcomes[0]
             torch.testing.assert_close(baseline, eager, atol=1e-5, rtol=1e-5)
             for result, cache, steps in outcomes:

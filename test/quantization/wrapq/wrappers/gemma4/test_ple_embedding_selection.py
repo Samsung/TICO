@@ -135,6 +135,55 @@ class TestGemma4PLEEmbeddingSelection(unittest.TestCase):
                     if state is not None:
                         self.assertEqual(state, _state_contract(text))
 
+    def test_disabled_frozen_weight_fake_quant_preserves_selected_lookup(self):
+        ids = torch.tensor([[0, 3, 3, 17, 0, 0]])
+        native = torch.fake_quantize_per_channel_affine
+        for fused in (True, False):
+            for axis in (0, 1, -2, -1):
+                text = make_text(
+                    fused=fused, dtype=DType.uint(8), identity=True, weight_axis=axis
+                )
+                full = Gemma4PLEEmbeddingExportAdapter(text)
+                observer = text.embed_tokens_per_layer.obs_weight
+                frozen_before = observer.require_frozen()
+                observer.disable_fake_quant()
+                state = _state_contract(text)
+                prefix = Gemma4PLEEmbeddingExportAdapter(text, layer_end=1)
+                suffix = Gemma4PLEEmbeddingExportAdapter(text, layer_start=1)
+                selective_full = Gemma4PLEEmbeddingExportAdapter(text, selective=True)
+                with torch.no_grad():
+                    expected = full(ids)
+                    cases = (
+                        ("prefix", prefix, ids, expected[:, :, :1]),
+                        ("suffix", suffix, ids[:, 3:4], expected[:, 3:4, 1:]),
+                        ("full_layers", selective_full, ids, expected),
+                    )
+                    with mock.patch.object(
+                        torch, "fake_quantize_per_channel_affine", wraps=native
+                    ) as kernel:
+                        for phase, producer, selected_ids, reference in cases:
+                            with self.subTest(fused=fused, axis=axis, phase=phase):
+                                actual = producer(selected_ids)
+                                torch.testing.assert_close(
+                                    actual, reference, atol=0, rtol=0
+                                )
+                        with self.subTest(
+                            fused=fused, axis=axis, phase="weight_kernel"
+                        ):
+                            kernel.assert_not_called()
+                self.assertFalse(observer.fake_quant_enabled)
+                self.assertFalse(observer.require_frozen().fake_quant_enabled)
+                torch.testing.assert_close(
+                    observer.require_frozen().scale, frozen_before.scale, atol=0, rtol=0
+                )
+                torch.testing.assert_close(
+                    observer.require_frozen().zero_point,
+                    frozen_before.zero_point,
+                    atol=0,
+                    rtol=0,
+                )
+                self.assertEqual(state, _state_contract(text))
+
     def test_weight_fake_quant_kernel_only_sees_selected_rows_and_columns(self):
         text = make_text(fused=False, dtype=DType.uint(8))
         ids = torch.tensor([[0, 3, 3, 17, 0, 0]])

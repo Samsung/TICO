@@ -485,6 +485,37 @@ for token_ids in continuation_tokens:  # Each tensor has shape [1, 1].
     logits = runtime.decode_one(token_ids)
 ```
 
+Replace all four frontend fields together, as above, with stages from the same
+calibrated checkpoint and static profile. The runtime tracks the identities of
+`text_model`, `ple_embedding`, and `ple_projection`. When any changes, it drops
+only its automatically generated split PLE and selective lookup adapters. This
+synchronization runs in `use_text_pipeline()` and before subsequent PLE calls,
+so field replacement also works without a saved decoder pipeline. Current-source
+adapters are rebuilt lazily and reused while the frontend is unchanged. Existing
+mode/capability guards still apply; changing quantization mode in place requires
+rebuilding the public export adapters. Start a new prefill after replacement;
+`use_text_pipeline()` resets the generation cache.
+
+Explicit host lookup and Circle projection connections remain caller-owned. A
+caller can replace `ple_embedding`/`ple_projection` with the full-range host and
+projection stages and install the corresponding phase stages:
+
+```python
+runtime._selective_ple_embedding = shared_host_lookup
+runtime._split_ple_stages = (
+    prefix_lookup, prefix_projection_circle,
+    suffix_lookup, suffix_projection_circle,
+)
+```
+
+The runtime preserves these explicitly replaced slots independently, including
+when it invalidates another slot it generated itself. Keep these stages matched
+to the installed frontend and checkpoint; replace explicit stages together when
+switching artifact sets. Opaque host/Circle frontends need explicit split stages
+for split prefill: the runtime cannot derive their layer ranges from a full-range
+artifact and reports a missing split-stage connection instead of substituting
+model-backed producers. The single host table remains shared by all lookup views.
+
 For a PLE-disabled model leave `ple_embedding`, `ple_projection`, and `full_ple`
 as `None`. This entry does not rerun embedding or layer 0 during finalize.
 
@@ -566,7 +597,12 @@ re-estimating qparams. Adapter creation and tracing do not recalibrate or change
 source modes, and detached stages retain the live source capability guard.
 For the selected `.pt` lookup, QUANT weights require an enabled affine grid
 (per-tensor, vocabulary-row axis 0, or column axis 1, including negative-axis
-equivalents); Identity/bypassed/MX lookup weights reject explicitly. Projection
+equivalents); Identity/bypass-only/MX lookup weights reject explicitly. For
+model-backed lookup, disabling weight fake quantization after freezing preserves
+the original selected weights and retained grid, matching full lookup, while the
+activation observers still run. This does not extend the existing integer `.pt`
+artifact contract to storing off-grid original weights with weight FQ disabled.
+Projection
 weights support identity, per-tensor affine, or output-row affine grids. Norm
 weights remain on the unchanged P axis. Identity and disabled activation payloads
 reuse the existing host schemas and replay no fake-quant operation.
