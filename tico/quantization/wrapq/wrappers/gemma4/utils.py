@@ -208,6 +208,20 @@ def validate_gemma4_single_token_quantization(
         )
 
 
+def gemma4_single_token_quantization_supported(
+    layers: Iterable[nn.Module],
+    *,
+    per_layer_input_observer: Optional[ObserverBase] = None,
+) -> bool:
+    """Report policy support for manifests without disabling ordinary export."""
+    return (
+        _gemma4_single_token_quantization_issue(
+            layers, per_layer_input_observer=per_layer_input_observer
+        )
+        is None
+    )
+
+
 def _gemma4_single_token_quantization_issue(
     layers: Iterable[nn.Module],
     *,

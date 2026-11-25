@@ -36,6 +36,10 @@ if TYPE_CHECKING:
     )
     from transformers.models.gemma4.processing_gemma4 import Gemma4Processor
 
+    from tico.quantization.recipes.export.gemma4_text_pipeline import Gemma4TextPipeline
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+        QuantGemma4TextAttention,
+    )
 from transformers.feature_extraction_utils import BatchFeature
 from typing_extensions import NotRequired
 
@@ -268,10 +272,13 @@ class StaticGemma4RuntimeConfig:
     gen_steps: int = 16
     rope: RopeConvention = "pre_negated_sin"
     last_token_only_prefill: bool = False
+    text_artifacts: Optional[str] = None
 
     def __post_init__(self) -> None:
         if type(self.last_token_only_prefill) is not bool:
             raise ValueError("last_token_only_prefill must be a boolean.")
+        if self.text_artifacts is not None and not isinstance(self.text_artifacts, str):
+            raise ValueError("text_artifacts must be a directory path or null.")
 
 
 class StaticGemma4Runtime:
@@ -287,6 +294,7 @@ class StaticGemma4Runtime:
         device: str = "cpu",
         rope: RopeConvention = "pre_negated_sin",
         last_token_only_prefill: bool = False,
+        text_artifacts: Optional[str] = None,
     ):
         """Create an NPU-profile runtime; ``rope="hf"`` is an explicit override."""
         layout.validate()
@@ -380,7 +388,7 @@ class StaticGemma4Runtime:
             visual_start_idx=vision_profile.visual_start_idx,
             num_visual_tokens=vision_profile.num_visual_tokens,
         ).to(self.device)
-        self.lm_head = Gemma4LMHeadExportAdapter(wrapped_top).to(self.device)
+        self.lm_head: nn.Module = Gemma4LMHeadExportAdapter(wrapped_top).to(self.device)
 
         self.prefill_layers = nn.ModuleList(
             [
@@ -415,9 +423,69 @@ class StaticGemma4Runtime:
             resolve_gemma4_shared_kv_suffix(self.text_model.layers)
         )
         self.last_token_only_prefill = last_token_only_prefill
+        self._text_pipeline: Optional["Gemma4TextPipeline"] = None
+        if text_artifacts is not None:
+            self.use_text_pipeline(text_artifacts)
 
         self.layer_caches: list[LayerCache] = []
         self.past_len = 0
+
+    def use_text_pipeline(self, directory: str) -> None:
+        """Select verified saved Circle decoder stages and final norm/head.
+
+        The frontend remains model-backed. Call :meth:`prefill_decoder` with
+        externally produced fused embeddings/PLE to chain a calibrated frontend.
+        Circle execution uses the explicit CPU reference backend. Selecting a
+        pipeline resets any previous generation cache.
+        """
+        from tico.quantization.recipes.export.gemma4_text_pipeline import (
+            load_gemma4_text_pipeline,
+        )
+
+        if self.device.type != "cpu":
+            raise ValueError(
+                "Saved Gemma4 text stages require the CPU reference runtime."
+            )
+        pipeline = load_gemma4_text_pipeline(
+            directory,
+            expected_max_seq_len=self.layout.max_seq,
+            expected_num_layers=len(self.text_model.layers),
+        )
+        if (
+            pipeline.suffix_start != self.shared_kv_suffix_start
+            or pipeline.producer_indices != self.shared_kv_producers
+        ):
+            raise ValueError("Gemma4 text pipeline shared-KV topology mismatch.")
+        if (
+            pipeline.hidden_size != int(self.text_config.hidden_size)
+            or pipeline.ple_dim != int(self.text_model.hidden_size_per_layer_input)
+            or pipeline.rope_convention != self.rope_convention
+            or any(
+                layer["layer_type"] != self.text_config.layer_types[index]
+                or layer["head_dim"]
+                != gemma4_layer_type_head_dim(self.text_config, layer["layer_type"])
+                for index, layer in enumerate(pipeline.layers)
+            )
+        ):
+            raise ValueError("Gemma4 text pipeline model/profile contract mismatch.")
+        for spec, layer in zip(pipeline.layers, self.text_model.layers):
+            attention = cast(
+                "QuantGemma4TextAttention",
+                cast(QuantGemma4TextDecoderLayer, layer.wrapped).self_attn.wrapped,
+            )
+            attention_config: Any = attention.config
+            if (
+                spec["num_kv_heads"]
+                != int(attention_config.num_attention_heads)
+                // int(cast(int, attention.num_key_value_groups))
+                or spec["sliding_window"] != attention.sliding_window
+            ):
+                raise ValueError("Gemma4 text pipeline attention geometry mismatch.")
+        self.prefill_layers = nn.ModuleList(pipeline.prefill_layers)
+        self.decode_layers = nn.ModuleList(pipeline.decode_layers)
+        self.lm_head = pipeline.lm_head
+        self._text_pipeline = pipeline
+        self.reset_cache()
 
     def reset_cache(self) -> None:
         """Reset all runtime-managed KV caches."""
@@ -732,26 +800,14 @@ class StaticGemma4Runtime:
         # Each layer receives its view: per_layer_inputs[:, :, i, :]
         per_layer_inputs = self._build_per_layer_inputs(llm_input_ids, hidden_states)
 
-        enabled = (
-            self.last_token_only_prefill if last_token_only is None else last_token_only
-        )
-        if type(enabled) is not bool:
-            raise ValueError("last_token_only must be a boolean or None.")
-        hidden_states = self._prefill_decoder(
+        return self.prefill_decoder(
             hidden_states,
             per_layer_inputs,
             attention_masks,
             position_embeddings,
             valid_len,
-            last_token_only=enabled,
+            last_token_only=last_token_only,
         )
-        last_hidden = (
-            hidden_states
-            if hidden_states.shape[1] == 1
-            else hidden_states[:, valid_len - 1 : valid_len, :]
-        )
-        logits = self.lm_head(last_hidden)[:, -1, :]
-        return self._apply_final_logit_softcapping(logits)
 
     def _prefill_valid_length(
         self, input_ids: torch.Tensor, batch: Gemma4StaticBatch
@@ -778,6 +834,44 @@ class StaticGemma4Runtime:
             )
         return valid_len
 
+    @torch.no_grad()
+    def prefill_decoder(
+        self,
+        hidden_states: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor],
+        attention_masks: dict[str, torch.Tensor],
+        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]],
+        valid_len: int,
+        *,
+        last_token_only: Optional[bool] = None,
+    ) -> torch.Tensor:
+        """Prefill from fused decoder inputs, preserving externally supplied masks.
+
+        Inputs use the existing static right-padded ABI, including full-length
+        prefill PLE. For a saved quantized pipeline these inputs must come from
+        the matching calibrated frontend. Returns last-valid-token logits.
+        """
+        enabled = (
+            self.last_token_only_prefill if last_token_only is None else last_token_only
+        )
+        if type(enabled) is not bool:
+            raise ValueError("last_token_only must be a boolean or None.")
+        hidden_states = self._prefill_decoder(
+            hidden_states,
+            per_layer_inputs,
+            attention_masks,
+            position_embeddings,
+            valid_len,
+            last_token_only=enabled,
+        )
+        last_hidden = (
+            hidden_states
+            if hidden_states.shape[1] == 1
+            else hidden_states[:, valid_len - 1 : valid_len, :]
+        )
+        logits = self.lm_head(last_hidden)[:, -1, :]
+        return self._apply_final_logit_softcapping(logits)
+
     def _prefill_decoder(
         self,
         hidden_states: torch.Tensor,
@@ -801,6 +895,9 @@ class StaticGemma4Runtime:
                 "Gemma4 prefill valid_len must fit the max_seq - 1 cache capacity."
             )
         if last_token_only and self.shared_kv_suffix_start < len(self.prefill_layers):
+            pipeline = getattr(self, "_text_pipeline", None)
+            if pipeline is not None and not pipeline.finalize_supported:
+                raise ValueError(pipeline.finalize_unsupported_reason)
             validate_gemma4_single_token_quantization(
                 self.prefill_layers[self.shared_kv_suffix_start :],
                 per_layer_input_observer=getattr(
@@ -2054,6 +2151,7 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         layout=layout,
         rope=cfg.rope,
         last_token_only_prefill=cfg.last_token_only_prefill,
+        text_artifacts=cfg.text_artifacts,
         vision_profile=vision_profile,
         device=cfg.device,
     )
