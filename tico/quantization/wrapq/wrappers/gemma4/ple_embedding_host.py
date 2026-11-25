@@ -37,7 +37,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
     FusedGemma4PLEEmbedding,
 )
@@ -96,9 +99,35 @@ def _require_affine(observer: Any, name: str) -> AffineObserverBase:
     return observer
 
 
-def _observer_payload(observer: AffineObserverBase) -> dict[str, Any]:
-    """Serialize the frozen fake-quant contract of one affine observer."""
+def _require_activation(observer: Any, name: str) -> ObserverBase:
+    """Admit frozen affine grids or the explicit stateless identity policy."""
+    if not isinstance(observer, (AffineObserverBase, IdentityObserver)):
+        raise TypeError(
+            f"Gemma4 PLE embedding artifact requires an affine/identity observer for {name!r}, "
+            f"got {type(observer).__name__}."
+        )
+    observer.require_frozen()
+    return observer
+
+
+def _observer_payload(observer: ObserverBase) -> dict[str, Any]:
+    """Serialize a frozen grid, or a legacy-reader-compatible identity bypass."""
     state = observer.require_frozen()
+    if isinstance(observer, IdentityObserver) or not observer.fake_quant_enabled:
+        # Schema 1/2 readers return immediately when FQ is disabled. Empty
+        # qparams explicitly avoid inventing an affine grid for identity sites.
+        return {
+            "kind": "identity" if isinstance(observer, IdentityObserver) else "bypass",
+            "scale": torch.empty(0),
+            "zero_point": torch.empty(0, dtype=torch.int),
+            "quant_min": 0,
+            "quant_max": 0,
+            "channel_axis": None,
+            "dtype": "identity",
+            "qscheme": "identity",
+            "fake_quant_enabled": False,
+        }
+    assert isinstance(observer, AffineObserverBase)
     if state.scale is None or state.zero_point is None:
         raise RuntimeError(
             "Quantized Gemma4 PLE artifact requires an affine frozen grid; "
@@ -142,6 +171,157 @@ def _apply_observer_payload(
         quant_min=int(payload["quant_min"]),
         quant_max=int(payload["quant_max"]),
     )
+
+
+def resolve_gemma4_ple_layer_range(
+    num_hidden_layers: int, layer_start: int = 0, layer_end: Optional[int] = None
+) -> tuple[int, int]:
+    """Validate a nonempty half-open range in original decoder layer indices."""
+    end = num_hidden_layers if layer_end is None else layer_end
+    if (
+        not isinstance(layer_start, int)
+        or not isinstance(end, int)
+        or not (0 <= layer_start < end <= num_hidden_layers)
+    ):
+        raise ValueError(
+            f"Gemma4 PLE layer range [{layer_start}, {end}) must be within "
+            f"[0, {num_hidden_layers}) and nonempty."
+        )
+    return layer_start, end
+
+
+def validate_gemma4_ple_embedding_slicing(
+    embedding_wrapper: nn.Module, token_observer: Any, *, quantized: bool
+) -> None:
+    """Prove that selected lookup preserves every frozen producer boundary.
+
+    Activations must be pointwise scalar affine or identity. Weight grids are
+    independent: per-vocabulary-row and per-column affine grids can be selected
+    exactly without estimating new qparams.
+    """
+    embedding = getattr(embedding_wrapper, "wrapped", embedding_wrapper)
+    table: Any = getattr(embedding, "module", embedding)
+    if getattr(table, "max_norm", None) is not None:
+        raise ValueError("Gemma4 selective PLE lookup does not support max_norm.")
+    if not quantized:
+        return
+    embedding = cast("QuantGemma4TextScaledWordEmbedding", embedding)
+    embedding.require_entry_available()
+    if getattr(embedding, "_mode", None) is not Mode.QUANT:
+        raise RuntimeError(
+            "Gemma4 selective PLE lookup requires the frozen embedding QUANT mode."
+        )
+    activations = {
+        "embedding": embedding.obs_embedding,
+        "act_out": embedding.obs_act_out,
+        "per_layer_token_inputs": token_observer,
+    }
+    if not isinstance(table, FusedGemma4PLEEmbedding):
+        activations["embed_scale"] = embedding.obs_embed_scale
+    for name, observer in activations.items():
+        if not isinstance(observer, (AffineObserverBase, IdentityObserver)) or (
+            isinstance(observer, AffineObserverBase)
+            and observer.channel_axis is not None
+        ):
+            raise ValueError(
+                "Gemma4 selective PLE lookup requires frozen per-tensor affine/identity "
+                f"activation policy at {name}; got {type(observer).__name__}."
+            )
+        observer.require_frozen()
+    weight_observer = embedding.obs_weight
+    if not isinstance(weight_observer, AffineObserverBase):
+        raise ValueError(
+            "Gemma4 selective PLE lookup supports affine weight policy only."
+        )
+    weight_state = weight_observer.require_frozen()
+    if weight_state.scale is None or weight_state.zero_point is None:
+        raise ValueError(
+            "Gemma4 selective PLE lookup requires an enabled affine weight grid for the shared host table."
+        )
+    if isinstance(weight_observer, AffineObserverBase):
+        if weight_observer.channel_axis not in (None, 0, 1, -1, -2):
+            raise ValueError(
+                "Gemma4 selective PLE lookup weight channel axis must be 0 or 1."
+            )
+        weight_observer.validate_execution(table.weight.device)
+
+
+def lookup_gemma4_selected_token_inputs(
+    input_ids: torch.Tensor,
+    *,
+    embed_tokens_per_layer: nn.Module,
+    num_hidden_layers: int,
+    hidden_size_per_layer_input: int,
+    token_inputs_observer: Any,
+    quantized: bool,
+    layer_start: int,
+    layer_end: int,
+) -> torch.Tensor:
+    """Gather only requested rows/columns, then replay the original lookup ABI.
+
+    No full floating table, packed S*L*P activation, or phase-specific table is
+    constructed. Repeated token IDs select their original row grid repeatedly.
+    """
+    validate_gemma4_ple_embedding_slicing(
+        embed_tokens_per_layer, token_inputs_observer, quantized=quantized
+    )
+    start, end = resolve_gemma4_ple_layer_range(
+        num_hidden_layers, layer_start, layer_end
+    )
+    embedding = cast(
+        "QuantGemma4TextScaledWordEmbedding",
+        getattr(embed_tokens_per_layer, "wrapped", embed_tokens_per_layer),
+    )
+    table: Any = getattr(embedding, "module", embedding)
+    column_start = start * hidden_size_per_layer_input
+    column_end = end * hidden_size_per_layer_input
+    width = column_end - column_start
+    # Slice is a view; advanced indexing allocates only selected rows/columns.
+    selected = F.embedding(
+        input_ids,
+        table.weight[:, column_start:column_end],
+        padding_idx=table.padding_idx,
+    ).reshape(-1, width)
+    if quantized:
+        observer = cast(AffineObserverBase, embedding.obs_weight)
+        state = observer.require_frozen()
+        # A frozen grid can be retained while weight fake quantization is
+        # disabled. Preserve that live bypass after gathering original values.
+        if state.fake_quant_enabled and observer.channel_axis is None:
+            selected = observer.fake_quant(selected)
+        elif state.fake_quant_enabled:
+            assert observer.channel_axis is not None
+            assert state.scale is not None and state.zero_point is not None
+            axis = int(observer.channel_axis) % 2
+            if axis == 0:
+                indices = input_ids.reshape(-1).to(state.scale.device)
+                scale = state.scale[indices].to(selected.device)
+                zp = state.zero_point[indices].to(selected.device, dtype=torch.int)
+            else:
+                scale = state.scale[column_start:column_end].to(selected.device)
+                zp = state.zero_point[column_start:column_end].to(
+                    selected.device, dtype=torch.int
+                )
+            selected = torch.fake_quantize_per_channel_affine(
+                selected,
+                scale=scale,
+                zero_point=zp,
+                axis=axis,
+                quant_min=int(observer.dtype.qmin),
+                quant_max=int(observer.dtype.qmax),
+            )
+    result = selected.reshape(*input_ids.shape, width)
+    if quantized:
+        result = embedding.obs_embedding.fake_quant(result)
+    if not isinstance(table, FusedGemma4PLEEmbedding):
+        scale = table.embed_scale
+        if quantized:
+            scale = embedding.obs_embed_scale.fake_quant(scale)
+        result = result * scale.to(dtype=result.dtype, device=result.device)
+    if quantized:
+        result = embedding.obs_act_out.fake_quant(result)
+    result = result.reshape(*input_ids.shape, end - start, hidden_size_per_layer_input)
+    return token_inputs_observer.fake_quant(result) if quantized else result
 
 
 def _weight_storage_bytes_per_element(
@@ -237,6 +417,10 @@ def build_gemma4_ple_embedding_artifact(adapter: nn.Module) -> dict[str, Any]:
     """Return the host ``ple_embedding`` payload for a PLE embedding adapter."""
     adapter = cast("Gemma4PLEEmbeddingExportAdapter", adapter)
     adapter.require_available()
+    if adapter.layer_start != 0 or adapter.layer_end != adapter.num_hidden_layers:
+        raise ValueError(
+            "Save one shared full PLE table; layer-range artifacts would duplicate the lookup payload."
+        )
     embedding = _unwrap_embedding(adapter)
     module = embedding.module
     quantized = bool(adapter.quantized)
@@ -264,14 +448,16 @@ def build_gemma4_ple_embedding_artifact(adapter: nn.Module) -> dict[str, Any]:
     artifact.update(_quantized_weight_payload(embedding))
     artifact["observers"] = {
         "embedding": _observer_payload(
-            _require_affine(embedding.obs_embedding, "embedding")
+            _require_activation(embedding.obs_embedding, "embedding")
         ),
         "embed_scale": _observer_payload(
-            _require_affine(embedding.obs_embed_scale, "embed_scale")
+            _require_activation(embedding.obs_embed_scale, "embed_scale")
         ),
-        "act_out": _observer_payload(_require_affine(embedding.obs_act_out, "act_out")),
+        "act_out": _observer_payload(
+            _require_activation(embedding.obs_act_out, "act_out")
+        ),
         "per_layer_token_inputs": _observer_payload(
-            _require_affine(
+            _require_activation(
                 adapter.per_layer_token_inputs_observer, "per_layer_token_inputs"
             )
         ),
@@ -350,11 +536,11 @@ class Gemma4PLEEmbeddingHostTable(nn.Module):
         self.register_buffer("embed_scale", artifact["embed_scale"].clone())
 
         if not self.quantized:
-            self.register_buffer("weight", artifact["weight"].clone())
+            self.register_buffer("weight", artifact["weight"])
             self.observers: dict[str, dict[str, Any]] = {}
             return
 
-        self.register_buffer("weight_int", artifact["weight_int"].clone())
+        self.register_buffer("weight_int", artifact["weight_int"])
         self.register_buffer("weight_scale", artifact["weight_scale"].clone())
         self.register_buffer(
             "weight_zero_point", artifact["weight_zero_point"].to(torch.int).clone()
@@ -403,10 +589,71 @@ class Gemma4PLEEmbeddingHostTable(nn.Module):
             return x
         return _apply_observer_payload(x, self.observers[key])
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Return observed token-identity PLE with shape ``(1, S, L, P)``."""
-        weight = self._dequantized_weight() if self.quantized else self.weight
-        hidden_states = F.embedding(input_ids, weight, padding_idx=self.padding_idx)
+    def _selected_weight(
+        self, input_ids: torch.Tensor, column_start: int, column_end: int
+    ) -> torch.Tensor:
+        """Select original storage before dequantizing, including row qparams."""
+        if not self.quantized:
+            return F.embedding(
+                input_ids,
+                self.weight[:, column_start:column_end],
+                padding_idx=self.padding_idx,
+            )
+        selected = F.embedding(
+            input_ids,
+            self.weight_int[:, column_start:column_end],
+            padding_idx=self.padding_idx,
+        ).to(torch.float32)
+        scale = self.weight_scale
+        zp = self.weight_zero_point
+        if self.weight_channel_axis is not None:
+            axis = int(self.weight_channel_axis) % 2
+            if axis == 0:
+                scale = scale[input_ids].unsqueeze(-1)
+                zp = zp[input_ids].unsqueeze(-1)
+            else:
+                scale = scale[column_start:column_end]
+                zp = zp[column_start:column_end]
+        return ((selected - zp.to(torch.float32)) * scale.to(torch.float32)).to(
+            self.weight_float_dtype
+        )
+
+    def validate_layer_range(self) -> None:
+        """Reject unsupported selected activation grids before doing work."""
+        if not self.quantized:
+            return
+        for key, payload in self.observers.items():
+            if key == "embed_scale" and self.embed_scale_fused:
+                continue
+            if payload["channel_axis"] is not None:
+                raise ValueError(
+                    "Gemma4 selective PLE host lookup requires frozen per-tensor "
+                    f"affine activation policy at {key}."
+                )
+        if self.weight_channel_axis not in (None, 0, 1, -1, -2):
+            raise ValueError(
+                "Gemma4 selective PLE host weight channel axis must be 0 or 1."
+            )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        layer_start: int = 0,
+        layer_end: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Return token PLE for a range using one shared table and frozen grids."""
+        start, end = resolve_gemma4_ple_layer_range(
+            self.num_hidden_layers, layer_start, layer_end
+        )
+        selected = start != 0 or end != self.num_hidden_layers
+        if selected:
+            self.validate_layer_range()
+        hidden_states = self._selected_weight(
+            input_ids,
+            start * self.hidden_size_per_layer_input,
+            end * self.hidden_size_per_layer_input,
+        )
         hidden_states = self._fq(hidden_states, "embedding")
         if not getattr(self, "embed_scale_fused", False):
             scale = self._fq(self.embed_scale, "embed_scale")
@@ -417,7 +664,7 @@ class Gemma4PLEEmbeddingHostTable(nn.Module):
         hidden_states = hidden_states.reshape(
             *input_ids.shape[:-1],
             -1,
-            self.num_hidden_layers,
+            end - start,
             self.hidden_size_per_layer_input,
         )
         return self._fq(hidden_states, "per_layer_token_inputs")
