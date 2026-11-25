@@ -130,6 +130,31 @@ pipeline:
 
 Both options default to `false`.
 
+## MXINT8 linear inputs with INT16 outputs
+
+A policy that selects only `observer_role: input_activation` (`act_in`) of
+linear modules with an MX spec keeps their `act_out` in the base affine policy:
+
+```yaml
+override_policies:
+  - name: text_linear_inputs_mx
+    target:
+      component: text
+      layers: all
+      op_type: linear
+      observer_role: input_activation
+    spec: mx_int8_act
+```
+
+With an INT16 base activation, Circle export keeps both calibrated domains.
+Each such linear becomes one `FULLY_CONNECTED` that reads the MXINT8
+activation and produces the INT16 output, preceded by a `QUANTIZE` from the
+INT16 producer. No conversion is inserted after the linear, and this default
+path does not need `legalize_mx_affine_domains`. Other mixed linear
+signatures, such as an affine input with an MX output or an MXINT8 input with
+a UINT8 output, remain rejected on this default path. Whether a backend
+accepts this `FULLY_CONNECTED` signature is a separate target-backend check.
+
 ## Qwen3-VL MXINT8 deployment policy
 
 The committed

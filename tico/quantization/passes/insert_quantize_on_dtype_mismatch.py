@@ -167,6 +167,11 @@ def _linear_handler(node, logger):
     if qparam_dtype(inp) == qparam_dtype(node):
         return
 
+    if qparam_dtype(inp) == "mxint8" and qparam_dtype(node) == "int16":
+        # FULLY_CONNECTED natively takes an MXINT8 activation and produces an
+        # INT16 output; both calibrated domains are kept as they are.
+        return
+
     if qparam_dtype(inp) == "uint8" and qparam_dtype(node) == "int16":
         quantize = _insert_quantize_op_after(node)
 
