@@ -24,6 +24,7 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
+    gemma4_single_token_quantization_supported,
     resolve_gemma4_shared_kv_suffix,
     validate_gemma4_single_token_quantization,
 )
@@ -141,6 +142,7 @@ class Gemma4SingleTokenQuantizationTest(unittest.TestCase):
         layer.obs_act_in.compute_qparams()
         frozen = layer.obs_act_in.require_frozen()
         layer.obs_weight = MXObserver(name="weight", axis=0)
+        self.assertTrue(gemma4_single_token_quantization_supported([layer]))
         validate_gemma4_single_token_quantization([layer])
         after = layer.obs_act_in.require_frozen()
         self.assertEqual(after.policy, frozen.policy)
@@ -158,6 +160,7 @@ class Gemma4SingleTokenQuantizationTest(unittest.TestCase):
         ):
             with self.subTest(policy=type(observer).__name__):
                 layer.obs_act_in = observer
+                self.assertFalse(gemma4_single_token_quantization_supported([layer]))
                 with self.assertRaisesRegex(
                     ValueError, "per-tensor affine or identity"
                 ):

@@ -330,6 +330,8 @@ class FakeAttention(torch.nn.Module):
         self.sliding_window = None
         self.is_sliding = False
         self.is_kv_shared_layer = False
+        self.layer_type = "full_attention"
+        self.store_full_length_kv = False
         self.max_seq = 4
 
 

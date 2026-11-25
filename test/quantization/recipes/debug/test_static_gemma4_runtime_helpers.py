@@ -46,6 +46,8 @@ class TestStaticGemma4RuntimeConfig(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "must be a boolean"):
             StaticGemma4RuntimeConfig(last_token_only_prefill="false")  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "directory path or null"):
+            StaticGemma4RuntimeConfig(text_artifacts=123)  # type: ignore[arg-type]
 
 
 @unittest.skipUnless(
