@@ -21,6 +21,7 @@ from unittest import mock
 
 import torch
 
+from tico.quantization.config.specs import no_quant
 from tico.quantization.recipes.debug.export_regression import _state_contract
 from tico.quantization.recipes.debug.static_gemma4_runtime import (
     StaticGemma4RuntimeConfig,
@@ -527,6 +528,101 @@ class TestStaticGemma4SplitPLE(unittest.TestCase):
                     actual = runtime.prefill(batch, last_token_only=False)
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
                 self.assertIs(getattr(runtime, name), custom)
+
+    def test_split_history_does_not_enable_selective_lookup_for_replaced_source(self):
+        runtime = fixture.make_runtime()
+        batch = fixture.make_batch(4)
+        with torch.no_grad():
+            # A per-call opt-in must belong to this source, not later installs.
+            runtime.prefill(batch, last_token_only=True, ple_prefill_split=True)
+        make_config = fixture.PTQConfig
+        with mock.patch.object(
+            fixture,
+            "PTQConfig",
+            side_effect=lambda **kwargs: make_config(weight=no_quant(), **kwargs),
+        ):
+            replacement = fixture.make_runtime(quantized=True)
+        frozen_before = _state_contract(replacement.text_model)
+
+        def reference_trace(frontend):
+            ple = []
+            outputs = []
+            handle = frontend.ple_projection.register_forward_hook(
+                lambda module, args, result: ple.append(result.clone())
+            )
+            with torch.no_grad():
+                logits = frontend.prefill(
+                    batch, last_token_only=False, ple_prefill_split=False
+                )
+                outputs.append(
+                    (
+                        logits.clone(),
+                        fixture.cache_snapshot(frontend),
+                        frontend.past_len,
+                    )
+                )
+                for token in (17, 8):
+                    logits = frontend.decode_one(torch.tensor([[token]]))
+                    outputs.append(
+                        (
+                            logits.clone(),
+                            fixture.cache_snapshot(frontend),
+                            frontend.past_len,
+                        )
+                    )
+            handle.remove()
+            return outputs, ple
+
+        def compare_generation(expected, *, split):
+            with torch.no_grad():
+                for index, (logits, cache, past_len) in enumerate(expected):
+                    actual = (
+                        runtime.prefill(
+                            batch, last_token_only=split, ple_prefill_split=split
+                        )
+                        if index == 0
+                        else runtime.decode_one(torch.tensor([[(17, 8)[index - 1]]]))
+                    )
+                    tolerance = 1e-5 if split else 0.0
+                    torch.testing.assert_close(
+                        actual, logits, atol=tolerance, rtol=tolerance
+                    )
+                    self.assert_caches_close(runtime, cache)
+                    self.assertEqual(runtime.past_len, past_len)
+
+        expected, expected_ple = reference_trace(replacement)
+        self._replace_frontend(runtime, replacement)
+        actual_ple = []
+        handle = runtime.ple_projection.register_forward_hook(
+            lambda module, args, result: actual_ple.append(result.clone())
+        )
+        # Identity weights are valid for the full producer and ordinary decode;
+        # a stale opt-in used to reject the first decode at the lookup validator.
+        compare_generation(expected, split=False)
+        handle.remove()
+        for actual, expected_value in zip(actual_ple, expected_ple):
+            torch.testing.assert_close(actual, expected_value, atol=0, rtol=0)
+        self.assertEqual(len(actual_ple), 3)
+        self.assertFalse(getattr(runtime, "_model_backed_selective_ple_enabled", False))
+        self.assertEqual(_state_contract(replacement.text_model), frozen_before)
+        with self.assertRaisesRegex(ValueError, "affine weight policy only"):
+            runtime.prefill(batch, last_token_only=True, ple_prefill_split=True)
+        self.assertEqual(_state_contract(replacement.text_model), frozen_before)
+
+        # A later source can opt into supported slicing again. Its derived
+        # stages are reused within that source after the marker was reset.
+        supported = fixture.make_runtime(quantized=True)
+        supported_before = _state_contract(supported.text_model)
+        expected, _ = reference_trace(supported)
+        self._replace_frontend(runtime, supported)
+        compare_generation(expected, split=True)
+        stages = runtime._get_split_ple_stages()
+        lookup = runtime._selective_ple_embedding
+        self.assertTrue(runtime._model_backed_selective_ple_enabled)
+        compare_generation(expected, split=True)
+        self.assertIs(runtime._get_split_ple_stages(), stages)
+        self.assertIs(runtime._selective_ple_embedding, lookup)
+        self.assertEqual(_state_contract(supported.text_model), supported_before)
 
     def test_config_default_reference_override_and_type_diagnostics(self):
         self.assertFalse(StaticGemma4RuntimeConfig().ple_prefill_split)

@@ -490,11 +490,15 @@ calibrated checkpoint and static profile. The runtime tracks the identities of
 `text_model`, `ple_embedding`, and `ple_projection`. When any changes, it drops
 only its automatically generated split PLE and selective lookup adapters. This
 synchronization runs in `use_text_pipeline()` and before subsequent PLE calls,
-so field replacement also works without a saved decoder pipeline. Current-source
-adapters are rebuilt lazily and reused while the frontend is unchanged. Existing
-mode/capability guards still apply; changing quantization mode in place requires
-rebuilding the public export adapters. Start a new prefill after replacement;
-`use_text_pipeline()` resets the generation cache.
+so field replacement also works without a saved decoder pipeline. Frontend
+replacement also resets automatic selective lookup activation. Without an explicit
+decode-lookup override, ordinary decode uses the installed public lookup until
+supported model-backed split stages are requested and built for the new frontend.
+This permits full prefill/decode with a full-only lookup policy even after the old
+frontend used split PLE. Current-source stages are reused while the frontend is
+unchanged. Existing mode/capability guards still apply; changing quantization mode
+in place requires rebuilding the public export adapters. Start a new prefill after
+replacement; `use_text_pipeline()` resets the generation cache.
 
 Explicit host lookup and Circle projection connections remain caller-owned. A
 caller can replace `ple_embedding`/`ple_projection` with the full-range host and

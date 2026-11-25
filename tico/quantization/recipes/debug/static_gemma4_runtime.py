@@ -606,6 +606,7 @@ class StaticGemma4Runtime:
             # Do not retain the replaced model/table through ownership records.
             self._model_backed_split_ple_stages = None
             self._model_backed_selective_ple_embedding = None
+            self._model_backed_selective_ple_enabled = False
         self._ple_cache_source = source
 
     def _get_selective_ple_embedding(self) -> Optional[nn.Module]:
