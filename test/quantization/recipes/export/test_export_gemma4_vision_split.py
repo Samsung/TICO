@@ -286,8 +286,10 @@ class FakeVision(QuantModuleBase):
         mode: str,
         *,
         pixel_position_ids: torch.Tensor,
+        spatial_pooling: bool = False,
     ) -> torch.nn.Module:
         """Prepare static patch, encoder, and pooler export components."""
+        del spatial_pooling
         if mode != "prefill":
             raise ValueError(f"Unsupported fake vision mode: {mode!r}.")
         self.encoder.materialize_templates(pixel_position_ids)
@@ -651,6 +653,14 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
                     model_args=_model_args(),
                     vision_granularity="operator",
                 )
+            with self.assertRaisesRegex(TypeError, "spatial_pooling"):
+                gemma_export.export_gemma4_per_layer(
+                    q_model=torch.nn.Identity(),
+                    max_seq_len=4,
+                    output_dir=tmpdir,
+                    model_args=_model_args(),
+                    spatial_pooling="true",  # type: ignore[arg-type]
+                )
         prepare_model.assert_not_called()
 
     def test_adapter_forwards_nested_vision_export_options(self) -> None:
@@ -666,7 +676,7 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
                     "max_seq_len": 4,
                     "prefill_decode": True,
                     "strict": False,
-                    "vision": {"granularity": "both"},
+                    "vision": {"granularity": "both", "spatial_pooling": False},
                     "artifacts": ["circle_per_layer"],
                 },
             },
@@ -688,6 +698,7 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
             prefill_decode=True,
             strict=False,
             vision_granularity="both",
+            spatial_pooling=False,
             ple_embedding_format="auto",
             compile_config=CompileConfigV1(),
         )

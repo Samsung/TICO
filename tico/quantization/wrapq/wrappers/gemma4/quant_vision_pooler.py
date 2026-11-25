@@ -21,6 +21,11 @@ import torch.nn.functional as F
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
+    DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
+    Gemma4StaticVisionProfile,
+    get_gemma4_static_vision_profile,
+)
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
@@ -50,6 +55,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
     root_hidden_size: torch.Tensor
     pool_weights: torch.Tensor
     num_valid_outputs: int
+    spatial_profile: Gemma4StaticVisionProfile | None = None
 
     def __init__(
         self,
@@ -265,6 +271,26 @@ class QuantGemma4VisionPooler(QuantModuleBase):
 
         return pooled, updated_padding
 
+    def _spatial_pool(
+        self, hidden_states: torch.Tensor, profile: Gemma4StaticVisionProfile
+    ) -> torch.Tensor:
+        # Pack each 3x3 window contiguously for a stride-one TRIV3 AveragePool.
+        width = profile.patch_grid_width
+        rows, cols = profile.soft_grid_height, profile.soft_grid_width
+        depth = hidden_states.shape[-1]
+        strips = hidden_states[:, : profile.num_valid_patches].reshape(
+            1, rows, 3 * width, depth
+        )
+        parts = [
+            strips[:, :, i * width : (i + 1) * width].reshape(1, rows, cols, 3 * depth)
+            for i in range(3)
+        ]
+        windows = torch.cat(parts, dim=-1).reshape(1, rows * cols, 9, depth)
+        pooled = F.avg_pool2d(windows.float().permute(0, 3, 1, 2), (1, 9), stride=1)
+        pooled = pooled.permute(0, 2, 3, 1).reshape(1, rows * cols, depth)
+        pooled = self._fq(pooled, self.obs_pool_matmul_out)
+        return F.pad(pooled, (0, 0, 0, profile.max_soft_tokens - rows * cols))
+
     def forward_export(
         self,
         hidden_states: torch.Tensor,
@@ -288,24 +314,22 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         self.require_entry_available()
         hidden_states = self._fq(hidden_states, self.obs_act_in)
 
-        # Step 1: Fake-quantize input (collects stats in CALIB, applies Q-DQ in QUANT).
+        # Fake-quantize input (collects stats in CALIB, applies Q-DQ in QUANT).
         hidden_states = self._fq(hidden_states, self.obs_pool_in)
 
-        # Step 2: Fake-quantize padding-baked pool weights.
-        pool_weights_q = self._fq(self.pool_weights, self.obs_pool_weight)
+        if self.spatial_profile is None:
+            pool_weights_q = self._fq(self.pool_weights, self.obs_pool_weight)
+            pooled = self._fq(
+                pool_weights_q @ hidden_states.float(), self.obs_pool_matmul_out
+            )
+        else:
+            pooled = self._spatial_pool(hidden_states, self.spatial_profile)
 
-        # Step 3: Spatial pooling via precomputed weight matrix.
-        # pool_weights_q: (1, V, S), hidden_states.float(): (1, S, D)
-        pooled = pool_weights_q @ hidden_states.float()  # (1, V, D)
-
-        # Step 4: Fake-quantize matmul output (intermediate activation).
-        pooled = self._fq(pooled, self.obs_pool_matmul_out)
-
-        # Step 5: Scale by sqrt(hidden_size) in float32.
+        # Scale by sqrt(hidden_size) in float32.
         root_hidden_size = self._fq(self.root_hidden_size, self.obs_root_hidden_size)
         pooled = pooled * root_hidden_size
 
-        # Step 6: Fake-quantize final output.
+        # Fake-quantize final output.
         pooled = self._fq(pooled, self.obs_pool_out)
 
         return pooled
@@ -316,6 +340,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         *,
         output_length: int,
         pixel_position_ids: torch.Tensor,
+        spatial_pooling: bool = False,
     ) -> "Gemma4VisionPoolerPrefillExportAdapter":
         self.require_entry_available()
         if mode != "prefill":
@@ -367,6 +392,32 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             else:
                 profile.set_fake_quant_enabled(source.fake_quant_enabled)
         specialized.set_extra_state(self.get_extra_state())
+
+        if spatial_pooling:
+            static_profile = get_gemma4_static_vision_profile(
+                DEFAULT_GEMMA4_STATIC_VISION_PROFILE
+            )
+            if output_length == static_profile.max_soft_tokens and torch.equal(
+                pixel_position_ids,
+                static_profile.build_image_position_ids(
+                    device=pixel_position_ids.device
+                ),
+            ):
+                # Preserve the matrix path for grids that change the coefficient,
+                # or intermediate policies that depend on the padded activation shape.
+                scalar_domains = self._mode is Mode.NO_QUANT or all(
+                    obs.require_frozen().kind in ("affine", "identity")
+                    and obs.channel_axis is None
+                    for obs in (
+                        specialized.obs_act_in,
+                        specialized.obs_pool_in,
+                        specialized.obs_pool_matmul_out,
+                    )
+                )
+                if scalar_domains and torch.equal(
+                    specialized._fq(weights, specialized.obs_pool_weight), weights
+                ):
+                    specialized.spatial_profile = static_profile
 
         return Gemma4VisionPoolerPrefillExportAdapter(
             specialized, capability_owner=self

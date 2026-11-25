@@ -27,10 +27,17 @@ import torch
 from tico.circle import CircleDocument
 from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
 from tico.circle.runtime.quantization import fake_quantize_array
+from tico.quantization.config.specs import affine
 from tico.quantization.recipes.debug.export_regression import _state_contract
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.lifecycle import validate_frozen_model
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.wrappers.gemma4.quant_vision_pooler import (
     QuantGemma4VisionPooler,
+)
+from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
+    DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
+    get_gemma4_static_vision_profile,
 )
 from torch import nn
 
@@ -64,6 +71,109 @@ def _pooler(enabled):
 
 
 class TestPoolerProfileCircle(unittest.TestCase):
+    def test_clipped_pool_weight_retains_matmul(self):
+        profile = get_gemma4_static_vision_profile(DEFAULT_GEMMA4_STATIC_VISION_PROFILE)
+        positions = profile.build_image_position_ids()
+        spec = affine(DType.int(16), observer=PercentileObserver, percentile=90)
+        source = QuantGemma4VisionPooler(
+            _PoolerMetadata(),
+            qcfg=make_affine_ptq_config(
+                dtype=DType.int(16),
+                overrides={"pool_weight": spec},
+            ),
+        ).eval()
+        source.enable_calibration()
+        source(
+            torch.ones(1, profile.num_patches, 8),
+            positions,
+            (positions == -1).all(-1),
+            profile.max_soft_tokens,
+        )
+        source.freeze_qparams()
+        stage = source.as_export_module(
+            output_length=profile.max_soft_tokens,
+            pixel_position_ids=positions,
+            spatial_pooling=True,
+        )
+        weights = stage.wrapped.pool_weights
+        self.assertFalse(
+            torch.equal(stage.wrapped.obs_pool_weight.fake_quant(weights), weights)
+        )
+        self.assertIsNone(stage.wrapped.spatial_profile)
+
+    def test_spatial_pooling_preserves_profile_and_int16_boundaries(self):
+        profile = get_gemma4_static_vision_profile(DEFAULT_GEMMA4_STATIC_VISION_PROFILE)
+        pos = profile.build_image_position_ids()
+        source = QuantGemma4VisionPooler(
+            _PoolerMetadata(), qcfg=make_affine_ptq_config(dtype=DType.int(16))
+        ).eval()
+        hidden = torch.randn(
+            1, profile.num_patches, 8, generator=torch.Generator().manual_seed(1135)
+        )
+        hidden[:, profile.num_valid_patches :] = 12
+        padding = (pos == -1).all(dim=-1)
+
+        def build(spatial, positions=pos):
+            return source.as_export_module(
+                output_length=profile.max_soft_tokens,
+                pixel_position_ids=positions,
+                spatial_pooling=spatial,
+            ).eval()
+
+        dense = build(False)
+        candidate = build(True)
+        actual = candidate(hidden)
+        torch.testing.assert_close(actual, dense(hidden))
+        self.assertEqual(
+            torch.count_nonzero(actual[:, profile.num_visual_tokens :]).item(), 0
+        )
+        shuffled = pos.clone()
+        shuffled[:, [0, 3]] = pos[:, [3, 0]]
+        self.assertIsNone(build(True, shuffled).wrapped.spatial_profile)
+        source.enable_calibration()
+        source(hidden, pos, padding, profile.max_soft_tokens)
+        source.freeze_qparams()
+        dense, candidate = build(False), build(True)
+        self.assertEqual(candidate.wrapped.spatial_profile, profile)
+        doc = CircleDocument.from_bytes(
+            tico.convert(candidate, (hidden,)).circle_binary
+        )
+        self.assertFalse(doc.verify().issues)
+        runtime = CircleReferenceRuntime(doc)
+        prog = runtime.program
+        names = [op.name for op in prog.operators]
+        self.assertNotIn("BATCH_MATMUL", names)
+        self.assertEqual(names.count("AVERAGE_POOL_2D"), 1)
+        pool = next(op for op in prog.operators if op.name == "AVERAGE_POOL_2D")
+        self.assertEqual((pool.options.filterHeight, pool.options.filterWidth), (1, 9))
+        self.assertEqual((pool.options.strideH, pool.options.strideW), (1, 1))
+        for index, observer in (
+            (pool.inputs[0], source.obs_pool_in),
+            (pool.outputs[0], source.obs_pool_matmul_out),
+            (prog.outputs[0], source.obs_pool_out),
+        ):
+            tensor = prog.tensor(index)
+            self.assertEqual(tensor.dtype, np.dtype(np.int16))
+            state = observer.require_frozen()
+            assert (
+                tensor.quantization is not None
+                and state.scale is not None
+                and state.zero_point is not None
+            )
+            self.assertEqual(tensor.quantization.scale, (float(state.scale),))
+            self.assertEqual(tensor.quantization.zero_point, (int(state.zero_point),))
+        encoded = fake_quantize_array(hidden.numpy(), prog.tensor(prog.inputs[0]))
+        result = runtime.run([encoded], mode=ExecutionMode.FAKE_QUANTIZE).outputs[0]
+        expected = dense(torch.from_numpy(encoded.copy())).detach().numpy()
+        np.testing.assert_array_equal(result[:, profile.num_visual_tokens :], 0)
+        # Compare stored codes across the two accumulation orders.
+        output = prog.tensor(prog.outputs[0])
+        assert output.quantization is not None
+        scale = output.quantization.scale[0]
+        np.testing.assert_allclose(
+            np.rint(result / scale), np.rint(expected / scale), rtol=0, atol=1
+        )
+
     def _assert_grid(self, tensor, observer, shape):
         state = observer.require_frozen()
         assert state.scale is not None and state.zero_point is not None

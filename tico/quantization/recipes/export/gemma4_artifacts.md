@@ -293,7 +293,16 @@ export:
     - circle_per_layer
   vision:
     granularity: both       # monolithic | layer | both
+    spatial_pooling: true   # default; applies to e2b_66x36_264 and its geometry alias
 ```
+
+With `spatial_pooling: true`, the 36×66 row-major patch grid is grouped into
+264 windows of nine patches and exported with a 1×9 AveragePool at stride one.
+The pooler retains its 280 output slots, frozen activation boundaries and final
+scaling. The default is `true`; set `false` to keep the pooling MatMul. Other
+layouts and quantization policies that require the pooling matrix continue to
+use MatMul. The option applies to both split and monolithic export. Integer
+rounding can differ between target kernels.
 
 The default `monolithic` writes only the whole-tower `vision_prefill` graph.
 `layer` writes the split pipeline; `both` writes both forms for numerical or

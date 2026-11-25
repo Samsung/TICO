@@ -533,6 +533,7 @@ def build_gemma4_vision_prefill_export_module(
     *,
     pixel_position_ids: torch.Tensor,
     mode: str = "prefill",
+    spatial_pooling: bool = False,
 ) -> Gemma4VisionPrefillExportAdapter:
     """Build a pixel-values-only Gemma4 vision-prefill export module.
 
@@ -568,6 +569,7 @@ def build_gemma4_vision_prefill_export_module(
     vision_model = as_export_module(
         mode=mode,
         pixel_position_ids=pixel_position_ids,
+        spatial_pooling=spatial_pooling,
     )
     return Gemma4VisionPrefillExportAdapter(
         vision_model=vision_model,

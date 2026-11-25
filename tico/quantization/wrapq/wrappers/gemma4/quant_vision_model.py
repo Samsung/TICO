@@ -261,6 +261,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
         mode: str = "prefill",
         *,
         pixel_position_ids: torch.Tensor,
+        spatial_pooling: bool = False,
         **kwargs,
     ) -> nn.Module:
         """Prepare the model for torch.export by precomputing static tensors.
@@ -332,6 +333,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
             mode=mode,
             output_length=self.output_length,
             pixel_position_ids=pixel_position_ids,
+            spatial_pooling=spatial_pooling,
         )
         self.num_valid_pool_outputs = int(self.pooler_export.num_valid_outputs)
         if not 0 < self.num_valid_pool_outputs <= self.output_length:

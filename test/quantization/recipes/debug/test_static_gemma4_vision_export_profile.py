@@ -80,8 +80,10 @@ class _FakeVisionModel(nn.Module):
         mode: str,
         *,
         pixel_position_ids: torch.Tensor,
+        spatial_pooling: bool = False,
     ) -> nn.Module:
         """Return one deterministic static model."""
+        del spatial_pooling
         if mode != "prefill":
             raise ValueError(mode)
         self.export_calls += 1
