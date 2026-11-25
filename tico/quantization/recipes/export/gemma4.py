@@ -65,7 +65,11 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     canonicalize_gemma4_static_vision_model_args,
     Gemma4StaticVisionProfile,
 )
-from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_dense_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.utils import (
+    assert_gemma4_dense_no_moe,
+    gemma4_single_token_quantization_supported,
+    resolve_gemma4_shared_kv_suffix,
+)
 from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
     build_gemma4_vision_split_export_bundle,
     Gemma4VisionSplitExportBundle,
@@ -932,6 +936,76 @@ def _save_ple_pipeline_manifest(
     )
 
 
+def _gemma4_text_pipeline_manifest(
+    qtext: QuantGemma4TextModel,
+    *,
+    max_seq_len: int,
+    artifact_tag: str,
+) -> dict[str, Any]:
+    """Describe the existing Q=1 consumer graph as a prefill-finalize alias.
+
+    Both adapters execute the same wrapped consumer and frozen observers. They
+    read external storage K/V of length S, return no K/V and perform no writes.
+    The host supplies the original prefill query row/RoPE/PLE, rather than the
+    normal decode mask or a new logical position. No new graph or qparam owner
+    is needed for this alias.
+    """
+    boundary, producers = resolve_gemma4_shared_kv_suffix(qtext.layers)
+    finalize_supported = gemma4_single_token_quantization_supported(
+        qtext.layers[boundary:],
+        per_layer_input_observer=getattr(qtext, "obs_per_layer_inputs", None),
+    )
+    layers = []
+    for index, layer in enumerate(qtext.layers):
+        attention, heads, head_dim, window, shared = _attention_contract(
+            layer,
+            max_seq_len=max_seq_len,
+        )
+        layers.append(
+            {
+                "layer_index": index,
+                "layer_type": attention.layer_type,
+                "is_shared": shared,
+                "store_full_length_kv": bool(attention.store_full_length_kv),
+                "producer_index": producers.get(index),
+                "num_kv_heads": heads,
+                "head_dim": head_dim,
+                "sliding_window": window,
+                "prefill_artifact": _circle_name(
+                    f"decoder_layer_prefill_{index}", artifact_tag
+                ),
+                "decode_artifact": _circle_name(
+                    f"decoder_layer_decode_{index}", artifact_tag
+                ),
+                "finalize_artifact": (
+                    _circle_name(f"decoder_layer_decode_{index}", artifact_tag)
+                    if index >= boundary
+                    else None
+                ),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "model_family": "gemma4",
+        "finalize_contract": "shared_consumer_decode_alias_v1",
+        "finalize_supported": finalize_supported,
+        "finalize_unsupported_reason": (
+            None
+            if finalize_supported
+            else "Shape-dependent activation quantization is not supported."
+        ),
+        "rope_convention": "pre_negated_sin",
+        "execution_mode": "fake_quantize" if artifact_tag == "q" else "native",
+        "max_seq_len": max_seq_len,
+        "hidden_size": int(qtext.config.hidden_size),
+        "vocab_size": int(qtext.config.vocab_size),
+        "ple_dim": int(getattr(qtext.config, "hidden_size_per_layer_input", 0) or 0),
+        "suffix_start": boundary,
+        "lm_head_artifact": _circle_name("lm_head", artifact_tag),
+        "layers": layers,
+    }
+
+
 def export_gemma4_per_layer(
     *,
     q_model: torch.nn.Module,
@@ -984,6 +1058,9 @@ def export_gemma4_per_layer(
     )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # A partially rewritten directory must never advertise the previous decoder
+    # bundle as valid. Prefill-only exports also invalidate the paired manifest.
+    (output_dir / "text_pipeline.json").unlink(missing_ok=True)
 
     export_model, artifact_tag = _prepare_gemma4_export_model(
         q_model,
@@ -993,6 +1070,15 @@ def export_gemma4_per_layer(
     # The arithmetic-only fusion stage has no quantized child entry to guard it.
     ExportCapabilityGuard(gemma_model, "multimodal_fusion")
     assert_gemma4_dense_no_moe(qtext.config)
+    text_manifest = (
+        _gemma4_text_pipeline_manifest(
+            qtext,
+            max_seq_len=max_seq_len,
+            artifact_tag=artifact_tag,
+        )
+        if prefill_decode
+        else None
+    )
 
     text_capacity = int(qtext.config.max_position_embeddings)
     if max_seq_len > text_capacity:
@@ -1243,3 +1329,7 @@ def export_gemma4_per_layer(
         strict=strict,
         config=compile_config,
     )
+    if text_manifest is not None:
+        (output_dir / "text_pipeline.json").write_text(
+            json.dumps(text_manifest, indent=2) + "\n"
+        )

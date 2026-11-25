@@ -82,6 +82,7 @@ subdirectory), keeping E2B artifacts separate. Eager quality evaluation uses
 | `multimodal_fusion_prefill.q.circle` | Fixed-slot fusion that writes the 264 visual embeddings into the text sequence starting at `visual_start_idx`. No weights. |
 | `decoder_layer_prefill_0..34.q.circle` | The 35 text decoder layers at `S = 2048`. Inputs: hidden states, attention mask, RoPE, `per_layer_input` `[1, 2048, 256]` (plus shared K/V for shared-KV consumers); outputs hidden states (plus K/V). |
 | `decoder_layer_decode_0..34.q.circle` | Single-token decode graphs of the same layers with 2047 past K/V slots as input. |
+| `text_pipeline.json` | Versioned decoder/LM-head manifest: static dimensions, producer indices, suffix boundary, and the single-token finalize capability/aliases. The loader validates shapes, dtypes and boundary grids from the referenced Circle files. |
 | `lm_head.q.circle` | Final RMSNorm plus LM head. Input `[1, 1, 1536]`, output logits `[1, 1, 262144]`. Final logit softcapping is applied on the host. |
 
 ## Per-Layer Embedding (PLE) contract
@@ -360,4 +361,136 @@ Decode (one token):
   ple_projection_decode                -> per_layer_inputs  [1, 1, 35, 256]
   decoder_layer_decode_0..34          (past K/V managed by the host)
   lm_head                              -> logits
+```
+
+## Last-token-only generation prefill
+
+`StaticGemma4Runtime` optionally finishes the trailing shared-KV decoder layers
+with query length 1. Enable `debug.static_gemma4_runtime.last_token_only_prefill`
+in the static runtime configuration; its default is `false`. This changes only
+the initial generation prefill. Calibration and the eager full-text model remain
+full sequence. `runtime.prefill(batch, last_token_only=False)` selects the
+existing full-prefill reference path for comparison. Calls needing every prompt
+hidden state must keep full prefill.
+
+The supported maximum valid prompt is `S-1`, since the existing static runtime
+reserves one cache slot for decode; finalize does not change that capacity.
+
+The boundary comes from the instantiated layers, not E2B layer numbers. The
+runtime resolves each consumer's preceding, same-type
+`store_full_length_kv` producer and checks its explicit cache-source binding and
+KV geometry. Only the contiguous terminal run of read-only consumers is eligible;
+a model without that run executes full prefill. Malformed sharing raises an
+error. Dense decoder RMSNorm, MLP, residual/scalar and PLE fusion operate per token;
+only attention mixes tokens, and these consumers read prefix-produced KV.
+
+For the current batch-size-1 right-padding contract, valid decoder positions are
+the leading `L` slots after multimodal fusion, so `p = L - 1`. The runtime checks
+the decoder validity mask against `valid_length`. It slices hidden state, the
+already computed full `ple_projection_prefill` output, RoPE and the original
+prefill mask's query row at this same `p`. Logical RoPE position and multimodal,
+causal and sliding visibility are preserved. PLE projection still processes all
+`S` positions; it never switches to `ple_projection_decode` during finalize.
+
+The shared-consumer **decode Circle is reused** for finalize. Its ABI is hidden
+`[1,1,D]`, PLE `[1,1,P]`, RoPE `[1,1,head_dim]`, mask `[1,1,S]`, and full shared
+KV `[1,kv_heads,S,head_dim]`. It uses the same wrapper and frozen observers as
+prefill, has no K/V projection or append, and receives the selected prefill mask
+row rather than a newly constructed decode mask. Invocation-local shared KV
+retains all `S` producer output slots, including the final valid prompt token;
+the persistent decode cache separately keeps `S-1` slots. Finalize does not write
+cache or increase `past_len`. Normal decode starts at logical position `L` with
+the first generated token and runs every decoder layer.
+
+Quantized finalize supports identity/per-tensor affine activation observers,
+including the PLE boundary. Per-channel activation and MX activation policies
+are explicitly unsupported because their axes/groups need a separate proof for
+query slicing; disable this option for those checkpoints. Per-channel and MX
+weight policies remain independent. Existing frozen observer grids are reused
+without calibration, grid conversion, or an added slice observer. The manifest
+records `finalize_supported`; unsupported policies still permit ordinary full
+prefill/decode export. Circle reference execution validates fake-quant semantics,
+not bit-exact integer NPU behavior.
+
+Export still writes full-prefill and normal decode artifacts for every layer.
+`text_pipeline.json` records `finalize_contract:
+shared_consumer_decode_alias_v1` and aliases eligible finalize stages to existing
+decode files. No duplicate suffix weights or finalize Circle files are created.
+The suffix's Q/projection/MLP activations change from `S` rows to 1 row and its
+attention query dimension changes from `S` to 1 while the KV dimension remains
+`S`. Prefix graphs, PLE projection and ordinary decode shapes are unchanged.
+This structural reduction does not establish an NPU latency or TTFT speedup.
+
+To export and run the floating-point artifact path with a matching model-backed
+frontend:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/gemma4_export.yaml \
+  --source model --model google/gemma-4-e2b-it \
+  --output-dir ./out/gemma4_fp/circle_layers
+
+python -m tico.quantization.examples.inspector \
+  --mode static-gemma4-runtime \
+  --config tico/quantization/examples/configs/static_gemma4_runtime.yaml \
+  --set debug.static_gemma4_runtime.text_artifacts=./out/gemma4_fp/circle_layers \
+  --set debug.static_gemma4_runtime.last_token_only_prefill=true
+```
+
+Repeat the inspector command with `last_token_only_prefill=false` for the full
+reference. `text_artifacts: null` uses model-backed static adapters instead of
+saved Circle decoders. Saved stages use the built-in CPU `reference` runtime.
+The inspector frontend is model-backed and does not load a calibrated checkpoint;
+for checkpoint-exported quantized decoders, use `runtime.prefill_decoder(...)`
+with fused embeddings and full PLE from the matching calibrated frontend. Do not
+interpret a mixed floating frontend/quantized decoder run as full checkpoint
+parity. The export command near the top of this guide writes those quantized
+decoder artifacts from the existing checkpoint.
+
+For an existing runtime with the same model/profile, this shows the calibrated
+frontend connection and explicit decoder entry. `fused_hidden`, `full_ple`,
+`prefill_masks`, and `prefill_rope` must describe the same right-padded prompt;
+`full_ple` retains all `S` positions. Here `qtext` is the frozen text wrapper from
+the checkpoint used for export (for a top-level saved PTQ wrapper:
+`checkpoint.wrapped.model.wrapped.language_model.wrapped`).
+
+```python
+from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+    Gemma4PLEEmbeddingExportAdapter,
+    Gemma4PLEProjectionExportAdapter,
+    Gemma4TokenEmbeddingExportAdapter,
+)
+
+# Match token/PLE stages for subsequent normal decode as well as prefill inputs.
+runtime.text_model = qtext
+runtime.token_embedding = Gemma4TokenEmbeddingExportAdapter(qtext).eval()
+runtime.ple_embedding = Gemma4PLEEmbeddingExportAdapter(qtext).eval()
+runtime.ple_projection = Gemma4PLEProjectionExportAdapter(qtext).eval()
+runtime.use_text_pipeline("./out/gemma4_quantized/circle_layers")
+logits = runtime.prefill_decoder(
+    fused_hidden, full_ple, prefill_masks, prefill_rope, valid_len,
+    last_token_only=True,
+)
+for token_ids in continuation_tokens:  # Each tensor has shape [1, 1].
+    logits = runtime.decode_one(token_ids)
+```
+
+For a PLE-disabled model leave `ple_embedding`, `ple_projection`, and `full_ple`
+as `None`. This entry does not rerun embedding or layer 0 during finalize.
+
+The loader is
+`tico.quantization.recipes.export.gemma4_text_pipeline.load_gemma4_text_pipeline`;
+`runtime.use_text_pipeline(directory)` validates its static profile and topology
+before dispatch. Saved artifacts without `text_pipeline.json` require re-export
+for this loader. The legacy model-backed full-prefill path remains available;
+the runtime does not guess a finalize contract from old filenames.
+
+Checkpoint-free regression coverage:
+
+```bash
+python -m unittest -v \
+  test.quantization.wrapq.wrappers.gemma4.test_shared_kv_suffix \
+  test.quantization.recipes.debug.test_static_gemma4_finalize \
+  test.quantization.recipes.export.test_gemma4_finalize_circle \
+  test.quantization.recipes.export.test_gemma4_text_pipeline
 ```
