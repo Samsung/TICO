@@ -35,6 +35,7 @@ export:
   ple_prefill_split: false  # Requires .pt lookup and last-token-only runtime prefill.
   strict: false
   vision:
-    granularity: both  # monolithic | layer | both
+    granularity: both  # monolithic | encoder | layer | both
+    # For four vision graphs, override with --set export.vision.granularity=encoder.
   artifacts:
     - circle_per_layer

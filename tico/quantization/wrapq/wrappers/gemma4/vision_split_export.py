@@ -209,6 +209,99 @@ class Gemma4VisionEncoderLayerExportAdapter(nn.Module):
         return hidden_states
 
 
+class Gemma4VisionEncoderExportAdapter(nn.Module):
+    """Export the complete encoder stack with external mask and RoPE inputs.
+
+    This follows ``QuantGemma4VisionEncoder.forward_export`` using the original
+    layer wrappers. Context is observed once for the whole stack, and each layer
+    retains its own quantization operations. Unlike the layer export adapters,
+    no extra split boundary quantizer is inserted between layers.
+
+    Only the layers and observers are registered here, so the static context
+    templates and unused original encoder weights do not enter this graph. The
+    final pooler-input observer makes the output directly chainable to the
+    separate pooler artifact.
+    """
+
+    def __init__(
+        self,
+        encoder: nn.Module,
+        *,
+        mode: Mode,
+        output_observer: ObserverBase,
+        capability_owner: nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        encoder = cast("QuantGemma4VisionEncoder", _unwrap(encoder))
+        self._capability_guard = ExportCapabilityGuard(
+            capability_owner if capability_owner is not None else encoder,
+            "vision" if capability_owner is not None else "required",
+            mode=mode,
+        )
+        self.quantized = _quantized_export(
+            mode,
+            stage_name="Gemma4 vision encoder stack",
+        )
+        self.layers = nn.ModuleList(tuple(encoder.layers))
+        if not self.layers:
+            raise ValueError("Gemma4 vision encoder export requires encoder layers.")
+        self.input_observer = encoder.obs_act_in
+        self.attention_mask_observer = encoder.obs_attention_mask
+        self.position_cos_observer = encoder.obs_position_cos
+        self.position_sin_observer = encoder.obs_position_sin
+        self.encoder_output_observer = encoder.obs_encoder_out
+        self.output_observer = output_observer
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_embeddings_cos: torch.Tensor,
+        position_embeddings_sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run every encoder layer in model order, returning pooler input."""
+        self._capability_guard.require()
+        position_embeddings_cos = _apply_export_observer(
+            position_embeddings_cos,
+            self.position_cos_observer,
+            quantized=self.quantized,
+        )
+        position_embeddings_sin = _apply_export_observer(
+            position_embeddings_sin,
+            self.position_sin_observer,
+            quantized=self.quantized,
+        )
+        attention_mask = _apply_export_observer(
+            attention_mask,
+            self.attention_mask_observer,
+            quantized=self.quantized,
+        )
+        hidden_states = _apply_export_observer(
+            hidden_states,
+            self.input_observer,
+            quantized=self.quantized,
+        )
+        for layer in self.layers:
+            hidden_states = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_embeddings=(
+                    position_embeddings_cos,
+                    position_embeddings_sin,
+                ),
+            )
+        hidden_states = _apply_export_observer(
+            hidden_states,
+            self.encoder_output_observer,
+            quantized=self.quantized,
+        )
+        return _apply_export_observer(
+            hidden_states,
+            self.output_observer,
+            quantized=self.quantized,
+        )
+
+
 class Gemma4VisionPostProjectionExportAdapter(nn.Module):
     """Export static pool-output finalization and text-width projection.
 
@@ -365,12 +458,14 @@ class Gemma4VisionSplitExportBundle:
     monolithic: nn.Module
     patch_embedder: nn.Module
     encoder_layers: tuple[nn.Module, ...]
+    encoder: Gemma4VisionEncoderExportAdapter
     pooler: nn.Module
     post_projection: nn.Module
     attention_mask: torch.Tensor
     position_embeddings_cos: torch.Tensor
     position_embeddings_sin: torch.Tensor
     boundary_contracts: tuple[Gemma4VisionBoundaryContract, ...]
+    encoder_boundary_contracts: tuple[Gemma4VisionBoundaryContract, ...]
 
 
 def build_gemma4_vision_split_export_bundle(
@@ -396,8 +491,8 @@ def build_gemma4_vision_split_export_bundle(
         mode: Export mode. Only ``"prefill"`` is supported by the vision tower.
 
     Returns:
-        A bundle containing the existing monolithic module, one module per
-        encoder layer, and the shared external context tensors.
+        A bundle containing the existing monolithic module, the whole encoder
+        stack, one module per encoder layer, and shared external context tensors.
     """
     monolithic = build_gemma4_vision_prefill_export_module(
         wrapped_model,
@@ -443,6 +538,13 @@ def build_gemma4_vision_split_export_bundle(
         patch_embedder,
         mode=vision_mode,
         output_observer=encoder.obs_act_in,
+        capability_owner=wrapped_model,
+    )
+
+    encoder_stage = Gemma4VisionEncoderExportAdapter(
+        encoder,
+        mode=vision_mode,
+        output_observer=pooler.obs_act_in,
         capability_owner=wrapped_model,
     )
 
@@ -514,6 +616,22 @@ def build_gemma4_vision_split_export_bundle(
         )
     )
 
+    encoder_boundary_contracts = (
+        Gemma4VisionBoundaryContract(
+            name="patch_embedder_to_encoder",
+            producer="patch_embedder",
+            consumer="encoder",
+            observer=encoder.obs_act_in,
+        ),
+        Gemma4VisionBoundaryContract(
+            name="encoder_to_pooler",
+            producer="encoder",
+            consumer="pooler",
+            observer=pooler.obs_act_in,
+        ),
+        boundary_contracts[-1],
+    )
+
     standardize = bool(getattr(vision_model.config, "standardize", False))
     post_projection = Gemma4VisionPostProjectionExportAdapter(
         mode=vision_mode,
@@ -537,6 +655,7 @@ def build_gemma4_vision_split_export_bundle(
         monolithic=monolithic,
         patch_embedder=patch_stage,
         encoder_layers=tuple(layer_stages),
+        encoder=encoder_stage,
         pooler=pooler_export,
         post_projection=post_projection,
         attention_mask=encoder.attention_mask_template.detach().clone(),
@@ -547,4 +666,5 @@ def build_gemma4_vision_split_export_bundle(
             encoder.position_embeddings_sin_template.detach().clone()
         ),
         boundary_contracts=tuple(boundary_contracts),
+        encoder_boundary_contracts=encoder_boundary_contracts,
     )
