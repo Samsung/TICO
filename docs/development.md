@@ -211,6 +211,93 @@ command wall time, measure a fresh process externally, for example with
 `time ./ccex test -k SimpleAdd --durations 10`; compare identical environment, selection,
 and cache conditions across repeated fresh processes.
 
+### Parallel test shards
+
+Run one zero-based shard of the selected suite:
+
+```bash
+./ccex test --shard-index 0 --shard-count 4
+./ccex test -k quantization --shard-index 2 --shard-count 4 --durations 10
+```
+
+Both shard options are required together. The count must be positive, and the index
+must be in `[0, shard_count)`. Sharding supports the default suite, `--all`, keyword
+selection (`-k`), and explicit model selection (`-m`), with the same selector exclusions
+as an unsharded run. Runtime selection, internal-test opt-ins, verbose diagnostics, and
+`--durations` remain available. Performance mode (`--perf`) rejects sharding and
+inventory listing. Without shard options, execution keeps its existing behavior.
+Sharding does not enable large model or internal-only tests.
+
+Selection and unittest discovery, including package `load_tests` hooks, finish before
+partitioning. The runner assigns the discovered objects directly; generated IDs that
+contain dots are opaque identifiers, not import paths. Every occurrence is assigned
+once, including repeated IDs and tests that unittest will skip.
+
+The allocation unit is a `TestCase` class. Modules defining `setUpModule` or
+`tearDownModule` stay together to preserve module fixtures. If a `load_tests` hook
+interleaves classes or fixture-bearing modules (for example, A, B, A), overlapping
+occurrence spans stay together, including intervening groups, so filtering cannot
+merge separate fixture lifecycles. Groups are assigned from largest to smallest by discovered test count to the shard with the fewest assigned
+tests. Ties use discovery order and then shard index. Each shard retains the original
+discovery order. New tests participate automatically, including quantization tests;
+there is no maintained directory list, randomized hash, or timing weight. Reproduce an
+assignment with the same revision, dependencies, selection, environment flags, and
+shard count. Adding tests or changing the configuration can move existing groups.
+
+Shard diagnostics report the selected count, allocation counts, collection time, and
+suite elapsed time including class/module fixtures. An empty partition of a nonempty
+suite is reported explicitly and succeeds. An empty keyword selection is reported
+separately. An unexpectedly empty full selection or a discovery/import error fails
+before partitioning, including in inventory mode.
+
+### Inspect assignments and reproduce a shard
+
+`--list-tests` performs the same selection and discovery without executing tests or
+fixtures. It emits a JSON array of full test IDs on stdout and diagnostics on stderr:
+
+```bash
+./ccex test --list-tests
+./ccex test -k op --shard-index 1 --shard-count 4 --list-tests
+```
+
+Compare inventories with multiplicities rather than only counts. This example checks
+the complete four-shard plan with five discovery runs and no test execution:
+
+```bash
+python3 - <<'PY'
+import collections
+import json
+import subprocess
+
+base = ["./ccex", "test", "--list-tests"]
+full = json.loads(subprocess.check_output(base))
+shards = [
+    json.loads(subprocess.check_output(
+        base + ["--shard-index", str(index), "--shard-count", "4"]
+    ))
+    for index in range(4)
+]
+combined = collections.Counter(test_id for shard in shards for test_id in shard)
+assert combined == collections.Counter(full)
+print("Exact inventory match:", len(full), "tests; shards:", [len(s) for s in shards])
+PY
+```
+
+To reproduce a failing PR shard, use its revision and policy-selected Torch environment
+and run the same index/count without a keyword filter:
+
+```bash
+./ccex test --shard-index 1 --shard-count 4 --durations 0
+```
+
+Adding `-k` is useful to investigate a test, but it repartitions the smaller selection,
+so that test may belong to a different shard. Infrastructure regression tests for
+allocation and runner behavior can be run independently:
+
+```bash
+python3 -m unittest -v infra.scripts.tests.test_unittest_sharding
+```
+
 ### Opt-in test requirements
 
 Small local CPU wrapper tests run in the default suite; their Transformers version
@@ -497,7 +584,18 @@ central policy module rather than duplicated in workflow YAML.
      formatting and static analysis succeed, preserving existing required-check settings.
 
 5. **Versioned tests**
-   - Runs the complete suite on the default qualified family, currently 2.13.
+   - Runs the complete default-family suite as four `test_default_shard` matrix jobs
+     (`--shard-index 0` through `3`, `--shard-count 4`), each on its own Ubuntu 24.04
+     runner using the shared setup action and the single built wheel.
+   - Uses `fail-fast: false` so every blocking shard can report its outcome. Shard 0
+     also runs the installed-wheel Circle execution smoke test outside the checkout,
+     once per workflow.
+   - The `test_default` aggregate preserves the `Full test (default torch <family>)`
+     check name. Its always-running result explicitly requires policy resolution,
+     package build, and the entire shard matrix to succeed. A failed, cancelled, or
+     skipped prerequisite, including setup or the wheel smoke test, prevents success.
+     Existing branch protection is assumed to require this Full test name; maintainers
+     should verify that contract when deploying workflow changes.
    - Runs blocking export and quantization smoke tests on the oldest supported family,
      currently 2.11.
    - Runs the same smoke tests non-blockingly on the qualification candidate, currently
@@ -519,6 +617,36 @@ for the exact tiers.
 The conversion/size threshold benchmark is available through `./ccex test -p`.
 The full Circle O1 scheduler benchmark is invoked directly with a caller-provided
 artifact. Neither benchmark is part of the current PR matrix.
+
+### Measure shard balance and PR feedback time
+
+Use the shard logs and distinct `full-test-shard-<index>` artifacts to compare assigned
+counts and complete suite elapsed times. Individual `--durations` values exclude
+class/module fixtures, so use suite or test-step elapsed time to identify the slowest
+shard. Equal test counts do not imply equal execution time. If repeated comparable
+runs show imbalance, a follow-up can use a reviewed, fixed duration input shared by
+all shards, with deterministic assignment for tests missing from that input. Do not
+update allocation inputs independently during a workflow run.
+
+For an actual GitHub Actions comparison, record the revision, Torch/Python versions,
+runner type, cache conditions, and these timestamps or durations from the run's job
+and step views (or the Actions jobs API):
+
+- Queue/start delay for each shard, measured from run creation or readiness after its
+  prerequisites to runner start; distinguish dependency wait from runner queueing.
+- Environment setup time and per-shard test count and test-step elapsed time.
+- The slowest shard and the Full test aggregate completion time from run creation.
+- Total PR workflow elapsed time, including whichever compatibility or static-analysis
+  job becomes the longest path after sharding.
+
+Compare with an unsharded run on a comparable GitHub-hosted environment. Local
+sequential execution validates coverage and outcomes but does not measure parallel CI
+speedup. Developer wait time is elapsed time to the required checks; total runner usage
+is the sum of job execution times and can increase because four runners repeat setup
+and discovery. Keep measured results in the PR or run artifacts, not a lasting latest
+results table. An elapsed-time target is an estimate until comparable CI runs establish
+it. The workflow-level cancellation of superseded PR runs remains in effect; shard
+jobs have no shared concurrency group that serializes or cancels their siblings.
 
 ## Change-specific guidance
 
