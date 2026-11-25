@@ -379,6 +379,7 @@ def build_gemma4_vision_split_export_bundle(
     pixel_position_ids: torch.Tensor,
     output_dtype: torch.dtype = torch.float32,
     mode: str = "prefill",
+    spatial_pooling: bool = False,
 ) -> Gemma4VisionSplitExportBundle:
     """Build directly chainable Gemma4 vision modules for split export.
 
@@ -402,6 +403,7 @@ def build_gemma4_vision_split_export_bundle(
         wrapped_model,
         pixel_position_ids=pixel_position_ids,
         mode=mode,
+        spatial_pooling=spatial_pooling,
     )
 
     vision_tower = getattr(wrapped_model, "vision_tower", None)

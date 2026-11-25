@@ -194,6 +194,8 @@ prefill-only variant.
 ### Gemma4 split vision artifacts
 
 `export.vision.granularity` selects monolithic, per-layer, or both vision forms.
+`export.vision.spatial_pooling` (default `true`) exports the default static
+profile's pooler as AveragePool; `false` keeps the pooling MatMul.
 See the [vision artifact contract](gemma4_artifacts.md#circle_layers-vision-pipeline)
 for the stage files, runtime context, manifest, and profile ownership rules.
 

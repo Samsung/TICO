@@ -81,9 +81,9 @@ class FakeVision(torch.nn.Module):
             default_output_length=4,
         )
 
-    def as_export_module(self, mode, *, pixel_position_ids):
+    def as_export_module(self, mode, *, pixel_position_ids, spatial_pooling=False):
         """Return the trivial static vision module."""
-        del mode, pixel_position_ids
+        del mode, pixel_position_ids, spatial_pooling
         return FakeVisionExport()
 
 
@@ -874,6 +874,7 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             prefill_decode=True,
             strict=True,
             vision_granularity="monolithic",
+            spatial_pooling=True,
             ple_embedding_format="auto",
             compile_config=CompileConfigV1(),
         )

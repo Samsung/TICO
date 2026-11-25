@@ -920,6 +920,7 @@ class Gemma4Adapter(ModelAdapter):
                 model_args=model_args,
                 prefill_decode=bool(export_cfg.get("prefill_decode", True)),
                 strict=bool(export_cfg.get("strict", False)),
+                spatial_pooling=vision_export_cfg.get("spatial_pooling", True),
                 vision_granularity=str(
                     vision_export_cfg.get("granularity", "monolithic")
                 ),

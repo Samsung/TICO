@@ -404,6 +404,7 @@ def _export_gemma4_vision_stages(
     artifact_tag: str,
     output_dir: Path,
     granularity: str,
+    spatial_pooling: bool,
     strict: bool,
     compile_config: CompileConfigBase | None = None,
 ) -> None:
@@ -414,6 +415,7 @@ def _export_gemma4_vision_stages(
         vision_prefill = build_gemma4_vision_prefill_export_module(
             gemma_model,
             pixel_position_ids=pixel_position_ids,
+            spatial_pooling=spatial_pooling,
         )
         _convert_and_save(
             vision_prefill,
@@ -428,6 +430,7 @@ def _export_gemma4_vision_stages(
         gemma_model,
         pixel_position_ids=pixel_position_ids,
         output_dtype=pixel_values.dtype,
+        spatial_pooling=spatial_pooling,
     )
     if bundle.post_projection.num_valid_pool_outputs != profile.num_visual_tokens:
         raise RuntimeError(
@@ -1015,6 +1018,7 @@ def export_gemma4_per_layer(
     prefill_decode: bool = True,
     strict: bool = False,
     vision_granularity: str = "monolithic",
+    spatial_pooling: bool = True,
     ple_embedding_format: str = "auto",
     compile_config: CompileConfigBase | None = None,
 ) -> None:
@@ -1050,6 +1054,8 @@ def export_gemma4_per_layer(
     if max_seq_len < 1:
         raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
 
+    if not isinstance(spatial_pooling, bool):
+        raise TypeError("export.vision.spatial_pooling must be a boolean.")
     vision_granularity = _normalize_vision_export_granularity(vision_granularity)
     ple_embedding_format = _normalize_ple_embedding_format(ple_embedding_format)
     normalized_model_args = _normalize_model_args(
@@ -1123,6 +1129,7 @@ def export_gemma4_per_layer(
         artifact_tag=artifact_tag,
         output_dir=output_dir,
         granularity=vision_granularity,
+        spatial_pooling=spatial_pooling,
         strict=strict,
         compile_config=compile_config,
     )
