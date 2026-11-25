@@ -53,6 +53,15 @@ def main():
         metavar="N",
         help="Report collection/suite time and the slowest N tests (0: all).",
     )
+    parser.add_argument(
+        "--shard-index", type=int, help="Zero-based unittest shard index."
+    )
+    parser.add_argument("--shard-count", type=int, help="Number of unittest shards.")
+    parser.add_argument(
+        "--list-tests",
+        action="store_true",
+        help="List selected test IDs as JSON without running.",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose mode")
     args = parser.parse_args()
 
@@ -60,6 +69,17 @@ def main():
         parser.error("--durations must be nonnegative")
     if args.durations is not None and args.perf:
         parser.error("--durations is only available for unittest runs")
+
+    sharded = args.shard_index is not None or args.shard_count is not None
+    if sharded:
+        if args.shard_index is None or args.shard_count is None:
+            parser.error("--shard-index and --shard-count must be specified together")
+        if args.shard_count <= 0:
+            parser.error("--shard-count must be positive")
+        if not 0 <= args.shard_index < args.shard_count:
+            parser.error("--shard-index must be in [0, shard_count)")
+    if args.perf and (sharded or args.list_tests):
+        parser.error("sharding and --list-tests are only available for unittest runs")
 
     project_path = os.getenv("CCEX_PROJECT_PATH")
     if not project_path:
@@ -91,17 +111,33 @@ def main():
     os.environ["CCEX_RUNTIME"] = args.runtime
 
     def run_unittest(arguments, *, env=None):
-        if args.durations is None:
-            command = ["python3", "-m", "unittest", *arguments]
-        else:
+        worker_options = []
+        if args.durations is not None:
+            worker_options.extend(["--durations", str(args.durations)])
+        if sharded:
+            worker_options.extend(
+                [
+                    "--shard-index",
+                    str(args.shard_index),
+                    "--shard-count",
+                    str(args.shard_count),
+                ]
+            )
+        if args.list_tests:
+            worker_options.append("--list-tests")
+        if worker_options:
             command = [
                 "python3",
                 os.path.join(project_path, "infra", "scripts", "unittest_run.py"),
-                "--durations",
-                str(args.durations),
+                *worker_options,
                 *arguments,
             ]
+        else:
+            command = ["python3", "-m", "unittest", *arguments]
         subprocess.run(command, check=True, env=env)
+
+    # Keep stdout machine-readable for inventory queries, including discovery output.
+    output = sys.stderr if args.list_tests else sys.stdout
 
     ##############
     # Run commands
@@ -113,14 +149,14 @@ def main():
         cmd = f"python3 -m test.performance.benchmark_perf".split(" ")
         subprocess.run(cmd, check=True)
     elif args.all or (not args.keyword and not args.model):
-        print("RUN ALL unit tests ...")
+        print("RUN ALL unit tests ...", file=output)
 
         run_unittest(["discover", "-s", test_dir, "-v"])
     elif args.keyword:
         if args.keyword in ["net", "op"]:  # TODO Add "model"
             args.keyword = "test.modules." + args.keyword
 
-        print(f"RUN unit tests with -k {args.keyword} ...")
+        print(f"RUN unit tests with -k {args.keyword} ...", file=output)
 
         arguments = [
             "discover",
@@ -132,7 +168,7 @@ def main():
         ]
         run_unittest(arguments)
     elif args.model:
-        print(f"RUN unit tests for model {args.model} ...")
+        print(f"RUN unit tests for model {args.model} ...", file=output)
 
         # Set environment variable for model matching
         env = os.environ.copy()

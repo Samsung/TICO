@@ -323,6 +323,22 @@ for installation order and test dependencies, and
 
 Use the [default suite](development.md#default-suite) for model-independent discovery.
 
+### Parallel shards and inventory checks
+
+The PR Full suite runs as four partitions of the normal discovery result. Each test
+occurrence belongs to one shard; skips and the explicit model/internal opt-in
+boundaries remain part of the existing selection contract. Classes stay together,
+and modules with module fixtures stay together. Original order is preserved within
+each partition. Allocation uses discovered test counts, so it includes new tests
+automatically without assuming that generated IDs are importable names.
+
+Use [Parallel test shards](development.md#parallel-test-shards) for the interface,
+fixture grouping, empty-shard behavior, and supported options. Use
+[Inspect assignments and reproduce a shard](development.md#inspect-assignments-and-reproduce-a-shard)
+to compare the full inventory with the union of all shard inventories, including
+multiplicities, without executing the suite. Discovery failures must fail both listing
+and execution, even when the requested partition would otherwise be empty.
+
 ### Run a keyword-filtered subset
 
 Use [keyword filtering](development.md#keyword-filtering) for a focused subsystem or
@@ -519,10 +535,16 @@ validation and [Pull-request CI](development.md#pull-request-ci) for artifact re
 
 #### Versioned tests
 
-The complete default-family suite checks broad regressions; focused export and
-quantization smoke tests detect version-contract breakage on other selected families.
-The [CI matrix and smoke scope](development.md#pull-request-ci) distinguish blocking
-support checks from candidate signals.
+The complete default-family suite checks broad regressions through four blocking
+shard jobs. The Full test aggregate waits for policy resolution, the shared wheel
+build, and every shard; only successful prerequisites produce a successful gate. The
+installed-wheel smoke test runs once, in shard 0, and participates in that result.
+Focused export and quantization smoke tests detect version-contract breakage on other
+selected families. The [CI matrix and smoke scope](development.md#pull-request-ci)
+distinguish blocking support checks from candidate signals. Follow the
+[measurement plan](development.md#measure-shard-balance-and-pr-feedback-time) to assess
+fixture-inclusive shard balance, queueing, and total developer wait time on comparable
+CI runners.
 
 ### Scheduled compatibility workflow
 

@@ -152,12 +152,17 @@ jobs:
           path: ./dist/
           retention-days: 1
 
-  test_default:
-    name: Full test (default torch ${{ needs.resolve_torch_policy.outputs.default_family }})
+  test_default_shard:
+    name: Full test shard ${{ matrix.shard }} (default torch ${{ needs.resolve_torch_policy.outputs.default_family }})
     needs:
       - resolve_torch_policy
       - build_package
     runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
 
     steps:
       - uses: actions/checkout@v4
@@ -175,10 +180,28 @@ jobs:
         with:
           torch-version: ${{ needs.resolve_torch_policy.outputs.default_family }}
 
-      - name: Run all tests
-        run: ./ccex test
+      - name: Run test-runner infrastructure regression tests
+        if: matrix.shard == 0
+        run: python3 -m unittest -v infra.scripts.tests.test_unittest_sharding
+
+      - name: Run test shard
+        shell: bash
+        run: |
+          ./ccex test --shard-index ${{ matrix.shard }} --shard-count 4 --durations 10 \
+            2>&1 | tee "${{ runner.temp }}/full-test-shard-${{ matrix.shard }}.log"
+
+      - name: Upload shard diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-test-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/full-test-shard-${{ matrix.shard }}.log
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
 
       - name: Execute a Circle model from the installed wheel outside the checkout
+        if: matrix.shard == 0
         working-directory: ${{ runner.temp }}
         run: |
           python3 - <<'PY'
@@ -199,6 +222,27 @@ jobs:
           np.testing.assert_array_equal(out, np.full((2, 3), 5.0, dtype=np.float32))
           print("wheel smoke test passed")
           PY
+
+  # Preserve the existing required check while all shards report independently.
+  test_default:
+    name: Full test (default torch ${{ needs.resolve_torch_policy.outputs.default_family }})
+    if: always()
+    needs:
+      - resolve_torch_policy
+      - build_package
+      - test_default_shard
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Require policy, build, all shards, and wheel smoke to pass
+        env:
+          POLICY_RESULT: ${{ needs.resolve_torch_policy.result }}
+          BUILD_RESULT: ${{ needs.build_package.result }}
+          SHARD_RESULT: ${{ needs.test_default_shard.result }}
+        run: |
+          test "$POLICY_RESULT" = success
+          test "$BUILD_RESULT" = success
+          test "$SHARD_RESULT" = success
 
   test_compatibility:
     name: Smoke (${{ matrix.tier }}, torch ${{ matrix.torch-version }})
