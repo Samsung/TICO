@@ -973,7 +973,8 @@ fields under `debug.static_gemma4_runtime`:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `last_token_only_prefill` | `false` | Finish a supported terminal shared-KV decoder suffix with one query at the final valid prompt position. Keeps full PLE prefill projection and all normal decode layers. Must be a boolean. |
+| `last_token_only_prefill` | `false` | Finish a supported terminal shared-KV decoder suffix with one query at the final valid prompt position. All normal decode layers still execute. Must be a boolean. |
+| `ple_prefill_split` | `false` | Also compute PLE only for full-sequence prefix layers and the suffix final valid token. Requires `last_token_only_prefill: true`; uses range-aware model-backed lookup. Export uses the same `export.ple_prefill_split` flag with `prefill_decode: true` and `.pt` lookup. |
 | `text_artifacts` | `null` | Optional directory containing `text_pipeline.json` and matching decoder/LM-head Circle stages; selects CPU reference execution. Requires re-export for legacy directories lacking the manifest. |
 
 The option applies to initial generation prefill, with the existing batch-size-1,
@@ -1011,3 +1012,10 @@ Before committing a config:
 - Expensive evaluation/export is disabled unless the config is explicitly a
   benchmark/export preset.
 - A minimal smoke command has been tested.
+
+`export.ple_prefill_split` defaults to `false`. Enable it with
+`export.ple_embedding_format: pt` (or an `auto` table exceeding the existing
+Circle size threshold) to replace full prefill PLE projection with prefix/suffix
+artifacts. Circle lookup retains its all-layer ABI and is rejected for split PLE.
+`export.prefill_decode: false` cannot be combined with this option. Models without
+PLE or an eligible suffix keep their existing export.

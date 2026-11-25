@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
@@ -585,6 +586,166 @@ def validate_gemma4_ple_projection_state(model: nn.Module) -> None:
         )
 
 
+def validate_gemma4_ple_projection_slicing(model: nn.Module) -> None:
+    """Validate the independent layer/P-axis domains of a bounded producer.
+
+    RMSNorm reduces only the final P axis. Frozen scalar activation grids are
+    pointwise, so removing tokens or complete layers preserves every boundary.
+    Projection weights may use the original per-output-row affine grid.
+    Norm weights keep their complete P axis and existing policy, including MX;
+    neither their values nor their groups change when layers are removed.
+    """
+    validate_gemma4_ple_projection_state(model)
+    mode = getattr(model, "_mode", Mode.NO_QUANT)
+    if mode is Mode.CALIB:
+        raise ValueError("Gemma4 PLE slicing cannot run during calibration.")
+    projection: Any = getattr(
+        model.per_layer_model_projection, "wrapped", model.per_layer_model_projection
+    )
+    norm: Any = getattr(
+        model.per_layer_projection_norm, "wrapped", model.per_layer_projection_norm
+    )
+    from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
+
+    if not isinstance(projection, (QuantLinear, nn.Linear)):
+        raise ValueError("Gemma4 PLE slicing requires a Linear projection.")
+    _validate_gemma4_ple_projection_norm(
+        norm, int(getattr(model, "hidden_size_per_layer_input"))
+    )
+    if mode is not Mode.QUANT:
+        return
+    observers = {
+        name: getattr(model, name)
+        for name in (
+            "obs_per_layer_token_inputs",
+            "obs_per_layer_projection",
+            "obs_per_layer_sum",
+            "obs_per_layer_inputs",
+            "obs_per_layer_model_projection_scale",
+            "obs_per_layer_input_scale",
+        )
+    }
+    for name, module in (("projection", projection), ("norm", norm)):
+        for path, observer in module.named_modules():
+            if (
+                isinstance(observer, ObserverBase)
+                and path.rsplit(".", 1)[-1] != "obs_weight"
+            ):
+                observers[f"{name}.{path}"] = observer
+    for path, observer in observers.items():
+        _require_gemma4_ple_pointwise_activation(observer, path)
+    norm_weight_observer = getattr(norm, "obs_weight", None)
+    if isinstance(norm_weight_observer, ObserverBase):
+        norm_weight_observer.require_frozen()
+    if isinstance(projection, QuantLinear):
+        observer = projection.obs_weight
+        if not isinstance(observer, (IdentityObserver, AffineObserverBase)) or (
+            isinstance(observer, AffineObserverBase)
+            and observer.channel_axis is not None
+            and (not -2 <= observer.channel_axis < 2 or observer.channel_axis % 2 != 0)
+        ):
+            raise ValueError(
+                "Gemma4 PLE slicing supports identity, per-tensor affine or "
+                "per-output-row affine projection weights; unsupported weight policy."
+            )
+        observer.require_frozen()
+
+
+def validate_gemma4_ple_slicing_state(model: nn.Module) -> None:
+    """Validate upstream lookup and projection before selecting a split phase."""
+    from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+        validate_gemma4_ple_embedding_slicing,
+    )
+
+    validate_gemma4_ple_projection_slicing(model)
+    validate_gemma4_ple_embedding_slicing(
+        getattr(model, "embed_tokens_per_layer"),
+        getattr(model, "obs_per_layer_token_inputs"),
+        quantized=getattr(model, "_mode", Mode.NO_QUANT) is Mode.QUANT,
+    )
+
+
+def _validate_gemma4_ple_projection_norm(norm: nn.Module, width: int) -> None:
+    from tico.quantization.wrapq.wrappers.gemma4.quant_rmsnorm import QuantGemma4RMSNorm
+
+    if (
+        not isinstance(norm, (QuantGemma4RMSNorm, nn.RMSNorm))
+        and type(norm).__name__ != "Gemma4RMSNorm"
+    ) or (isinstance(norm, nn.RMSNorm) and tuple(norm.normalized_shape) != (width,)):
+        raise ValueError("Gemma4 PLE slicing requires RMSNorm over the final P axis.")
+    if getattr(norm, "_mode", Mode.NO_QUANT) is Mode.CALIB:
+        raise ValueError("Gemma4 PLE slicing cannot run during calibration.")
+
+
+def _require_gemma4_ple_pointwise_activation(observer: ObserverBase, path: str) -> None:
+    if not _gemma4_single_token_observer_supported(observer):
+        raise ValueError(
+            "Gemma4 PLE slicing requires frozen per-tensor affine or identity "
+            f"activation observers; unsupported policy at {path!r}. "
+            "Disable ple_prefill_split for this checkpoint."
+        )
+    observer.require_frozen()
+
+
+def _project_gemma4_layer_range(
+    inputs_embeds: torch.Tensor,
+    projection: nn.Module,
+    start: int,
+    end: int,
+) -> torch.Tensor:
+    """Select output rows before Linear, retaining all QuantLinear boundaries."""
+    from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
+
+    linear = getattr(projection, "wrapped", projection)
+    if isinstance(linear, nn.Linear):
+        bias = linear.bias[start:end] if linear.bias is not None else None
+        return F.linear(inputs_embeds, linear.weight[start:end], bias)
+    if not isinstance(linear, QuantLinear):
+        raise ValueError(
+            "Gemma4 PLE layer-range projection requires QuantLinear or Linear."
+        )
+    linear.require_entry_available()
+    if linear._mode is Mode.CALIB:
+        raise ValueError("Gemma4 PLE slicing cannot run during calibration.")
+    if linear._mode is Mode.QUANT:
+        for name in ("obs_act_in", "obs_act_out"):
+            _require_gemma4_ple_pointwise_activation(
+                getattr(linear, name), f"projection.{name}"
+            )
+    x = linear._fq(inputs_embeds, linear.obs_act_in)
+    weight = linear.module.weight[start:end]
+    if linear._mode is Mode.QUANT:
+        observer = linear.obs_weight
+        if isinstance(observer, IdentityObserver) or (
+            isinstance(observer, AffineObserverBase) and observer.channel_axis is None
+        ):
+            weight = observer.fake_quant(weight)
+        elif (
+            isinstance(observer, AffineObserverBase)
+            and observer.channel_axis is not None
+            and -2 <= observer.channel_axis < 2
+            and observer.channel_axis % 2 == 0
+        ):
+            state = observer.require_frozen()
+            observer.validate_execution(weight.device)
+            if state.fake_quant_enabled:
+                assert state.scale is not None and state.zero_point is not None
+                weight = torch.fake_quantize_per_channel_affine(
+                    weight,
+                    state.scale[start:end].to(weight.device),
+                    state.zero_point[start:end].to(weight.device, dtype=torch.int),
+                    axis=0,
+                    quant_min=observer.dtype.qmin,
+                    quant_max=observer.dtype.qmax,
+                )
+        else:
+            raise ValueError(
+                "Unsupported Gemma4 PLE projection weight policy for layer slicing."
+            )
+    bias = linear.module.bias[start:end] if linear.module.bias is not None else None
+    return linear._fq(F.linear(x, weight, bias), linear.obs_act_out)
+
+
 def project_gemma4_per_layer_inputs(
     inputs_embeds: torch.Tensor,
     per_layer_token_inputs: Optional[torch.Tensor],
@@ -599,6 +760,8 @@ def project_gemma4_per_layer_inputs(
     projection_observer: Any,
     sum_observer: Any,
     inputs_observer: Any,
+    layer_start: int = 0,
+    layer_end: Optional[int] = None,
 ) -> torch.Tensor:
     """Project decoder inputs and combine them with token-identity PLE.
 
@@ -619,8 +782,52 @@ def project_gemma4_per_layer_inputs(
     tensor bypasses it and is added after normalization and observation. When
     ``per_layer_token_inputs`` is ``None`` (Hugging Face ``inputs_embeds``-only
     entry), the observed projection is returned without the final scale.
+
+    ``[layer_start, layer_end)`` selects projection output rows before Linear;
+    the token tensor must already have that layer extent. The default keeps the
+    full eager/calibration computation and its existing observer lifecycle.
     """
-    projected = projection(inputs_embeds)
+    end = int(num_hidden_layers) if layer_end is None else int(layer_end)
+    start = int(layer_start)
+    if not 0 <= start < end <= int(num_hidden_layers):
+        raise ValueError(f"Invalid Gemma4 PLE layer range [{start}, {end}).")
+    if per_layer_token_inputs is not None and (
+        start != 0 or end != int(num_hidden_layers)
+    ):
+        expected_shape = (
+            *inputs_embeds.shape[:-1],
+            end - start,
+            int(hidden_size_per_layer_input),
+        )
+        if tuple(per_layer_token_inputs.shape) != expected_shape:
+            raise ValueError(
+                f"Gemma4 PLE token inputs expected shape {expected_shape}, got {tuple(per_layer_token_inputs.shape)}."
+            )
+    if start == 0 and end == int(num_hidden_layers):
+        projected = projection(inputs_embeds)
+    else:
+        width = int(hidden_size_per_layer_input)
+        linear = getattr(projection, "wrapped", projection)
+        norm = getattr(projection_norm, "wrapped", projection_norm)
+        _validate_gemma4_ple_projection_norm(norm, width)
+        if getattr(linear, "_mode", Mode.NO_QUANT) is Mode.QUANT:
+            for path, observer in (
+                ("per_layer_projection", projection_observer),
+                ("per_layer_inputs", inputs_observer),
+            ):
+                _require_gemma4_ple_pointwise_activation(observer, path)
+            if per_layer_token_inputs is not None:
+                _require_gemma4_ple_pointwise_activation(sum_observer, "per_layer_sum")
+        if getattr(norm, "_mode", Mode.NO_QUANT) is Mode.QUANT:
+            for path, observer in norm.named_modules():
+                if (
+                    isinstance(observer, ObserverBase)
+                    and path.rsplit(".", 1)[-1] != "obs_weight"
+                ):
+                    _require_gemma4_ple_pointwise_activation(observer, f"norm.{path}")
+        projected = _project_gemma4_layer_range(
+            inputs_embeds, projection, start * width, end * width
+        )
     if isinstance(projection_scale, torch.Tensor):
         projection_scale = projection_scale.to(
             dtype=projected.dtype, device=projected.device
@@ -628,7 +835,7 @@ def project_gemma4_per_layer_inputs(
     projected = projected * projection_scale
     projected = projected.reshape(
         *inputs_embeds.shape[:-1],
-        int(num_hidden_layers),
+        end - start,
         int(hidden_size_per_layer_input),
     )
     projected = projection_norm(projected)

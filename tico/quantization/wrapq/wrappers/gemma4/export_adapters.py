@@ -36,6 +36,7 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     fixed_slot_fuse,
     lookup_gemma4_per_layer_token_inputs,
     project_gemma4_per_layer_inputs,
+    validate_gemma4_ple_projection_slicing,
     validate_gemma4_ple_projection_state,
 )
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -225,6 +226,9 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
         wrapped_text_model: nn.Module,
         *,
         mode: Optional[Mode] = None,
+        layer_start: int = 0,
+        layer_end: Optional[int] = None,
+        selective: bool = False,
     ):
         super().__init__()
         hidden_size_per_layer_input = int(
@@ -245,6 +249,18 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
         self.num_hidden_layers = int(
             _require_ple_attribute(wrapped_text_model, "config").num_hidden_layers
         )
+        from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+            resolve_gemma4_ple_layer_range,
+        )
+
+        self.layer_start, self.layer_end = resolve_gemma4_ple_layer_range(
+            self.num_hidden_layers, layer_start, layer_end
+        )
+        self.selective = (
+            selective
+            or self.layer_start != 0
+            or self.layer_end != self.num_hidden_layers
+        )
         self.hidden_size_per_layer_input = hidden_size_per_layer_input
         self.per_layer_token_inputs_observer: ObserverBase = _require_ple_attribute(
             wrapped_text_model, "obs_per_layer_token_inputs"
@@ -253,6 +269,18 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
             _resolve_ple_export_mode(wrapped_text_model, mode),
             stage_name="Gemma4 PLE embedding",
         )
+
+        if self.selective:
+            self.require_available()
+            from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+                validate_gemma4_ple_embedding_slicing,
+            )
+
+            validate_gemma4_ple_embedding_slicing(
+                self.embed_tokens_per_layer,
+                self.per_layer_token_inputs_observer,
+                quantized=self.quantized,
+            )
 
     def require_available(self) -> None:
         """Validate the lookup route before executing or serializing its table."""
@@ -285,6 +313,21 @@ class Gemma4PLEEmbeddingExportAdapter(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Return observed token-identity PLE with shape ``(1, S, L, P)``."""
         self.require_available()
+        if self.selective:
+            from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+                lookup_gemma4_selected_token_inputs,
+            )
+
+            return lookup_gemma4_selected_token_inputs(
+                input_ids,
+                embed_tokens_per_layer=self.embed_tokens_per_layer,
+                num_hidden_layers=self.num_hidden_layers,
+                hidden_size_per_layer_input=self.hidden_size_per_layer_input,
+                token_inputs_observer=self.per_layer_token_inputs_observer,
+                quantized=self.quantized,
+                layer_start=self.layer_start,
+                layer_end=self.layer_end,
+            )
         return lookup_gemma4_per_layer_token_inputs(
             input_ids,
             embed_tokens_per_layer=self.embed_tokens_per_layer,
@@ -305,25 +348,27 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
     decoder layers, or the LM head, so the packed lookup table is not
     duplicated into the prefill and decode projection artifacts.
 
-    The same adapter instance serves both static shapes; the exporter traces it
-    once with ``S = max_seq_len`` (``ple_projection_prefill``) and once with
-    ``S = 1`` (``ple_projection_decode``).
+    The default layer range serves full prefill and normal single-token decode.
+    A bounded ``[layer_start, layer_end)`` adapter selects Linear output rows
+    before computation and serves either all prefix tokens or one suffix token.
+    Its local layer axis maps back to the original decoder index by adding
+    ``layer_start``. It shares the source projection and its frozen grids.
 
     Input contract:
         ``inputs_embeds`` has shape ``(1, S, hidden_size)`` and is the initial
         decoder input (``mm_fusion`` output for multimodal prefill, token
         embedding for decode).
         ``per_layer_token_inputs`` has shape
-        ``(1, S, num_hidden_layers, hidden_size_per_layer_input)`` and is the
-        ``ple_embedding`` output. In ``QUANT`` mode it is re-observed with the
+        ``(1, S, layer_end-layer_start, hidden_size_per_layer_input)`` and is the
+        selected shared lookup output. In ``QUANT`` mode it is re-observed with the
         producer's ``per_layer_token_inputs`` observer so the Circle input keeps
         the producer qparams; the frozen affine fake-quant is idempotent.
 
     Output contract:
         ``per_layer_inputs`` has shape
-        ``(1, S, num_hidden_layers, hidden_size_per_layer_input)`` observed by
+        ``(1, S, layer_end-layer_start, hidden_size_per_layer_input)`` observed by
         the text-model ``per_layer_inputs`` observer. Decoder layer ``i``
-        consumes ``per_layer_inputs[:, :, i, :]``.
+        consumes ``per_layer_inputs[:, :, i-layer_start, :]``.
     """
 
     per_layer_model_projection_scale_tensor: torch.Tensor
@@ -334,6 +379,8 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
         wrapped_text_model: nn.Module,
         *,
         mode: Optional[Mode] = None,
+        layer_start: int = 0,
+        layer_end: Optional[int] = None,
     ):
         super().__init__()
         hidden_size_per_layer_input = int(
@@ -377,6 +424,14 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
         self.num_hidden_layers = int(
             _require_ple_attribute(wrapped_text_model, "config").num_hidden_layers
         )
+        self.layer_start = int(layer_start)
+        self.layer_end = self.num_hidden_layers if layer_end is None else int(layer_end)
+        if not 0 <= self.layer_start < self.layer_end <= self.num_hidden_layers:
+            raise ValueError(
+                f"Invalid Gemma4 PLE layer range [{self.layer_start}, {self.layer_end})."
+            )
+        if self.layer_start != 0 or self.layer_end != self.num_hidden_layers:
+            validate_gemma4_ple_projection_slicing(wrapped_text_model)
         self.hidden_size_per_layer_input = hidden_size_per_layer_input
         self.per_layer_token_inputs_observer: ObserverBase = _require_ple_attribute(
             wrapped_text_model, "obs_per_layer_token_inputs"
@@ -440,6 +495,8 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
             projection_observer=self.per_layer_projection_observer,
             sum_observer=self.per_layer_sum_observer,
             inputs_observer=self.per_layer_inputs_observer,
+            layer_start=self.layer_start,
+            layer_end=self.layer_end,
         )
 
 

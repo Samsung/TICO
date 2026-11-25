@@ -927,5 +927,6 @@ class Gemma4Adapter(ModelAdapter):
                 ple_embedding_format=str(
                     export_cfg.get("ple_embedding_format", "auto")
                 ),
+                ple_prefill_split=export_cfg.get("ple_prefill_split", False),
                 compile_config=resolve_compile_config(export_cfg),
             )

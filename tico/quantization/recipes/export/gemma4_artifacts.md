@@ -398,7 +398,7 @@ the leading `L` slots after multimodal fusion, so `p = L - 1`. The runtime check
 the decoder validity mask against `valid_length`. It slices hidden state, the
 already computed full `ple_projection_prefill` output, RoPE and the original
 prefill mask's query row at this same `p`. Logical RoPE position and multimodal,
-causal and sliding visibility are preserved. PLE projection still processes all
+causal and sliding visibility are preserved. Without `ple_prefill_split`, PLE projection still processes all
 `S` positions; it never switches to `ple_projection_decode` during finalize.
 
 The shared-consumer **decode Circle is reused** for finalize. Its ABI is hidden
@@ -427,7 +427,8 @@ shared_consumer_decode_alias_v1` and aliases eligible finalize stages to existin
 decode files. No duplicate suffix weights or finalize Circle files are created.
 The suffix's Q/projection/MLP activations change from `S` rows to 1 row and its
 attention query dimension changes from `S` to 1 while the KV dimension remains
-`S`. Prefix graphs, PLE projection and ordinary decode shapes are unchanged.
+`S`. Without `ple_prefill_split`, prefix graphs, PLE projection and ordinary decode
+shapes are unchanged.
 This structural reduction does not establish an NPU latency or TTFT speedup.
 
 To export and run the floating-point artifact path with a matching model-backed
@@ -504,3 +505,145 @@ python -m unittest -v \
   test.quantization.recipes.export.test_gemma4_finalize_saved_stage \
   test.quantization.recipes.export.test_gemma4_text_pipeline
 ```
+
+## Selective PLE initial prefill
+
+Enable `export.ple_prefill_split: true` together with `export.prefill_decode: true`
+and `export.ple_embedding_format: pt`. The existing `auto` policy also works when
+it selects `.pt` (including the dense E2B/E4B tables). A Circle lookup still returns
+all layers and therefore rejects this combination before stage export. Set
+`ple_prefill_split: false` to retain the previous full PLE producer. Calibration
+and the eager model always retain full-sequence PLE computation.
+
+Let `S=max_seq`, `L=num_hidden_layers`, `P=hidden_size_per_layer_input`, and `K`
+be the boundary returned by `resolve_gemma4_shared_kv_suffix`. No variant-specific
+layer number selects the split. The replacement artifacts are:
+
+| Artifact stem | Inputs | Output | Original layers |
+|---|---|---|---|
+| `ple_projection_prefill_prefix` | `[1,S,H]`, `[1,S,K,P]` | `[1,S,K,P]` | `[0,K)` |
+| `ple_projection_prefill_suffix` | `[1,1,H]`, `[1,1,L-K,P]` | `[1,1,L-K,P]` | `[K,L)` |
+| `ple_projection_decode` | `[1,1,H]`, `[1,1,L,P]` | `[1,1,L,P]` | `[0,L)` |
+
+Each stem receives the existing `.q.circle` or `.f32.circle` suffix. The full
+`ple_projection_prefill` is not emitted in split mode. Use a separate directory
+for full-reference exports; reusing an existing directory can retain obsolete
+unreferenced artifacts. Decoder artifacts and `text_pipeline.json` retain their
+existing ABI and finalize aliases.
+
+The host selects prefix token rows and columns `[0:K*P]` directly from the one
+shared lookup table. It selects suffix columns `[K*P:L*P]` only for original
+`input_ids[:,p:p+1]`, where `p=valid_length-1` under right padding. Integer storage
+is dequantized after this selection with the original weight qparams; vocabulary
+row qparams are gathered by token ID, including repetitions. The complete table
+remains resident in memory. There is no full-table float reconstruction during
+range lookup, no separate phase tables, and no new storage format or mmap path.
+
+Projection selects weight rows before its Linear operation. Its input for both
+phases is **H0**, the original layer-0 input (multimodal fusion output), with the
+same `p` selection for suffix. Prefix decoder output is not a PLE projection
+input. The P-axis RMSNorm is independent for each token/layer and the original
+scale, norm, projection, sum and final observers retain their operation order.
+The `per_layer_token_inputs=None` helper branch still omits token addition and
+final input scaling. Normal decode always computes all layers for one token.
+
+Version 2 of `ple_pipeline.json` identifies split producers by phase, half-open
+layer range, original decoder indices, static shapes, shared lookup reference,
+H0/token-selection contract and observer qparams. Tensor `dtype`/`example_dtype`
+describe floating fake-quant examples; `abi_dtype` records the serialized affine
+boundary storage dtype (or float for identity/bypass). The observer reference
+records the source grid and enabled/frozen flags. Version 1 remains the legacy
+full producer contract; consumers of version 1 must reject version 2 rather than
+assume a full packed output. Unsplit export continues to write version 1 with
+additive contract metadata. Host-table schemas 1 (unfused scale) and 2 (fused
+scale) retain their existing storage and scale semantics.
+
+Frozen per-tensor affine and identity activation policies support slicing.
+Shape-dependent per-channel or MX activations reject explicitly. Weight policies
+are validated separately: supported affine channel weights keep their original
+scale/zero-point and channel mapping; unsupported policies reject instead of
+re-estimating qparams. Adapter creation and tracing do not recalibrate or change
+source modes, and detached stages retain the live source capability guard.
+For the selected `.pt` lookup, QUANT weights require an enabled affine grid
+(per-tensor, vocabulary-row axis 0, or column axis 1, including negative-axis
+equivalents); Identity/bypassed/MX lookup weights reject explicitly. Projection
+weights support identity, per-tensor affine, or output-row affine grids. Norm
+weights remain on the unchanged P axis. Identity and disabled activation payloads
+reuse the existing host schemas and replay no fake-quant operation.
+
+Runtime comparison settings under `debug.static_gemma4_runtime` are:
+
+| Mode | `last_token_only_prefill` | `ple_prefill_split` |
+|---|---|---|
+| Full reference | `false` | `false` |
+| Decoder suffix only (#1141) | `true` | `false` |
+| Decoder and selective PLE | `true` | `true` |
+
+Models without PLE or an eligible terminal suffix naturally retain their
+existing paths. Invalid topology is an error. The explicit per-call full-prefill
+reference override remains available. The runtime creates prefix PLE, releases
+its token-lookup temporary, then creates the one-token suffix PLE from H0.
+Both output buffers coexist during prefix execution; the prefix buffer and its
+last layer view are released at the decoder boundary before suffix execution.
+No packed full PLE is reassembled or retained as a decode cache.
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/gemma4_export.yaml \
+  --checkpoint ./out/gemma4_quantized/quantized_model.pt \
+  --set export.output_dir=./out/gemma4_split/circle_layers \
+  --set export.ple_prefill_split=true \
+  --set export.ple_embedding_format=pt
+
+python -m tico.quantization.examples.inspector \
+  --mode static-gemma4-runtime \
+  --config tico/quantization/examples/configs/static_gemma4_runtime.yaml \
+  --set debug.static_gemma4_runtime.last_token_only_prefill=true \
+  --set debug.static_gemma4_runtime.ple_prefill_split=true
+```
+
+The inspector uses a floating model-backed frontend; checkpoint parity requires
+the matching calibrated frontend described above. Run the same runtime command
+with the other two setting combinations for comparison.
+
+The produced PLE element count changes from `S*L*P` to `(S*K+L-K)*P`.
+Projection MACs are those counts multiplied by `H` (one multiply-accumulate is
+one MAC, batch size 1). For `S=2048,L=35,K=15,P=256`, a 2-byte output changes
+from 35 MiB to 15.0098 MiB, a 57.1% reduction in that output payload. Lookup
+activation and selected dequantization follow the same token/layer counts.
+This is not a reduction of the table payload or total model RAM by 57.1%.
+The 2-byte example describes an output storage representation; PyTorch floating
+and fake-quantized tensors can use 4-byte float32 elements instead. Actual peak
+activation also includes lookup/projection/norm/fake-quant intermediates, decoder
+state and allocator behavior. Exporting the shared host artifact still performs
+the existing full-table weight quantization; the selected-row reduction applies
+to inference lookup, not to this one-time artifact construction.
+
+The one lookup table payload is unchanged. Prefix and suffix projection weights
+together equal one full projection matrix; normal decode stores another full
+matrix, as with the previous prefill/decode pair. Frozen qparam/norm metadata and
+Circle headers add per-artifact overhead. Exact artifact bytes, peak host RSS,
+host latency and NPU latency/TTFT must be measured on the intended checkpoint and
+backend; the element and MAC formulas alone establish none of those timings.
+
+Checkpoint-free selective-producer and real Circle composition checks:
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m unittest -v \
+  test.quantization.recipes.debug.test_static_gemma4_split_ple \
+  test.quantization.wrapq.wrappers.gemma4.test_ple_embedding_selection \
+  test.quantization.wrapq.wrappers.gemma4.test_ple_projection_range \
+  test.quantization.recipes.export.test_export_gemma4
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m unittest -v \
+  test.quantization.recipes.export.test_gemma4_split_ple_circle
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./ccex test -k gemma4
+```
+
+These tests cover FP and frozen UINT8/INT16 PLE producers, original per-channel
+weight grids, identity activations, selected dequantization, source-state
+ownership, actual bounded Circle constants and quantized boundaries. The
+composition test chains one shared `.pt` lookup through real Circle PLE,
+decoder and head stages, including continuation decode, using FP and UINT8
+semantic reference execution. It does not establish integer NPU equivalence.

@@ -176,7 +176,7 @@ class TestGemma4PLEEmbeddingHostArtifact(unittest.TestCase):
         )
         self._assert_parity(adapter, host)
 
-    def test_quantized_artifact_rejects_non_affine_boundary(self):
+    def test_quantized_artifact_preserves_identity_boundary(self):
         from tico.quantization.config.specs import no_quant
         from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
             build_gemma4_ple_embedding_artifact,
@@ -184,8 +184,13 @@ class TestGemma4PLEEmbeddingHostArtifact(unittest.TestCase):
 
         qcfg = PTQConfig(overrides={"embed_tokens_per_layer.embedding": no_quant()})
         _qtext, adapter = _make_adapter(self.cfg, quantized=True, qcfg=qcfg)
-        with self.assertRaisesRegex(TypeError, "requires an affine observer"):
-            build_gemma4_ple_embedding_artifact(adapter)
+        from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+            Gemma4PLEEmbeddingHostTable,
+        )
+
+        artifact = build_gemma4_ple_embedding_artifact(adapter)
+        self.assertEqual(artifact["observers"]["embedding"]["kind"], "identity")
+        self._assert_parity(adapter, Gemma4PLEEmbeddingHostTable(artifact))
 
     def test_quant_artifact_stores_integer_table_and_observers(self):
         """Quantized artifact keeps int weights plus every replayed observer."""

@@ -27,6 +27,7 @@ import json
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import tico.quantization.recipes.adapters.gemma4 as gemma_adapter_mod
@@ -840,6 +841,247 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                     ple_embedding_format="safetensors",
                 )
 
+    def test_split_ple_export_shapes_mapping_and_shared_table(self):
+        """Split artifacts cover original layers without a duplicate full prefill."""
+        model = FakeExportModel()
+        model.wrapped.model.wrapped.language_model.wrapped.per_layer_projection_norm = (
+            torch.nn.RMSNorm(2)
+        )
+        modules = {}
+        shapes = {}
+
+        def capture(module, inputs, path, **kwargs):
+            del kwargs
+            modules[path.name] = module
+            shapes[path.name] = [list(value.shape) for value in inputs]
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+                return_value=(model, "f32"),
+            ),
+            _patch_small_ple_table(),
+            patch.object(gemma_export, "_convert_and_save", capture),
+            patch.object(
+                gemma_export, "save_gemma4_ple_embedding_artifact"
+            ) as save_table,
+        ):
+            gemma_export.export_gemma4_per_layer(
+                q_model=model,
+                max_seq_len=4,
+                output_dir=directory,
+                model_args=_model_args(),
+                ple_embedding_format="pt",
+                ple_prefill_split=True,
+            )
+            manifest = json.loads(
+                (gemma_export.Path(directory) / "ple_pipeline.json").read_text()
+            )
+            save_table.assert_called_once()
+            self.assertEqual(save_table.call_args.args[1].name, "ple_embedding.f32.pt")
+            self.assertNotIn("ple_projection_prefill.f32.circle", modules)
+            self.assertEqual(
+                shapes["ple_projection_prefill_prefix.f32.circle"],
+                [[1, 4, 8], [1, 4, 1, 2]],
+            )
+            self.assertEqual(
+                shapes["ple_projection_prefill_suffix.f32.circle"],
+                [[1, 1, 8], [1, 1, 1, 2]],
+            )
+            self.assertEqual(
+                shapes["ple_projection_decode.f32.circle"], [[1, 1, 8], [1, 1, 2, 2]]
+            )
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["suffix_start"], 1)
+            self.assertEqual(
+                [
+                    (entry["layer_start"], entry["layer_end"])
+                    for entry in manifest["projections"]
+                ],
+                [(0, 1), (1, 2), (0, 2)],
+            )
+            self.assertEqual(
+                [entry["original_layer_indices"] for entry in manifest["projections"]],
+                [[0], [1], [0, 1]],
+            )
+            self.assertEqual(
+                manifest["prefill_contract"]["suffix_token_index"], "valid_length - 1"
+            )
+            self.assertFalse(
+                manifest["prefill_contract"]["suffix_uses_decoder_prefix_output"]
+            )
+            self.assertTrue(manifest["embedding"]["layer_range_lookup"])
+            self.assertEqual(manifest["embedding"]["artifact"], "ple_embedding.f32.pt")
+            for name, module in modules.items():
+                if name.startswith("ple_projection"):
+                    self.assertFalse(
+                        any("embed_tokens" in key for key in module.state_dict())
+                    )
+
+    def test_split_ple_resolves_e2b_and_e4b_topologies_at_small_width(self):
+        """Production topology patterns use the resolver with tiny producer weights."""
+        for layer_count, shared_count, period in ((35, 20, 5), (42, 18, 6)):
+            model = FakeExportModel()
+            text = model.wrapped.model.wrapped.language_model.wrapped
+            text.config.num_hidden_layers = layer_count
+            text.layers = torch.nn.ModuleList(
+                [
+                    FakePTQWrapper(
+                        FakeDecoderLayer(
+                            layer_idx=index,
+                            is_sliding=(index + 1) % period != 0,
+                            is_shared=index >= layer_count - shared_count,
+                        )
+                    )
+                    for index in range(layer_count)
+                ]
+            )
+            text.embed_tokens_per_layer = torch.nn.Embedding(16, layer_count * 2)
+            text.per_layer_model_projection = torch.nn.Linear(
+                8, layer_count * 2, bias=False
+            )
+            text.per_layer_projection_norm = torch.nn.RMSNorm(2)
+            with (
+                self.subTest(layers=layer_count),
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(
+                    gemma_export,
+                    "_prepare_gemma4_export_model",
+                    return_value=(model, "f32"),
+                ),
+                _patch_small_ple_table(),
+                patch.object(gemma_export, "_convert_and_save"),
+                patch.object(gemma_export, "save_gemma4_ple_embedding_artifact"),
+            ):
+                gemma_export.export_gemma4_per_layer(
+                    q_model=model,
+                    max_seq_len=4,
+                    output_dir=directory,
+                    model_args=_model_args(),
+                    ple_embedding_format="pt",
+                    ple_prefill_split=True,
+                )
+                manifest = json.loads(
+                    (gemma_export.Path(directory) / "ple_pipeline.json").read_text()
+                )
+                k = layer_count - shared_count
+                self.assertEqual(manifest["suffix_start"], k)
+                self.assertEqual(
+                    manifest["projections"][0]["outputs"][0]["shape"], [1, 4, k, 2]
+                )
+                self.assertEqual(
+                    manifest["projections"][1]["outputs"][0]["shape"],
+                    [1, 1, shared_count, 2],
+                )
+                self.assertEqual(
+                    manifest["projections"][2]["outputs"][0]["shape"],
+                    [1, 1, layer_count, 2],
+                )
+
+    def test_split_ple_rejects_circle_before_any_export(self):
+        """The all-layer Circle lookup ABI cannot claim selected lookup activation."""
+        for lookup_format in ("circle", "auto"):
+            with (
+                self.subTest(lookup_format=lookup_format),
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(
+                    gemma_export,
+                    "_prepare_gemma4_export_model",
+                    return_value=(FakeExportModel(), "f32"),
+                ),
+                _patch_small_ple_table(),
+                patch.object(gemma_export, "_convert_and_save") as convert,
+                patch.object(
+                    gemma_export, "save_gemma4_ple_embedding_artifact"
+                ) as save,
+            ):
+                with self.assertRaisesRegex(ValueError, "shared .pt host lookup"):
+                    gemma_export.export_gemma4_per_layer(
+                        q_model=torch.nn.Identity(),
+                        max_seq_len=4,
+                        output_dir=directory,
+                        model_args=_model_args(),
+                        ple_embedding_format=lookup_format,
+                        ple_prefill_split=True,
+                    )
+                convert.assert_not_called()
+                save.assert_not_called()
+                self.assertEqual(list(gemma_export.Path(directory).iterdir()), [])
+
+    def test_split_ple_configuration_validation(self):
+        for flag in ("true", 1, None):
+            with (
+                self.subTest(flag=flag),
+                self.assertRaisesRegex(
+                    TypeError, "ple_prefill_split must be a boolean"
+                ),
+            ):
+                gemma_export.export_gemma4_per_layer(
+                    q_model=torch.nn.Identity(),
+                    max_seq_len=4,
+                    output_dir="unused",
+                    model_args=_model_args(),
+                    ple_prefill_split=cast(bool, flag),
+                )
+        with self.assertRaisesRegex(ValueError, "requires export.prefill_decode=true"):
+            gemma_export.export_gemma4_per_layer(
+                q_model=torch.nn.Identity(),
+                max_seq_len=4,
+                output_dir="unused",
+                model_args=_model_args(),
+                prefill_decode=False,
+                ple_prefill_split=True,
+            )
+
+    def test_split_ple_inapplicable_models_keep_legacy_artifacts(self):
+        """No PLE and no suffix are valid no-ops even with a Circle lookup."""
+        for ple_dim in (0, 2):
+            model = FakeExportModel(ple_dim=ple_dim)
+            if ple_dim:
+                attention = model.wrapped.model.wrapped.language_model.wrapped.layers[
+                    1
+                ].wrapped.self_attn.wrapped
+                attention.is_kv_shared_layer = False
+                attention.store_full_length_kv = True
+            calls = []
+            with (
+                self.subTest(ple_dim=ple_dim),
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(
+                    gemma_export,
+                    "_prepare_gemma4_export_model",
+                    return_value=(model, "f32"),
+                ),
+                _patch_small_ple_table(),
+                patch.object(
+                    gemma_export,
+                    "_convert_and_save",
+                    side_effect=lambda module, inputs, path, **kwargs: calls.append(
+                        path.name
+                    ),
+                ),
+            ):
+                gemma_export.export_gemma4_per_layer(
+                    q_model=model,
+                    max_seq_len=4,
+                    output_dir=directory,
+                    model_args=_model_args(),
+                    ple_prefill_split=True,
+                )
+                self.assertFalse(
+                    any("prefix" in name or "suffix" in name for name in calls)
+                )
+                if ple_dim:
+                    self.assertIn("ple_projection_prefill.f32.circle", calls)
+                    manifest = json.loads(
+                        (gemma_export.Path(directory) / "ple_pipeline.json").read_text()
+                    )
+                    self.assertEqual(manifest["schema_version"], 1)
+                else:
+                    self.assertFalse(any(name.startswith("ple_") for name in calls))
+
     def test_adapter_routes_circle_per_layer_artifact(self):
         """The Gemma4 adapter should dispatch the generic Circle artifact key."""
         model = torch.nn.Identity()
@@ -852,6 +1094,7 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                     "output_dir": "./out/gemma4",
                     "max_seq_len": 1024,
                     "prefill_decode": True,
+                    "ple_prefill_split": True,
                     "strict": True,
                     "artifacts": ["circle_per_layer"],
                 },
@@ -876,6 +1119,7 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             vision_granularity="monolithic",
             spatial_pooling=True,
             ple_embedding_format="auto",
+            ple_prefill_split=True,
             compile_config=CompileConfigV1(),
         )
 

@@ -702,6 +702,7 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
             vision_granularity="both",
             spatial_pooling=False,
             ple_embedding_format="auto",
+            ple_prefill_split=False,
             compile_config=CompileConfigV1(),
         )
 

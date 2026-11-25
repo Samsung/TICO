@@ -32,6 +32,7 @@ export:
   output_dir: ./out/gemma4_quantized/circle_layers
   max_seq_len: 2048
   prefill_decode: true
+  ple_prefill_split: false  # Requires .pt lookup and last-token-only runtime prefill.
   strict: false
   vision:
     granularity: both  # monolithic | layer | both

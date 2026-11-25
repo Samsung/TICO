@@ -321,6 +321,13 @@ def _observer_manifest(observer: ObserverBase) -> dict[str, Any]:
         contract["channel_axis"] = int(channel_axis)
 
     snapshot = observer.frozen_state
+    contract.update(
+        {
+            "enabled": bool(observer.enabled),
+            "fake_quant_enabled": bool(observer.fake_quant_enabled),
+            "frozen": snapshot is not None,
+        }
+    )
     if snapshot is not None and snapshot.scale is not None:
         assert snapshot.zero_point is not None
         contract["scale"] = _small_tensor_values(snapshot.scale)
@@ -766,6 +773,8 @@ def _export_gemma4_ple_embedding_stage(
         "format": resolved,
         "requested_format": _normalize_ple_embedding_format(embedding_format),
         "estimated_circle_bytes": int(estimated_bytes),
+        "layer_range_lookup": resolved == "pt",
+        "shared_by": ["prefill", "decode"],
         "circle_flatbuffer_limit_bytes": int(CIRCLE_FLATBUFFER_LIMIT_BYTES),
         "inputs": [
             {
@@ -831,6 +840,7 @@ def _export_gemma4_ple_projection_stages(
     prefill_decode: bool,
     strict: bool,
     compile_config: CompileConfigBase | None = None,
+    suffix_start: int | None = None,
 ) -> list[dict[str, Any]]:
     """Export the fixed-shape PLE projection graphs for prefill and decode.
 
@@ -842,17 +852,54 @@ def _export_gemma4_ple_projection_stages(
     num_hidden_layers = int(getattr(qtext, "config").num_hidden_layers)
     ple_projection = Gemma4PLEProjectionExportAdapter(qtext)
     stages: list[dict[str, Any]] = []
+    projection = getattr(
+        qtext.per_layer_model_projection, "wrapped", qtext.per_layer_model_projection
+    )
 
-    def _export(stem: str, seq_len: int, stage_id: str) -> None:
+    def tensor_contract(
+        name: str, tensor: torch.Tensor, observer: ObserverBase | None, owner: str
+    ) -> dict[str, Any]:
+        contract = _tensor_manifest(name, tensor)
+        contract["example_dtype"] = contract["dtype"]
+        contract["dtype_semantics"] = "floating fake-quant example"
+        contract["qparam_owner"] = owner
+        snapshot = None if observer is None else observer.frozen_state
+        contract["abi_dtype"] = (
+            str(observer.dtype)
+            if ple_projection.quantized
+            and observer is not None
+            and observer.fake_quant_enabled
+            and snapshot is not None
+            and snapshot.scale is not None
+            else contract["dtype"]
+        )
+        if observer is not None:
+            contract["observer"] = _observer_manifest(observer)
+        return contract
+
+    def _export(
+        stem: str,
+        seq_len: int,
+        stage_id: str,
+        layer_start: int = 0,
+        layer_end: int = num_hidden_layers,
+    ) -> None:
+        adapter = (
+            ple_projection
+            if layer_start == 0 and layer_end == num_hidden_layers
+            else Gemma4PLEProjectionExportAdapter(
+                qtext, layer_start=layer_start, layer_end=layer_end
+            )
+        )
         inputs = _make_ple_projection_inputs(
             seq_len=seq_len,
             hidden_size=hidden_size,
-            num_hidden_layers=num_hidden_layers,
+            num_hidden_layers=layer_end - layer_start,
             ple_dim=ple_dim,
         )
         artifact = _circle_name(stem, artifact_tag)
         _convert_and_save(
-            ple_projection,
+            adapter,
             inputs,
             output_dir / artifact,
             strict=strict,
@@ -864,21 +911,67 @@ def _export_gemma4_ple_projection_stages(
                 "kind": "ple_projection",
                 "format": "circle",
                 "artifact": artifact,
+                "phase": (
+                    "prefill"
+                    if stage_id == "ple_projection"
+                    else stage_id.removeprefix("ple_projection_")
+                ),
+                "layer_start": layer_start,
+                "layer_end": layer_end,
+                "original_layer_indices": list(range(layer_start, layer_end)),
+                "projection_output_channel_range": [
+                    layer_start * ple_dim,
+                    layer_end * ple_dim,
+                ],
+                "ple_output_elements": seq_len * (layer_end - layer_start) * ple_dim,
+                "projection_macs": seq_len
+                * (layer_end - layer_start)
+                * ple_dim
+                * hidden_size,
+                "shared_lookup": "ple_embedding",
                 "inputs": [
-                    _tensor_manifest("inputs_embeds", inputs[0]),
-                    _tensor_manifest("per_layer_token_inputs", inputs[1]),
+                    tensor_contract(
+                        "inputs_embeds",
+                        inputs[0],
+                        getattr(projection, "obs_act_in", None),
+                        "per_layer_model_projection.obs_act_in",
+                    ),
+                    tensor_contract(
+                        "per_layer_token_inputs",
+                        inputs[1],
+                        cast(ObserverBase, qtext.obs_per_layer_token_inputs),
+                        "obs_per_layer_token_inputs",
+                    ),
                 ],
                 "outputs": [
-                    {
-                        "name": "per_layer_inputs",
-                        "shape": list(inputs[1].shape),
-                    }
+                    tensor_contract(
+                        "per_layer_inputs",
+                        inputs[1],
+                        cast(ObserverBase, qtext.obs_per_layer_inputs),
+                        "obs_per_layer_inputs",
+                    )
                 ],
             }
         )
 
     prefill_stem = "ple_projection_prefill" if prefill_decode else "ple_projection"
-    _export(prefill_stem, max_seq_len, prefill_stem)
+    if suffix_start is None:
+        _export(prefill_stem, max_seq_len, prefill_stem)
+    else:
+        _export(
+            "ple_projection_prefill_prefix",
+            max_seq_len,
+            "ple_projection_prefill_prefix",
+            0,
+            suffix_start,
+        )
+        _export(
+            "ple_projection_prefill_suffix",
+            1,
+            "ple_projection_prefill_suffix",
+            suffix_start,
+            num_hidden_layers,
+        )
     if prefill_decode:
         _export("ple_projection_decode", 1, "ple_projection_decode")
     return stages
@@ -891,6 +984,7 @@ def _save_ple_pipeline_manifest(
     artifact_tag: str,
     embedding: dict[str, Any],
     projections: list[dict[str, Any]],
+    suffix_start: int | None = None,
 ) -> None:
     """Write the PLE stage contract, including format and observer boundaries."""
     boundaries = []
@@ -926,12 +1020,62 @@ def _save_ple_pipeline_manifest(
             }
         )
 
+    producer_observers = {}
+    for component in (
+        "embed_tokens_per_layer",
+        "per_layer_model_projection",
+        "per_layer_projection_norm",
+    ):
+        module = getattr(qtext, component, None)
+        if module is not None:
+            for name, observer in module.named_modules():
+                if isinstance(observer, ObserverBase):
+                    producer_observers[f"{component}.{name}"] = _observer_manifest(
+                        observer
+                    )
+    for name in (
+        "obs_per_layer_model_projection_scale",
+        "obs_per_layer_input_scale",
+        "obs_per_layer_sum",
+    ):
+        observer = getattr(qtext, name, None)
+        if observer is not None:
+            producer_observers[name] = _observer_manifest(observer)
+
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2 if suffix_start is not None else 1,
         "artifact_tag": artifact_tag,
+        "ple_prefill_split": suffix_start is not None,
+        "suffix_start": suffix_start,
+        "prefill_contract": (
+            {
+                "inputs_embeds": "H0: original decoder layer-0 input; multimodal fusion output",
+                "suffix_token_index": "valid_length - 1",
+                "padding": "batch_size_1_right_padding",
+                "prefix_tokens": "all static max_seq slots",
+                "suffix_tokens": "one final valid prompt token",
+                "suffix_uses_decoder_prefix_output": False,
+                "decoder_last_token_only_required": suffix_start is not None,
+                "layer_mapping": "local layer j maps to original layer_start + j",
+                "lookup": "one shared table; select token rows and layer columns before dequantization",
+            }
+            if suffix_start is not None
+            else {"inputs_embeds": "H0", "tokens": "all static max_seq slots"}
+        ),
         "embedding": embedding,
         "projections": projections,
         "boundaries": boundaries,
+        "producer_observers": producer_observers,
+        "quantization_contract": {
+            "activation_slicing": (
+                "frozen per-tensor affine or identity"
+                if suffix_start is not None
+                else "not required for full producer"
+            ),
+            "weight_slicing": "original frozen qparams; no recalibration",
+            "boundary_owner": "source checkpoint observers",
+            "decoder_input_observer": "obs_per_layer_inputs",
+        },
     }
     path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -1020,6 +1164,7 @@ def export_gemma4_per_layer(
     vision_granularity: str = "monolithic",
     spatial_pooling: bool = True,
     ple_embedding_format: str = "auto",
+    ple_prefill_split: bool = False,
     compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export a floating-point or PTQ-wrapped dense Gemma4 E2B/E4B by runtime stage.
@@ -1044,6 +1189,10 @@ def export_gemma4_per_layer(
       ``ple_projection_decode`` (``S = 1``): fixed-shape NPU graphs running the
       complete projection/norm/combine stage. With ``prefill_decode=False`` only
       the unsuffixed ``ple_projection`` prefill graph is written.
+    - With ``ple_prefill_split=True``, the full PLE prefill graph is replaced by
+      ``ple_projection_prefill_prefix`` and ``ple_projection_prefill_suffix``.
+      This requires paired prefill/decode export and the shared ``.pt`` lookup.
+      The suffix uses the original fusion input at ``valid_length - 1``.
 
     With ``prefill_decode=True``, each text layer is emitted once for full
     prefill and once for single-token decode. The CPU runtime orchestrates the
@@ -1054,6 +1203,12 @@ def export_gemma4_per_layer(
     if max_seq_len < 1:
         raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
 
+    if type(ple_prefill_split) is not bool:
+        raise TypeError("export.ple_prefill_split must be a boolean.")
+    if ple_prefill_split and not prefill_decode:
+        raise ValueError(
+            "export.ple_prefill_split requires export.prefill_decode=true."
+        )
     if not isinstance(spatial_pooling, bool):
         raise TypeError("export.vision.spatial_pooling must be a boolean.")
     vision_granularity = _normalize_vision_export_granularity(vision_granularity)
@@ -1063,11 +1218,6 @@ def export_gemma4_per_layer(
         max_seq_len=max_seq_len,
     )
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # A partially rewritten directory must never advertise the previous decoder
-    # bundle as valid. Prefill-only exports also invalidate the paired manifest.
-    (output_dir / "text_pipeline.json").unlink(missing_ok=True)
-
     export_model, artifact_tag = _prepare_gemma4_export_model(
         q_model,
         normalized_model_args,
@@ -1115,6 +1265,39 @@ def export_gemma4_per_layer(
             "obs_per_layer_inputs observer."
         )
 
+    ple_suffix_start: int | None = None
+    if ple_prefill_split and ple_dim:
+        boundary, _ = resolve_gemma4_shared_kv_suffix(qtext.layers)
+        if boundary < len(qtext.layers):
+            if text_manifest is not None and not text_manifest["finalize_supported"]:
+                raise ValueError(
+                    "export.ple_prefill_split requires supported single-token decoder "
+                    "quantization; use ple_prefill_split=false for full PLE export."
+                )
+            lookup = Gemma4PLEEmbeddingExportAdapter(qtext)
+            resolved_format = _resolve_ple_embedding_format(
+                ple_embedding_format,
+                estimated_circle_bytes=estimate_gemma4_ple_embedding_circle_bytes(
+                    lookup
+                ),
+            )
+            if resolved_format != "pt":
+                raise ValueError(
+                    "export.ple_prefill_split requires the shared .pt host lookup; "
+                    "set export.ple_embedding_format=pt or ple_prefill_split=false. "
+                    "Circle lookup retains its all-layer output ABI."
+                )
+            for start, end in ((0, boundary), (boundary, len(qtext.layers))):
+                Gemma4PLEEmbeddingExportAdapter(qtext, layer_start=start, layer_end=end)
+                Gemma4PLEProjectionExportAdapter(
+                    qtext, layer_start=start, layer_end=end
+                )
+            ple_suffix_start = boundary
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # A partially rewritten directory must never advertise the previous bundle.
+    (output_dir / "text_pipeline.json").unlink(missing_ok=True)
+    (output_dir / "ple_pipeline.json").unlink(missing_ok=True)
     pixel_values, pixel_position_ids = _make_vision_inputs(
         profile=vision_profile,
     )
@@ -1197,14 +1380,42 @@ def export_gemma4_per_layer(
             prefill_decode=prefill_decode,
             strict=strict,
             compile_config=compile_config,
+            suffix_start=ple_suffix_start,
         )
         assert ple_embedding_manifest is not None
+        if ple_suffix_start is not None:
+            ple_embedding_manifest["shared_by"] = [
+                "prefill_prefix",
+                "prefill_suffix",
+                "decode",
+            ]
+            ple_embedding_manifest["selected_lookup_contract"] = {
+                "layer_start": "inclusive original decoder index",
+                "layer_end": "exclusive original decoder index",
+                "output_shape": [1, "Q", "layer_end - layer_start", ple_dim],
+                "prefix": {
+                    "query_length": max_seq_len,
+                    "layer_start": 0,
+                    "layer_end": ple_suffix_start,
+                },
+                "suffix": {
+                    "query_length": 1,
+                    "layer_start": ple_suffix_start,
+                    "layer_end": len(qtext.layers),
+                },
+                "decode": {
+                    "query_length": 1,
+                    "layer_start": 0,
+                    "layer_end": len(qtext.layers),
+                },
+            }
         _save_ple_pipeline_manifest(
             path=output_dir / "ple_pipeline.json",
             qtext=qtext,
             artifact_tag=artifact_tag,
             embedding=ple_embedding_manifest,
             projections=projection_manifest,
+            suffix_start=ple_suffix_start,
         )
 
     for layer_idx, layer in enumerate(qtext.layers):

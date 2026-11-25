@@ -18,8 +18,8 @@ This module mirrors the Llama static runtime design while adding a fixed image
 prefill stage. CPU code owns processor/tokenizer logic, static layout checks,
 RoPE and mask generation, the shared Per-Layer Embedding (PLE) token lookup,
 KV cache writes, shared-KV bookkeeping, and sampling. NPU-exportable subgraphs
-own quantized tensor compute, including the complete PLE projection/combine
-stage that produces the packed ``per_layer_inputs`` tensor.
+own quantized tensor compute, including PLE projection/combine stages. Initial
+prefill can produce separate prefix and last-valid-token suffix layer ranges.
 """
 
 from dataclasses import dataclass
@@ -79,8 +79,18 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     gemma4_layer_type_head_dim,
     resolve_gemma4_shared_kv_suffix,
     StaticGemma4Layout,
+    validate_gemma4_ple_slicing_state,
     validate_gemma4_single_token_quantization,
 )
+
+
+@dataclass
+class _SplitPrefillPLE:
+    """Invocation-owned range buffers; release the prefix before finalize."""
+
+    prefix: Optional[torch.Tensor]
+    suffix: torch.Tensor
+    layer_start: int
 
 
 class _RawGemma4Inputs(TypedDict):
@@ -272,11 +282,16 @@ class StaticGemma4RuntimeConfig:
     gen_steps: int = 16
     rope: RopeConvention = "pre_negated_sin"
     last_token_only_prefill: bool = False
+    ple_prefill_split: bool = False
     text_artifacts: Optional[str] = None
 
     def __post_init__(self) -> None:
         if type(self.last_token_only_prefill) is not bool:
             raise ValueError("last_token_only_prefill must be a boolean.")
+        if type(self.ple_prefill_split) is not bool:
+            raise ValueError("ple_prefill_split must be a boolean.")
+        if self.ple_prefill_split and not self.last_token_only_prefill:
+            raise ValueError("ple_prefill_split requires last_token_only_prefill=true.")
         if self.text_artifacts is not None and not isinstance(self.text_artifacts, str):
             raise ValueError("text_artifacts must be a directory path or null.")
 
@@ -294,12 +309,17 @@ class StaticGemma4Runtime:
         device: str = "cpu",
         rope: RopeConvention = "pre_negated_sin",
         last_token_only_prefill: bool = False,
+        ple_prefill_split: bool = False,
         text_artifacts: Optional[str] = None,
     ):
         """Create an NPU-profile runtime; ``rope="hf"`` is an explicit override."""
         layout.validate()
         if type(last_token_only_prefill) is not bool:
             raise ValueError("last_token_only_prefill must be a boolean.")
+        if type(ple_prefill_split) is not bool:
+            raise ValueError("ple_prefill_split must be a boolean.")
+        if ple_prefill_split and not last_token_only_prefill:
+            raise ValueError("ple_prefill_split requires last_token_only_prefill=true.")
         assert_gemma4_dense_no_moe(model)
 
         model = cast("Gemma4ForConditionalGeneration", model)
@@ -423,6 +443,12 @@ class StaticGemma4Runtime:
             resolve_gemma4_shared_kv_suffix(self.text_model.layers)
         )
         self.last_token_only_prefill = last_token_only_prefill
+        self.ple_prefill_split = ple_prefill_split
+        self._split_ple_stages: Optional[
+            tuple[nn.Module, nn.Module, nn.Module, nn.Module]
+        ] = None
+        if ple_prefill_split and self._has_split_ple():
+            self._get_split_ple_stages()
         self._text_pipeline: Optional["Gemma4TextPipeline"] = None
         if text_artifacts is not None:
             self.use_text_pipeline(text_artifacts)
@@ -535,8 +561,52 @@ class StaticGemma4Runtime:
             return None
         if self.ple_embedding is None or self.ple_projection is None:
             raise RuntimeError("Gemma4 PLE stages are not initialized.")
-        per_layer_token_inputs = self.ple_embedding(input_ids)
+        lookup = self.ple_embedding
+        if input_ids.shape[1] == 1:
+            lookup = getattr(self, "_selective_ple_embedding", None) or lookup
+        per_layer_token_inputs = lookup(input_ids)
         return self.ple_projection(inputs_embeds, per_layer_token_inputs)
+
+    def _has_split_ple(self) -> bool:
+        return bool(self.text_model.hidden_size_per_layer_input) and (
+            self.shared_kv_suffix_start < len(self.prefill_layers)
+        )
+
+    def _get_split_ple_stages(
+        self,
+    ) -> tuple[nn.Module, nn.Module, nn.Module, nn.Module]:
+        # All adapters reference the original shared storage. Construct once, never
+        # serialize a host table or copy the text model during an invocation.
+        validate_gemma4_ple_slicing_state(self.text_model)
+        stages = getattr(self, "_split_ple_stages", None)
+        if stages is None:
+            k = self.shared_kv_suffix_start
+            stages = (
+                Gemma4PLEEmbeddingExportAdapter(self.text_model, layer_end=k),
+                Gemma4PLEProjectionExportAdapter(self.text_model, layer_end=k),
+                Gemma4PLEEmbeddingExportAdapter(self.text_model, layer_start=k),
+                Gemma4PLEProjectionExportAdapter(self.text_model, layer_start=k),
+            )
+            self._split_ple_stages = stages
+            self._selective_ple_embedding = Gemma4PLEEmbeddingExportAdapter(
+                self.text_model, selective=True
+            )
+        return stages
+
+    def _build_split_per_layer_inputs(
+        self, input_ids: torch.Tensor, h0: torch.Tensor, valid_len: int
+    ) -> _SplitPrefillPLE:
+        """Compute only S*K and 1*(L-K) PLE from the original fused H0."""
+        prefix_lookup, prefix_projection, suffix_lookup, suffix_projection = (
+            self._get_split_ple_stages()
+        )
+        prefix_tokens = prefix_lookup(input_ids)
+        prefix = prefix_projection(h0, prefix_tokens)
+        del prefix_tokens
+        p = valid_len - 1
+        suffix_tokens = suffix_lookup(input_ids[:, p : p + 1])
+        suffix = suffix_projection(h0[:, p : p + 1], suffix_tokens)
+        return _SplitPrefillPLE(prefix, suffix, self.shared_kv_suffix_start)
 
     def _allocate_empty_cache(
         self, batch_size: int, dtype: torch.dtype
@@ -768,13 +838,32 @@ class StaticGemma4Runtime:
 
     @torch.no_grad()
     def prefill(
-        self, batch: Gemma4StaticBatch, *, last_token_only: Optional[bool] = None
+        self,
+        batch: Gemma4StaticBatch,
+        *,
+        last_token_only: Optional[bool] = None,
+        ple_prefill_split: Optional[bool] = None,
     ) -> torch.Tensor:
         """Run initial generation prefill and return last-valid-token logits.
 
         ``last_token_only=False`` keeps the full-sequence reference path. The
-        opt-in only changes decoder execution, never PLE projection/calibration.
+        ``ple_prefill_split=True`` also limits PLE producers to the prefix range
+        and one suffix token. Calibration and normal decode keep the full path.
         """
+        enabled = (
+            self.last_token_only_prefill if last_token_only is None else last_token_only
+        )
+        split = (
+            getattr(self, "ple_prefill_split", False)
+            if ple_prefill_split is None
+            else ple_prefill_split
+        )
+        if type(enabled) is not bool or type(split) is not bool:
+            raise ValueError(
+                "last_token_only and ple_prefill_split must be booleans or None."
+            )
+        # An explicit full reference call always uses the original PLE producer.
+        split = split and enabled and self._has_split_ple()
         llm_input_ids = batch["llm_input_ids"].to(self.device)
         valid_len = self._prefill_valid_length(llm_input_ids, batch)
         pixel_values = batch["pixel_values"].to(self.device).to(self.model.dtype)
@@ -793,12 +882,15 @@ class StaticGemma4Runtime:
             batch["attention_mask"].to(self.device),
         )
 
-        # Per-Layer Embeddings (PLE) after multimodal fusion, if enabled:
-        #   1. ple_embedding (shared CPU graph): llm_input_ids → (B, S, L, P)
-        #   2. ple_projection_prefill (NPU graph): fused hidden_states plus the
-        #      token-identity tensor → packed (B, S, L, P)
-        # Each layer receives its view: per_layer_inputs[:, :, i, :]
-        per_layer_inputs = self._build_per_layer_inputs(llm_input_ids, hidden_states)
+        per_layer_inputs: Optional[torch.Tensor] | _SplitPrefillPLE
+        if split:
+            per_layer_inputs = self._build_split_per_layer_inputs(
+                llm_input_ids, hidden_states, valid_len
+            )
+        else:
+            per_layer_inputs = self._build_per_layer_inputs(
+                llm_input_ids, hidden_states
+            )
 
         return self.prefill_decoder(
             hidden_states,
@@ -838,7 +930,7 @@ class StaticGemma4Runtime:
     def prefill_decoder(
         self,
         hidden_states: torch.Tensor,
-        per_layer_inputs: Optional[torch.Tensor],
+        per_layer_inputs: Optional[torch.Tensor] | _SplitPrefillPLE,
         attention_masks: dict[str, torch.Tensor],
         position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]],
         valid_len: int,
@@ -847,9 +939,10 @@ class StaticGemma4Runtime:
     ) -> torch.Tensor:
         """Prefill from fused decoder inputs, preserving externally supplied masks.
 
-        Inputs use the existing static right-padded ABI, including full-length
-        prefill PLE. For a saved quantized pipeline these inputs must come from
-        the matching calibrated frontend. Returns last-valid-token logits.
+        Inputs use the static right-padded ABI with either full PLE or the
+        invocation-owned split buffers from ``_build_split_per_layer_inputs``.
+        For a saved quantized pipeline these inputs must come from the matching
+        calibrated frontend. Returns last-valid-token logits.
         """
         enabled = (
             self.last_token_only_prefill if last_token_only is None else last_token_only
@@ -875,7 +968,7 @@ class StaticGemma4Runtime:
     def _prefill_decoder(
         self,
         hidden_states: torch.Tensor,
-        per_layer_inputs: Optional[torch.Tensor],
+        per_layer_inputs: Optional[torch.Tensor] | _SplitPrefillPLE,
         attention_masks: dict[str, torch.Tensor],
         position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]],
         valid_len: int,
@@ -904,6 +997,23 @@ class StaticGemma4Runtime:
                     self.text_model, "obs_per_layer_inputs", None
                 ),
             )
+        split_ple = isinstance(per_layer_inputs, _SplitPrefillPLE)
+        if split_ple:
+            assert isinstance(per_layer_inputs, _SplitPrefillPLE)
+            k = self.shared_kv_suffix_start
+            p_dim = int(self.text_model.hidden_size_per_layer_input)
+            if (
+                not last_token_only
+                or per_layer_inputs.layer_start != k
+                or per_layer_inputs.prefix is None
+                or tuple(per_layer_inputs.prefix.shape)
+                != (1, self.layout.max_seq, k, p_dim)
+                or tuple(per_layer_inputs.suffix.shape)
+                != (1, 1, len(self.prefill_layers) - k, p_dim)
+            ):
+                raise ValueError(
+                    "Split PLE buffers do not match the shared-KV prefill topology."
+                )
         self.layer_caches = self._allocate_empty_cache(
             hidden_states.shape[0], hidden_states.dtype
         )
@@ -919,17 +1029,29 @@ class StaticGemma4Runtime:
             finalize = layer_idx >= boundary
             if layer_idx == boundary:
                 hidden_states = hidden_states[:, p : p + 1, :]
+                if isinstance(per_layer_inputs, _SplitPrefillPLE):
+                    per_layer_inputs.prefix = None
             layer = self.decode_layers[layer_idx] if finalize else prefill_layer
             layer_type = self.text_config.layer_types[layer_idx]
-            per_layer_input = (
-                per_layer_inputs[:, :, layer_idx, :]
-                if per_layer_inputs is not None
-                else None
-            )
+            per_layer_input: Optional[torch.Tensor]
+            if isinstance(per_layer_inputs, _SplitPrefillPLE):
+                if finalize:
+                    per_layer_input = per_layer_inputs.suffix[
+                        :, :, layer_idx - boundary, :
+                    ]
+                else:
+                    assert per_layer_inputs.prefix is not None
+                    per_layer_input = per_layer_inputs.prefix[:, :, layer_idx, :]
+            else:
+                per_layer_input = (
+                    per_layer_inputs[:, :, layer_idx, :]
+                    if per_layer_inputs is not None
+                    else None
+                )
             mask = attention_masks[layer_type]
             cos, sin = position_embeddings[layer_type]
             if finalize:
-                if per_layer_input is not None:
+                if per_layer_input is not None and not split_ple:
                     per_layer_input = per_layer_input[:, p : p + 1, :]
                 # Match the existing decode artifact's rank-3 mask ABI while
                 # preserving the exact prefill query's key visibility.
@@ -953,6 +1075,7 @@ class StaticGemma4Runtime:
                     shared_kv_states[layer_idx] = (new_k, new_v)
             else:
                 hidden_states = out
+            del per_layer_input
 
         self.past_len = valid_len
         return hidden_states
@@ -2151,6 +2274,7 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         layout=layout,
         rope=cfg.rope,
         last_token_only_prefill=cfg.last_token_only_prefill,
+        ple_prefill_split=cfg.ple_prefill_split,
         text_artifacts=cfg.text_artifacts,
         vision_profile=vision_profile,
         device=cfg.device,
