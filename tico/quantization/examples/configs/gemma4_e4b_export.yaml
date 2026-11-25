@@ -35,6 +35,8 @@ export:
   ple_prefill_split: false  # Requires .pt lookup and last-token-only runtime prefill.
   strict: false
   vision:
-    granularity: both  # monolithic | layer | both
+    granularity: both  # monolithic | encoder | layer | both
+    # Use 'encoder' to export all encoder layers as a single graph,
+    # with the patch embedder, pooler, and post projection exported separately.
   artifacts:
     - circle_per_layer

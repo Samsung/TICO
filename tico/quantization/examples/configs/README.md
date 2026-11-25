@@ -947,6 +947,13 @@ Rules:
   and [generation CLI](../README.md#generate-from-a-llama-circle-bundle).
 - Qwen3-VL Circle export requires `model_args.profile: npu_export`, and its
   fixed vision grid/start/merge values must match the wrapped checkpoint.
+- Gemma4 `export.vision.granularity` accepts `monolithic`, `encoder`, `layer`,
+  or `both`. `encoder` exports the complete vision pipeline as patch embedder,
+  whole encoder stack, pooler, and post projection. `layer` splits each encoder
+  layer instead; `both` retains monolithic plus layer export. The API default
+  is `monolithic`, while the E2B/E4B export presets keep `both`. Select the
+  four-stage form with `--set export.vision.granularity=encoder`; see the
+  [vision artifact contract](../../recipes/export/gemma4_artifacts.md#circle_layers-vision-pipeline).
 
 ## CLI overrides
 

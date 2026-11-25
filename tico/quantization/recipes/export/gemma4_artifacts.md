@@ -293,7 +293,7 @@ export:
   artifacts:
     - circle_per_layer
   vision:
-    granularity: both       # monolithic | layer | both
+    granularity: encoder    # monolithic | encoder | layer | both
     spatial_pooling: true   # default; applies to e2b_66x36_264 and its geometry alias
 ```
 
@@ -302,36 +302,106 @@ With `spatial_pooling: true`, the 36×66 row-major patch grid is grouped into
 The pooler retains its 280 output slots, frozen activation boundaries and final
 scaling. The default is `true`; set `false` to keep the pooling MatMul. Other
 layouts and quantization policies that require the pooling matrix continue to
-use MatMul. The option applies to both split and monolithic export. Integer
-rounding can differ between target kernels.
+use MatMul. The option applies to all four granularities, including the separate
+pooler graph in `encoder` mode. Integer rounding can differ between target
+kernels.
 
-The default `monolithic` writes only the whole-tower `vision_prefill` graph.
-`layer` writes the split pipeline; `both` writes both forms for numerical or
-compiler comparisons. Each encoder layer is one Circle artifact. The table
-below lists the E2B files in split-pipeline execution order after the monolithic
-alternative.
+| Granularity | Vision graphs |
+|---|---|
+| `monolithic` | One graph containing patch embedding, all encoder layers, pooling, and post projection. |
+| `encoder` | Four graphs: patch embedder, the complete encoder stack, pooler, and post projection. |
+| `layer` | Patch embedder, one graph per encoder layer, pooler, and post projection. |
+| `both` | The `monolithic` and `layer` forms together. It does not add the `encoder` graph. |
+
+The Python API default remains `monolithic`; the E2B/E4B export YAML presets
+retain `both`. Select `encoder` through the existing generic override:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/gemma4_export.yaml \
+  --checkpoint ./out/gemma4_quantized/quantized_model.pt \
+  --set export.vision.granularity=encoder \
+  --output-dir ./out/gemma4_quantized/encoder_circle_layers
+```
+
+For a floating-point export, replace `--checkpoint ...` with `--source model`;
+the vision files then use the `f32` tag. Use `gemma4_e4b_export.yaml` with the
+E4B checkpoint for the same layout on E4B. Encoder layer count and hidden width
+come from the loaded model rather than the E2B example values below.
 
 | File | Description |
 |---|---|
 | `vision_prefill.q.circle` | Monolithic vision tower plus `embed_vision` projection. Input `pixel_values` `[1, 2520, 768]`, output visual tokens `[264, 1536]`. |
 | `vision_patch_embedder.q.circle` | Split stage 1: patch embedding plus the baked positional embedding, output `[1, 2520, 768]`. |
+| `vision_encoder.q.circle` | `encoder` stage 2: all encoder layers in model order in one graph. Inputs are `hidden_states`, `attention_mask`, `position_embeddings_cos`, `position_embeddings_sin`; output `hidden_states` `[1, 2520, 768]`. |
 | `vision_encoder_layer_00..15.q.circle` | Split stage 2: the 16 vision encoder layers. Each takes `hidden_states` and the three tensors stored in `vision_context.pt`. |
 | `vision_pooler.q.circle` | Split stage 3: pools 2520 patches into 280 soft tokens. |
 | `vision_post_projection.q.circle` | Split stage 4: selects the 264 valid tokens and applies `embed_vision`, output `[264, 1536]`. |
-| `vision_context.pt` | Shared inputs of the split encoder layers: additive `attention_mask` `(1, 1, 2520, 2520)` and RoPE `cos`/`sin` `(1, 2520, 64)`. Stored once instead of being embedded in 16 graphs. |
-| `vision_pipeline.json` | Split pipeline manifest: stage order, layer indices, tensor shapes, boundary observer/qparam contracts, and the `vision_context.pt` reference. |
+| `vision_context.pt` | Raw external context for the encoder stack or each split encoder layer: additive `attention_mask` `(1, 1, 2520, 2520)` and RoPE `cos`/`sin` `(1, 2520, 64)`. Stored once instead of embedded in encoder graphs. |
+| `vision_pipeline.json` | Split pipeline manifest: granularity, stage order, layer metadata, tensor shapes/dtypes, boundary observer/qparam contracts, and the `vision_context.pt` reference. |
 | `vision_profile.json` | Static image profile `e2b_66x36_264`: 1056x576 image, 36x66 patch grid, 2520 patches (2376 valid plus 144 padding), 264 visual tokens, and the `image_position_ids` hash. |
 | `effective_config.yaml` | Resolved configuration of the export run (`gemma4_export.yaml` plus `--checkpoint` and `--model`). |
 
-If only the monolithic vision graph is used, the 21 split-vision files
-(`vision_patch_embedder`, `vision_encoder_layer_*`, `vision_pooler`,
-`vision_post_projection`, `vision_context.pt`, `vision_pipeline.json`) are not
-needed; set `export.vision.granularity: monolithic` to skip them.
+`encoder` writes exactly the four vision Circle files `vision_patch_embedder`,
+`vision_encoder`, `vision_pooler`, and `vision_post_projection`, plus the context
+and manifest. It does not write `vision_prefill` or `vision_encoder_layer_*`.
+`monolithic` skips all split files. Use a separate output directory when
+changing granularity so artifacts from an earlier export do not remain beside
+the new files.
+
+The four-stage execution order is:
+
+```text
+vision_patch_embedder(pixel_values)
+  -> hidden_states
+vision_encoder(hidden_states, attention_mask, position_embeddings_cos, position_embeddings_sin)
+  -> hidden_states
+vision_pooler(hidden_states)
+  -> pooled_hidden_states
+vision_post_projection(pooled_hidden_states)
+  -> visual_embeds
+```
+
+Load the context with `torch.load("vision_context.pt", weights_only=True)`.
+Eager adapters take its three raw tensors in the encoder input order shown
+above. For a
+static profile with `S` patches, vision hidden width `H`, and attention head
+dimension `D`, encoder input/output hidden states have shape `[1, S, H]`, the
+mask `[1, 1, S, S]`, and each RoPE tensor `[1, S, D]`. Context dtypes follow the
+prepared encoder compute dtype and are recorded in `shared_encoder_inputs`;
+use the tensors for the matching `vision_profile.json`. For a serialized Circle,
+bind context according to its actual input dtype/qparams: float inputs use the
+raw tensors, while affine integer inputs require host quantization
+(`clamp(round(value / scale) + zero_point)` to the input integer range), rather
+than an integer cast. Quantize context once and reuse it for that profile.
 
 The raw attention mask and RoPE tensors in `vision_context.pt` are runtime
-inputs of every encoder Circle. Producer and consumer stages use the same
-frozen observer at each split boundary, so the generated quantized artifacts
-are directly chainable.
+inputs of the encoder Circle. Quantized execution applies the encoder-owned
+context observers once before running the complete stack. Each layer retains
+its own quantization operations without extra boundaries between internal
+layers. The patch stage ends in the encoder input domain; the encoder applies
+its input observer, all layers, its output observer, and then the pooler input
+observer. The pooler input therefore uses the same frozen domain as the encoder
+output. The pooler/post-projection boundary likewise reuses the pooler output
+observer. These boundary declarations are bypassed in `NO_QUANT` mode.
+
+The `encoder` manifest has stage IDs `patch_embedder`, `encoder`, `pooler`, and
+`post_projection`, and exactly three artifact boundaries connecting adjacent
+IDs. `num_layers` describes the entire encoder stack; internal layer edges
+are not artifact boundaries. The profile, artifact tag, and context reference
+identify the corresponding tensor contract. `static_profile` embeds the profile
+geometry and position-ID hash. `compute_dtype` records hidden-state compute
+types; `shared_encoder_inputs` records the raw context types, and
+`shared_encoder_input_observers` records their frozen grids. `quantized_export`
+selects the quantized path; each observer also records `fake_quant_enabled`.
+Eager/fake-quant tensor dtypes and
+serialized quantized Circle boundary dtypes are separate: use the generated
+Circle tensors and their frozen scale/zero-point metadata when passing encoded
+values between stages, including context inputs. Matching frozen observers make
+neighboring serialized boundaries directly chainable without recalibration.
+
+Pooling, padding removal, valid-token selection, standardization, and the final
+projection keep their existing stage responsibilities and model/profile settings.
 
 ### Static vision profile ownership
 

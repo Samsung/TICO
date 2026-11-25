@@ -28,6 +28,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import tico.quantization.recipes.adapters.gemma4 as gemma_adapter_mod
@@ -36,6 +37,7 @@ import tico.quantization.recipes.export.gemma4 as gemma_export
 import torch
 from tico.config import CompileConfigV1
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
+from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
@@ -289,7 +291,7 @@ class FakeVision(QuantModuleBase):
         spatial_pooling: bool = False,
     ) -> torch.nn.Module:
         """Prepare static patch, encoder, and pooler export components."""
-        del spatial_pooling
+        self.last_spatial_pooling = spatial_pooling
         if mode != "prefill":
             raise ValueError(f"Unsupported fake vision mode: {mode!r}.")
         self.encoder.materialize_templates(pixel_position_ids)
@@ -638,6 +640,161 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
         self.assertEqual(len(manifest["boundaries"]), 5)
         self.assertIn("scale", manifest["boundaries"][0]["observer"])
 
+    def test_granularities_keep_distinct_artifact_sets_and_default(self) -> None:
+        """Encoder groups the stack; both and the API default keep their meaning."""
+        split = [
+            "vision_patch_embedder",
+            "vision_encoder_layer_00",
+            "vision_encoder_layer_01",
+            "vision_encoder_layer_02",
+            "vision_pooler",
+            "vision_post_projection",
+        ]
+        encoder = [
+            "vision_patch_embedder",
+            "vision_encoder",
+            "vision_pooler",
+            "vision_post_projection",
+        ]
+        for tag in ("q", "f32"):
+            for granularity, stems in (
+                (None, ["vision_prefill"]),
+                ("monolithic", ["vision_prefill"]),
+                ("layer", split),
+                ("both", ["vision_prefill", *split]),
+                ("encoder", encoder),
+            ):
+                with self.subTest(tag=tag, granularity=granularity):
+                    export_model = FakeExportModel(num_vision_layers=3)
+                    config = CompileConfigV1(preserve_embedding_quantization=True)
+                    calls = []
+
+                    def record_conversion(module, example_inputs, save_path, **kwargs):
+                        calls.append((module, example_inputs, save_path.name, kwargs))
+                        save_path.touch()
+
+                    with (
+                        tempfile.TemporaryDirectory() as tmpdir,
+                        patch.object(
+                            gemma_export,
+                            "_prepare_gemma4_export_model",
+                            return_value=(export_model, tag),
+                        ),
+                        patch.object(
+                            gemma_export, "_convert_and_save", record_conversion
+                        ),
+                    ):
+                        options: dict[str, Any] = (
+                            {}
+                            if granularity is None
+                            else {"vision_granularity": granularity}
+                        )
+                        gemma_export.export_gemma4_per_layer(
+                            q_model=torch.nn.Identity(),
+                            max_seq_len=4,
+                            output_dir=tmpdir,
+                            model_args=_model_args(),
+                            strict=True,
+                            compile_config=config,
+                            **options,
+                        )
+                        out = Path(tmpdir)
+                        self.assertEqual(
+                            sorted(p.name for p in out.glob("vision_*.circle")),
+                            sorted(f"{stem}.{tag}.circle" for stem in stems),
+                        )
+                        for _, _, name, kwargs in calls:
+                            if name.startswith("vision_"):
+                                self.assertIs(kwargs["config"], config)
+                                self.assertTrue(kwargs["strict"])
+                        if granularity != "encoder":
+                            continue
+                        manifest = json.loads(
+                            (out / "vision_pipeline.json").read_text()
+                        )
+                        self.assertEqual(manifest["granularity"], "encoder")
+                        self.assertIsNone(manifest["monolithic_artifact"])
+                        self.assertEqual(manifest["schema_version"], 1)
+                        self.assertEqual(manifest["artifact_tag"], tag)
+                        self.assertEqual(
+                            [s["id"] for s in manifest["stages"]],
+                            ["patch_embedder", "encoder", "pooler", "post_projection"],
+                        )
+                        self.assertEqual(
+                            [s["artifact"] for s in manifest["stages"]],
+                            [f"{stem}.{tag}.circle" for stem in encoder],
+                        )
+                        self.assertEqual(
+                            [
+                                (b["producer"], b["consumer"])
+                                for b in manifest["boundaries"]
+                            ],
+                            [
+                                ("patch_embedder", "encoder"),
+                                ("encoder", "pooler"),
+                                ("pooler", "post_projection"),
+                            ],
+                        )
+                        stage = manifest["stages"][1]
+                        self.assertEqual(stage["num_layers"], 3)
+                        self.assertEqual(stage["kind"], "encoder")
+                        self.assertNotIn("layer_index", stage)
+                        self.assertEqual(
+                            [t["name"] for t in stage["inputs"]],
+                            [
+                                "hidden_states",
+                                "attention_mask",
+                                "position_embeddings_cos",
+                                "position_embeddings_sin",
+                            ],
+                        )
+                        self.assertEqual(stage["inputs"][0]["shape"], [1, 4, 2])
+                        self.assertEqual(stage["outputs"][0]["shape"], [1, 4, 2])
+                        context = torch.load(
+                            out / manifest["shared_encoder_inputs_artifact"],
+                            weights_only=True,
+                        )
+                        for tensor in manifest["shared_encoder_inputs"]:
+                            actual = context[tensor["name"]]
+                            self.assertEqual(tensor["shape"], list(actual.shape))
+                            self.assertEqual(
+                                tensor["dtype"],
+                                str(actual.dtype).removeprefix("torch."),
+                            )
+                            self.assertIn(
+                                "scale",
+                                manifest["shared_encoder_input_observers"][
+                                    tensor["name"]
+                                ],
+                            )
+                        self.assertEqual(manifest["static_profile"]["num_patches"], 4)
+
+    def test_encoder_forwards_spatial_pooling_options(self) -> None:
+        """Encoder granularity retains both configured pooler export policies."""
+        for spatial_pooling in (False, True):
+            with self.subTest(spatial_pooling=spatial_pooling):
+                export_model = FakeExportModel(num_vision_layers=3)
+                with (
+                    tempfile.TemporaryDirectory() as tmpdir,
+                    patch.object(
+                        gemma_export,
+                        "_prepare_gemma4_export_model",
+                        return_value=(export_model, "q"),
+                    ),
+                    patch.object(gemma_export, "_convert_and_save"),
+                ):
+                    gemma_export.export_gemma4_per_layer(
+                        q_model=torch.nn.Identity(),
+                        max_seq_len=4,
+                        output_dir=tmpdir,
+                        model_args=_model_args(),
+                        vision_granularity="encoder",
+                        spatial_pooling=spatial_pooling,
+                    )
+                gemma_model = cast(FakeGemmaModel, export_model.wrapped.model.wrapped)
+                vision = cast(FakeVision, gemma_model.vision_tower.wrapped)
+                self.assertIs(vision.last_spatial_pooling, spatial_pooling)
+
     def test_invalid_vision_options_fail_before_model_preparation(self) -> None:
         """Invalid split options should fail before loading or wrapping a model."""
         with (
@@ -668,23 +825,24 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
     def test_adapter_forwards_nested_vision_export_options(self) -> None:
         """The model adapter should route nested vision options to the exporter."""
         model = torch.nn.Identity()
-        ctx = RecipeContext(
-            cfg={
-                "calibration": {"seq_len": 4},
-                "model_args": _model_args(),
-                "export": {
-                    "enabled": True,
-                    "output_dir": "./out/gemma4",
-                    "max_seq_len": 4,
-                    "prefill_decode": True,
-                    "strict": False,
-                    "vision": {"granularity": "both", "spatial_pooling": False},
-                    "artifacts": ["circle_per_layer"],
-                },
+        cfg = {
+            "calibration": {"seq_len": 4},
+            "model_args": _model_args(),
+            "export": {
+                "enabled": True,
+                "output_dir": "./out/gemma4",
+                "max_seq_len": 4,
+                "prefill_decode": True,
+                "strict": False,
+                "vision": {"granularity": "both", "spatial_pooling": False},
+                "artifacts": ["circle_per_layer"],
             },
-            adapter=Gemma4Adapter(),
-            model=model,
-        )
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "export.json"
+            config_path.write_text(json.dumps(cfg))
+            cfg = load_recipe_config(config_path, ["export.vision.granularity=encoder"])
+        ctx = RecipeContext(cfg=cfg, adapter=Gemma4Adapter(), model=model)
 
         with patch.object(
             gemma_adapter_mod,
@@ -699,7 +857,7 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
             model_args=_model_args(),
             prefill_decode=True,
             strict=False,
-            vision_granularity="both",
+            vision_granularity="encoder",
             spatial_pooling=False,
             ple_embedding_format="auto",
             ple_prefill_split=False,
