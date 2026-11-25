@@ -956,22 +956,21 @@ pipeline selectors and the convenience aliases.
 
 ## Gemma4 static generation prefill
 
-`static_gemma4_runtime.yaml` and `static_gemma4_e4b_runtime.yaml` accept these
-fields under `debug.static_gemma4_runtime`:
+`static_gemma4_runtime.yaml` and `static_gemma4_e4b_runtime.yaml` accept this
+field under `debug.static_gemma4_runtime`:
 
 | Field | Default | Meaning |
 |---|---|---|
 | `last_token_only_prefill` | `false` | Finish a supported terminal shared-KV decoder suffix with one query at the final valid prompt position. Keeps full PLE prefill projection and all normal decode layers. Must be a boolean. |
-| `text_artifacts` | `null` | Optional directory containing `text_pipeline.json` and matching decoder/LM-head Circle stages; selects CPU reference execution. Requires re-export for legacy directories lacking the manifest. |
 
 The option applies to initial generation prefill, with the existing batch-size-1,
 right-padding contract. A model without a shared suffix keeps full prefill;
 malformed producer bindings or unsupported quantized activation policies raise
-clear errors. Calibration and eager evaluation do not use this option. Saved
-quantized text stages require matching calibrated frontend inputs; the inspector's
-default frontend is floating point. See the
+clear errors. Calibration and eager evaluation do not use this option. The
+inspector runs model-backed static adapters with a floating-point frontend. See the
 [artifact contract and commands](../../recipes/export/gemma4_artifacts.md#last-token-only-generation-prefill)
-for alias reuse, supported observer policies, comparison, and export instructions.
+for decode-adapter reuse, supported observer policies, comparison, and Circle
+parity coverage.
 
 ## Adding a new config preset
 

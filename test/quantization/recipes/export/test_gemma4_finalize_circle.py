@@ -14,9 +14,7 @@
 
 """Real frozen Gemma4 consumer graphs: full prefill versus one-query finalize."""
 
-import tempfile
 import unittest
-from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -25,10 +23,6 @@ import torch
 from tico.circle import CircleDocument
 from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
 from tico.circle.runtime.quantization import fake_quantize_array
-from tico.quantization.recipes.export.gemma4_text_pipeline import (
-    gemma4_text_stage_inputs,
-    Gemma4CircleTextStage,
-)
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
     QuantGemma4TextAttention,
@@ -94,6 +88,16 @@ def _make_consumer(layer_type, quantized):
     return consumer, prefix_hidden, ple, rope, shared
 
 
+def _export_consumer(module, hidden, kwargs):
+    """Export a real consumer for Circle numerical and shape checks."""
+    with torch.no_grad():
+        program = torch.export.export(module, (hidden,), kwargs=kwargs, strict=False)
+        converted = tico.convert_from_exported_program(program)
+    document = CircleDocument.from_bytes(converted.circle_binary)
+    document.verify()
+    return program, CircleReferenceRuntime(document), converted.circle_binary
+
+
 @unittest.skipUnless(_HAS_GEMMA4, "Transformers Gemma4 is required")
 class TestGemma4FinalizeCircle(unittest.TestCase):
     """Verify serialized qlen=1 compute, boundary domains and CPU reference parity."""
@@ -104,16 +108,6 @@ class TestGemma4FinalizeCircle(unittest.TestCase):
         self.addCleanup(rng.__exit__, None, None, None)
         torch.manual_seed(823)
         register_fake_quant_meta_kernels_for_dynamic_export()
-
-    def _export(self, module, hidden, kwargs):
-        with torch.no_grad():
-            program = torch.export.export(
-                module, (hidden,), kwargs=kwargs, strict=False
-            )
-            converted = tico.convert_from_exported_program(program)
-        document = CircleDocument.from_bytes(converted.circle_binary)
-        document.verify()
-        return program, CircleReferenceRuntime(document), converted.circle_binary
 
     def _run(self, module, runtime, hidden, kwargs, quantized):
         leaves, spec = torch.utils._pytree.tree_flatten(((hidden,), kwargs))
@@ -180,8 +174,10 @@ class TestGemma4FinalizeCircle(unittest.TestCase):
                 # Same frozen grids: selecting a query changes only float32 GEMM
                 # accumulation order, not quantization policy or calibration.
                 torch.testing.assert_close(actual, wanted, rtol=1e-5, atol=2e-6)
-                full_ep, full_rt, full_binary = self._export(full, hidden, full_kwargs)
-                one_ep, one_rt, one_binary = self._export(
+                full_ep, full_rt, full_binary = _export_consumer(
+                    full, hidden, full_kwargs
+                )
+                one_ep, one_rt, one_binary = _export_consumer(
                     finalize, hidden[:, p : p + 1, :], one_kwargs
                 )
                 self.assertEqual(one_rt.input_tensors[0].shape, (1, 1, 8))
@@ -235,32 +231,6 @@ class TestGemma4FinalizeCircle(unittest.TestCase):
                 np.testing.assert_allclose(
                     one_value, full_value[:, p : p + 1, :], rtol=1e-5, atol=2e-6
                 )
-                with tempfile.TemporaryDirectory() as directory:
-                    path = Path(directory) / "consumer.circle"
-                    path.write_bytes(one_binary)
-                    loaded = Gemma4CircleTextStage(
-                        path,
-                        input_shapes=gemma4_text_stage_inputs(
-                            {"is_shared": True, "head_dim": 4, "num_kv_heads": 1},
-                            query_length=1,
-                            capacity=6,
-                            hidden_size=8,
-                            ple_dim=2,
-                            decode=True,
-                        ),
-                        output_shapes=[[1, 1, 8]],
-                        execution_mode=(
-                            ExecutionMode.FAKE_QUANTIZE
-                            if quantized
-                            else ExecutionMode.NATIVE
-                        ),
-                    )
-                    torch.testing.assert_close(
-                        loaded(hidden[:, p : p + 1, :], **one_kwargs),
-                        torch.from_numpy(one_value),
-                        rtol=0,
-                        atol=0,
-                    )
 
     def test_float_serialized_finalize_matches_full_prefill(self):
         self._exercise(False)

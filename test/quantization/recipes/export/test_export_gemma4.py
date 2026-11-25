@@ -99,8 +99,6 @@ class FakeAttention(torch.nn.Module):
         self.sliding_window = 2 if is_sliding else None
         self.is_sliding = is_sliding
         self.is_kv_shared_layer = is_shared
-        self.layer_type = "sliding_attention" if is_sliding else "full_attention"
-        self.store_full_length_kv = not is_shared
         self.max_seq = 4
 
 
@@ -196,7 +194,7 @@ class FakeText(torch.nn.Module):
                 FakePTQWrapper(
                     FakeDecoderLayer(
                         layer_idx=1,
-                        is_sliding=True,
+                        is_sliding=False,
                         is_shared=True,
                     )
                 ),
@@ -325,26 +323,8 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                     manifest = json.loads(
                         (gemma_export.Path(tmpdir) / "ple_pipeline.json").read_text()
                     )
-                    text_manifest = json.loads(
-                        (gemma_export.Path(tmpdir) / "text_pipeline.json").read_text()
-                    )
                 save_host.assert_called_once()
                 self.assertEqual(manifest["schema_version"], 1)
-                self.assertEqual(text_manifest["suffix_start"], layers - shared)
-                self.assertTrue(text_manifest["finalize_supported"])
-                sources = {}
-                for index, layer_type in enumerate(text.config.layer_types):
-                    contract = text_manifest["layers"][index]
-                    if index < layers - shared:
-                        sources[layer_type] = index
-                        self.assertIsNone(contract["finalize_artifact"])
-                    else:
-                        self.assertEqual(
-                            contract["producer_index"], sources[layer_type]
-                        )
-                        self.assertEqual(
-                            contract["finalize_artifact"], contract["decode_artifact"]
-                        )
                 self.assertEqual(manifest["embedding"]["format"], "pt")
                 self.assertEqual(
                     manifest["embedding"]["estimated_circle_bytes"], estimated_bytes
@@ -664,8 +644,6 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                 fake_convert_and_save,
             ),
         ):
-            manifest_path = gemma_export.Path(tmpdir) / "text_pipeline.json"
-            manifest_path.write_text('{"stale": true}')
             gemma_export.export_gemma4_per_layer(
                 q_model=torch.nn.Identity(),
                 max_seq_len=4,
@@ -673,7 +651,6 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                 model_args=_model_args(),
                 prefill_decode=False,
             )
-            self.assertFalse(manifest_path.exists())
 
         self.assertEqual(
             names,
@@ -688,32 +665,6 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                 "lm_head.f32.circle",
             ],
         )
-
-    def test_failed_export_invalidates_previous_text_manifest(self):
-        export_model = FakeExportModel()
-        with (
-            tempfile.TemporaryDirectory() as tmpdir,
-            patch.object(
-                gemma_export,
-                "_prepare_gemma4_export_model",
-                return_value=(export_model, "f32"),
-            ),
-            patch.object(
-                gemma_export,
-                "_convert_and_save",
-                side_effect=RuntimeError("conversion failed"),
-            ),
-        ):
-            manifest_path = gemma_export.Path(tmpdir) / "text_pipeline.json"
-            manifest_path.write_text('{"stale": true}')
-            with self.assertRaisesRegex(RuntimeError, "conversion failed"):
-                gemma_export.export_gemma4_per_layer(
-                    q_model=export_model,
-                    max_seq_len=4,
-                    output_dir=tmpdir,
-                    model_args=_model_args(),
-                )
-            self.assertFalse(manifest_path.exists())
 
     def _run_export_with_ple_format(
         self, *, artifact_tag, ple_embedding_format, estimated_bytes=None
