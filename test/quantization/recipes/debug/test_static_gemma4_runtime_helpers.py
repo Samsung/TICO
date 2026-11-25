@@ -31,6 +31,23 @@ import torch
 HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
 
 
+@unittest.skipUnless(HAS_TRANSFORMERS, "transformers is required for runtime config")
+class TestStaticGemma4RuntimeConfig(unittest.TestCase):
+    def test_finalize_is_opt_in_and_config_values_are_validated(self):
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4RuntimeConfig,
+        )
+
+        self.assertFalse(StaticGemma4RuntimeConfig().last_token_only_prefill)
+        self.assertTrue(
+            StaticGemma4RuntimeConfig(
+                last_token_only_prefill=True
+            ).last_token_only_prefill
+        )
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            StaticGemma4RuntimeConfig(last_token_only_prefill="false")  # type: ignore[arg-type]
+
+
 @unittest.skipUnless(
     HAS_TRANSFORMERS, "transformers is required for static runtime helpers"
 )
@@ -1071,6 +1088,9 @@ def _make_ple_runtime(*, max_seq: int, num_layers: int, ple_dim: int):
     runtime.ple_projection = _CountingPLEStage(_make_packed_ple)  # type: ignore[assignment]
     runtime.prefill_layers = [_SliceRecordingLayer() for _ in range(num_layers)]  # type: ignore[assignment]
     runtime.decode_layers = [_SliceRecordingLayer() for _ in range(num_layers)]  # type: ignore[assignment]
+    runtime.shared_kv_suffix_start = num_layers
+    runtime.shared_kv_producers = {}
+    runtime.last_token_only_prefill = False
     runtime.layer_caches = []
     runtime.past_len = 0
     return runtime
@@ -1380,6 +1400,7 @@ class TestDecodeOneFixedCacheContract(unittest.TestCase):
             hidden.size(0), hidden.size(1), 5, device=hidden.device
         )
         runtime.decode_layers = [owner, consumer]  # type: ignore[assignment]
+        runtime.shared_kv_producers = {1: 0}
         runtime.past_len = 3
 
         initial_k = torch.zeros(1, 1, max_seq - 1, 2)

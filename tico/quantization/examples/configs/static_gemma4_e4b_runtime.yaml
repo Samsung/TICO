@@ -1,6 +1,7 @@
 debug:
   static_gemma4_runtime:
     model: google/gemma-4-E4B-it
+    last_token_only_prefill: false
     max_seq: 2048
     vision_profile: gemma4_66x36_264
     padding_side: right

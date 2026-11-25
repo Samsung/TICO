@@ -18,6 +18,11 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 import torch
 import torch.nn as nn
 
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.identity import IdentityObserver
+
 # ``(tensor, observer) -> tensor`` hook applied at every PLE observer boundary.
 # ``QuantModuleBase._fq`` provides calibration/quant/no-quant semantics for the
 # text model; export adapters pass a frozen fake-quant or identity function.
@@ -95,6 +100,160 @@ def assert_gemma4_dense_no_moe(model_or_config: Any) -> None:
 
 # Retained for external users and the existing Gemma4 assistant path.
 assert_gemma4_e2b_no_moe = assert_gemma4_dense_no_moe
+
+
+def resolve_gemma4_shared_kv_suffix(
+    layers: Iterable[nn.Module],
+) -> tuple[int, dict[int, int]]:
+    """Resolve the trailing read-only KV consumers and their storage producers.
+
+    Inspect the instantiated layers, rather than assuming a config-specific
+    boundary or one producer for every attention type. The mapping uses decoder
+    list indices and includes consumers before the trailing suffix as well.
+    A model without a trailing shared consumer returns ``len(layers)``.
+
+    Explicit producer bindings must agree with the same-type
+    ``store_full_length_kv`` producer used by the eager text model. Malformed
+    sharing is an error, not a reason to silently use another execution path.
+    """
+    decoders = [getattr(layer, "wrapped", layer) for layer in layers]
+    sources: dict[str, tuple[int, Any]] = {}
+    producers: dict[int, int] = {}
+    boundary = 0
+    for index, decoder in enumerate(decoders):
+        if bool(getattr(decoder, "enable_moe_block", False)):
+            raise ValueError("Gemma4 shared-KV suffix requires dense decoder layers.")
+        attention_wrapper = getattr(decoder, "self_attn", None)
+        attention = getattr(attention_wrapper, "wrapped", attention_wrapper)
+        if attention is None:
+            raise ValueError(f"Gemma4 decoder layer {index} has no self attention.")
+        layer_type = getattr(attention, "layer_type", None)
+        if layer_type not in {"full_attention", "sliding_attention"}:
+            raise ValueError(
+                f"Unsupported Gemma4 shared-KV layer type at layer {index}: "
+                f"{layer_type!r}."
+            )
+        if not bool(getattr(attention, "is_kv_shared_layer", False)):
+            boundary = index + 1
+            if bool(getattr(attention, "store_full_length_kv", False)):
+                sources[layer_type] = (index, attention)
+            continue
+        if bool(getattr(attention, "store_full_length_kv", False)) or any(
+            getattr(attention, name, None) is not None for name in ("k_proj", "v_proj")
+        ):
+            raise ValueError(
+                f"Gemma4 shared-KV consumer layer {index} must not produce K/V."
+            )
+        source_entry = sources.get(layer_type)
+        if source_entry is None:
+            raise ValueError(
+                "Gemma4 shared-KV layer has no preceding storage producer: "
+                f"layer_idx={index}, layer_type={layer_type!r}."
+            )
+        source_index, source = source_entry
+        if (
+            hasattr(attention, "_cache_source")
+            and attention._cache_source is not source
+        ):
+            raise ValueError(
+                f"Gemma4 shared-KV layer {index} cache binding does not match "
+                f"storage producer {source_index}."
+            )
+        if getattr(attention, "head_dim", None) != getattr(source, "head_dim", None):
+            raise ValueError(
+                f"Gemma4 shared-KV layer {index} and producer {source_index} "
+                "have incompatible head dimensions."
+            )
+        head_counts = []
+        for owner in (attention, source):
+            config = getattr(owner, "config", None)
+            per_layer = getattr(config, "per_layer_config", None)
+            if per_layer is not None:
+                config = per_layer[int(owner.layer_idx)]
+            head_counts.append(getattr(config, "num_key_value_heads", None))
+        if (
+            all(count is not None for count in head_counts)
+            and head_counts[0] != head_counts[1]
+        ):
+            raise ValueError(
+                f"Gemma4 shared-KV layer {index} and producer {source_index} "
+                "have incompatible KV head counts."
+            )
+        producers[index] = source_index
+    return boundary, producers
+
+
+def validate_gemma4_single_token_quantization(
+    layers: Iterable[nn.Module],
+    *,
+    per_layer_input_observer: Optional[ObserverBase] = None,
+) -> None:
+    """Require token-independent frozen activation grids for suffix slicing.
+
+    The initial implementation supports the canonical static backend's
+    per-tensor affine or identity activations. Arbitrary per-channel activation
+    axes and dynamic MX exponent groups can depend on the removed query axis;
+    they need a separate shape/domain proof. Weight and bias policies are
+    unaffected, including per-channel and MX weights. This check never collects
+    statistics, switches modes, or replaces frozen grids.
+    """
+    issue = _gemma4_single_token_quantization_issue(
+        layers, per_layer_input_observer=per_layer_input_observer
+    )
+    if issue is not None:
+        raise ValueError(
+            "Gemma4 single-token finalize requires per-tensor affine or identity "
+            f"activation observers; unsupported policy at {issue!r}. "
+            "Disable last_token_only_prefill for this checkpoint."
+        )
+
+
+def _gemma4_single_token_quantization_issue(
+    layers: Iterable[nn.Module],
+    *,
+    per_layer_input_observer: Optional[ObserverBase],
+) -> Optional[str]:
+    quantized = False
+    for layer in layers:
+        decoder = getattr(layer, "wrapped", layer)
+        attention_wrapper = getattr(decoder, "self_attn", None)
+        attention = getattr(attention_wrapper, "wrapped", attention_wrapper)
+        if (
+            attention is not None
+            and attention.training
+            and float(getattr(attention, "attention_dropout", 0.0)) > 0.0
+        ):
+            raise ValueError(
+                "Gemma4 single-token finalize requires attention dropout to be "
+                "disabled; use eval() before generation."
+            )
+        mode = getattr(decoder, "_mode", Mode.NO_QUANT)
+        if mode is Mode.CALIB:
+            raise ValueError(
+                "Gemma4 single-token finalize cannot run during calibration."
+            )
+        if mode is not Mode.QUANT:
+            continue
+        quantized = True
+        for path, observer in decoder.named_modules():
+            if not isinstance(observer, ObserverBase):
+                continue
+            if path.rsplit(".", 1)[-1] in {"obs_weight", "obs_bias"}:
+                continue
+            if not _gemma4_single_token_observer_supported(observer):
+                return path
+    if quantized and per_layer_input_observer is not None:
+        if not _gemma4_single_token_observer_supported(per_layer_input_observer):
+            return "per_layer_inputs"
+    return None
+
+
+def _gemma4_single_token_observer_supported(observer: ObserverBase) -> bool:
+    return isinstance(observer, IdentityObserver) or (
+        isinstance(observer, AffineObserverBase)
+        and observer.channel_axis is None
+        and not observer.qscheme.is_per_channel()
+    )
 
 
 def _ensure_batched_visual_embeds(visual_embeds: torch.Tensor) -> torch.Tensor:

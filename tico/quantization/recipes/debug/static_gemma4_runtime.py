@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         Gemma4ForConditionalGeneration,
     )
     from transformers.models.gemma4.processing_gemma4 import Gemma4Processor
+
 from transformers.feature_extraction_utils import BatchFeature
 from typing_extensions import NotRequired
 
@@ -72,7 +73,9 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_dense_no_moe,
     build_decode_attention_mask,
     gemma4_layer_type_head_dim,
+    resolve_gemma4_shared_kv_suffix,
     StaticGemma4Layout,
+    validate_gemma4_single_token_quantization,
 )
 
 
@@ -264,6 +267,11 @@ class StaticGemma4RuntimeConfig:
     verify_steps: int = 4
     gen_steps: int = 16
     rope: RopeConvention = "pre_negated_sin"
+    last_token_only_prefill: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.last_token_only_prefill) is not bool:
+            raise ValueError("last_token_only_prefill must be a boolean.")
 
 
 class StaticGemma4Runtime:
@@ -278,9 +286,12 @@ class StaticGemma4Runtime:
         vision_profile: Optional[Gemma4StaticVisionProfile] = None,
         device: str = "cpu",
         rope: RopeConvention = "pre_negated_sin",
+        last_token_only_prefill: bool = False,
     ):
         """Create an NPU-profile runtime; ``rope="hf"`` is an explicit override."""
         layout.validate()
+        if type(last_token_only_prefill) is not bool:
+            raise ValueError("last_token_only_prefill must be a boolean.")
         assert_gemma4_dense_no_moe(model)
 
         model = cast("Gemma4ForConditionalGeneration", model)
@@ -374,7 +385,13 @@ class StaticGemma4Runtime:
         self.prefill_layers = nn.ModuleList(
             [
                 cast(QuantGemma4TextDecoderLayer, layer.wrapped).as_export_module(
-                    "prefill", return_kv=True
+                    "prefill",
+                    return_kv=True,
+                    per_layer_input_observer=(
+                        self.text_model.obs_per_layer_inputs
+                        if self.text_model.hidden_size_per_layer_input
+                        else None
+                    ),
                 )
                 for layer in self.text_model.layers
             ]
@@ -382,11 +399,22 @@ class StaticGemma4Runtime:
         self.decode_layers = nn.ModuleList(
             [
                 cast(QuantGemma4TextDecoderLayer, layer.wrapped).as_export_module(
-                    "decode", return_kv=True
+                    "decode",
+                    return_kv=True,
+                    per_layer_input_observer=(
+                        self.text_model.obs_per_layer_inputs
+                        if self.text_model.hidden_size_per_layer_input
+                        else None
+                    ),
                 )
                 for layer in self.text_model.layers
             ]
         ).to(self.device)
+
+        self.shared_kv_suffix_start, self.shared_kv_producers = (
+            resolve_gemma4_shared_kv_suffix(self.text_model.layers)
+        )
+        self.last_token_only_prefill = last_token_only_prefill
 
         self.layer_caches: list[LayerCache] = []
         self.past_len = 0
@@ -671,9 +699,16 @@ class StaticGemma4Runtime:
         return attention_masks, position_embeddings
 
     @torch.no_grad()
-    def prefill(self, batch: Gemma4StaticBatch) -> torch.Tensor:
-        """Run static prefill and return last-token logits."""
+    def prefill(
+        self, batch: Gemma4StaticBatch, *, last_token_only: Optional[bool] = None
+    ) -> torch.Tensor:
+        """Run initial generation prefill and return last-valid-token logits.
+
+        ``last_token_only=False`` keeps the full-sequence reference path. The
+        opt-in only changes decoder execution, never PLE projection/calibration.
+        """
         llm_input_ids = batch["llm_input_ids"].to(self.device)
+        valid_len = self._prefill_valid_length(llm_input_ids, batch)
         pixel_values = batch["pixel_values"].to(self.device).to(self.model.dtype)
         image_position_ids = batch.get("image_position_ids")
         if image_position_ids is not None:
@@ -685,10 +720,6 @@ class StaticGemma4Runtime:
         # they are intentionally absent from the vision-prefill runtime ABI.
         image_embeds = vision_prefill(pixel_values)
         hidden_states = self.mm_fusion(text_embeds, image_embeds)
-        self.layer_caches = self._allocate_empty_cache(
-            hidden_states.shape[0], hidden_states.dtype
-        )
-
         attention_masks, position_embeddings = self.build_prefill_masks_and_rope(
             llm_input_ids,
             batch["attention_mask"].to(self.device),
@@ -701,66 +732,133 @@ class StaticGemma4Runtime:
         # Each layer receives its view: per_layer_inputs[:, :, i, :]
         per_layer_inputs = self._build_per_layer_inputs(llm_input_ids, hidden_states)
 
-        # Shared-KV bookkeeping: some layers share K/V states with earlier
-        # layers of the same layer_type.  Store layers write their full-length
-        # K/V into shared_kv_states; consumer layers read from it.
-        shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        enabled = (
+            self.last_token_only_prefill if last_token_only is None else last_token_only
+        )
+        if type(enabled) is not bool:
+            raise ValueError("last_token_only must be a boolean or None.")
+        hidden_states = self._prefill_decoder(
+            hidden_states,
+            per_layer_inputs,
+            attention_masks,
+            position_embeddings,
+            valid_len,
+            last_token_only=enabled,
+        )
+        last_hidden = (
+            hidden_states
+            if hidden_states.shape[1] == 1
+            else hidden_states[:, valid_len - 1 : valid_len, :]
+        )
+        logits = self.lm_head(last_hidden)[:, -1, :]
+        return self._apply_final_logit_softcapping(logits)
 
-        # Extract valid length once before the loop to avoid GPU→CPU sync per layer.
-        valid_len = int(batch["valid_length"].item())
-        cache_capacity = self.layout.max_seq - 1
-        if valid_len > cache_capacity:
+    def _prefill_valid_length(
+        self, input_ids: torch.Tensor, batch: Gemma4StaticBatch
+    ) -> int:
+        """Resolve the physical last token using the supported decoder layout."""
+        if tuple(input_ids.shape) != (1, self.layout.max_seq):
             raise ValueError(
-                "Gemma4 static prefill must reserve one decode slot for the "
-                f"current token: valid_len={valid_len}, "
-                f"cache_capacity={cache_capacity}."
+                "Gemma4 static prefill requires a single static decoder batch."
             )
+        valid = _normalize_valid_token_mask(
+            input_ids, batch["attention_mask"], pad_token_id=None, device=self.device
+        )
+        _validate_padding_layout(input_ids, valid, padding_side="right")
+        valid_len = int(valid.sum().item())
+        if valid_len != int(batch["valid_length"].item()):
+            raise ValueError(
+                "Gemma4 valid_length disagrees with decoder attention_mask."
+            )
+        if not 1 <= valid_len <= self.layout.max_seq - 1:
+            raise ValueError(
+                "Gemma4 static prefill must reserve one decode slot and contain "
+                f"at least one valid token: valid_len={valid_len}, "
+                f"cache_capacity={self.layout.max_seq - 1}."
+            )
+        return valid_len
 
-        for layer_idx, layer in enumerate(self.prefill_layers):
+    def _prefill_decoder(
+        self,
+        hidden_states: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor],
+        attention_masks: dict[str, torch.Tensor],
+        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]],
+        valid_len: int,
+        *,
+        last_token_only: bool = False,
+    ) -> torch.Tensor:
+        """Run prefix then optional consumer-only finalize; never append a token."""
+        if hidden_states.ndim != 3 or tuple(hidden_states.shape[:2]) != (
+            1,
+            self.layout.max_seq,
+        ):
+            raise ValueError(
+                "Gemma4 prefill decoder expects [1, max_seq, hidden_size]."
+            )
+        if not 1 <= valid_len <= self.layout.max_seq - 1:
+            raise ValueError(
+                "Gemma4 prefill valid_len must fit the max_seq - 1 cache capacity."
+            )
+        if last_token_only and self.shared_kv_suffix_start < len(self.prefill_layers):
+            validate_gemma4_single_token_quantization(
+                self.prefill_layers[self.shared_kv_suffix_start :],
+                per_layer_input_observer=getattr(
+                    self.text_model, "obs_per_layer_inputs", None
+                ),
+            )
+        self.layer_caches = self._allocate_empty_cache(
+            hidden_states.shape[0], hidden_states.dtype
+        )
+        # Keep invocation-local full S-slot KV separate from the S-1 persistent
+        # cache: finalize includes the last valid prompt token's own KV.
+        shared_kv_states: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        boundary = (
+            self.shared_kv_suffix_start if last_token_only else len(self.prefill_layers)
+        )
+        p = valid_len - 1  # physical slot equals logical position for right padding
+
+        for layer_idx, prefill_layer in enumerate(self.prefill_layers):
+            finalize = layer_idx >= boundary
+            if layer_idx == boundary:
+                hidden_states = hidden_states[:, p : p + 1, :]
+            layer = self.decode_layers[layer_idx] if finalize else prefill_layer
             layer_type = self.text_config.layer_types[layer_idx]
             per_layer_input = (
                 per_layer_inputs[:, :, layer_idx, :]
                 if per_layer_inputs is not None
                 else None
             )
-
-            # Check if this layer is a shared-KV consumer
-            attn = cast(QuantGemma4TextDecoderLayer, layer.wrapped).self_attn.wrapped
-            is_shared = bool(getattr(attn, "is_kv_shared_layer", False))
-            shared_kv = shared_kv_states.get(layer_type, None) if is_shared else None
-
+            mask = attention_masks[layer_type]
+            cos, sin = position_embeddings[layer_type]
+            if finalize:
+                if per_layer_input is not None:
+                    per_layer_input = per_layer_input[:, p : p + 1, :]
+                # Match the existing decode artifact's rank-3 mask ABI while
+                # preserving the exact prefill query's key visibility.
+                mask = mask[..., p : p + 1, :].squeeze(1)
+                cos, sin = cos[:, p : p + 1, :], sin[:, p : p + 1, :]
+            producer = self.shared_kv_producers.get(layer_idx)
+            shared_kv = shared_kv_states[producer] if producer is not None else None
             out = layer(
                 hidden_states=hidden_states,
-                attention_mask=attention_masks[layer_type],
-                position_embeddings=position_embeddings[layer_type],
+                attention_mask=mask,
+                position_embeddings=(cos, sin),
                 per_layer_input=per_layer_input,
                 shared_key_value=shared_kv,
             )
-
             if isinstance(out, tuple) and len(out) == 3:
                 hidden_states, new_k, new_v = out
-                # Write only valid K/V (excluding padding) into the cache.
-                # new_k/new_v from prefill have shape (B, kv_heads, max_seq, head_dim)
-                # but positions >= valid_length contain garbage from padding tokens.
-                self.layer_caches[layer_idx].past_k[:, :, :valid_len, :].copy_(
-                    new_k[:, :, :valid_len, :]
-                )
-                self.layer_caches[layer_idx].past_v[:, :, :valid_len, :].copy_(
-                    new_v[:, :, :valid_len, :]
-                )
-                # Shared consumers execute in the same fixed-size prefill graph,
-                # so they receive the complete ``max_seq`` K/V tensors. Padding
-                # positions remain disabled by the prefill attention mask.
-                if bool(getattr(attn, "store_full_length_kv", False)):
-                    shared_kv_states[layer_type] = (new_k, new_v)
+                cache = self.layer_caches[layer_idx]
+                cache.past_k[:, :, :valid_len, :].copy_(new_k[:, :, :valid_len, :])
+                cache.past_v[:, :, :valid_len, :].copy_(new_v[:, :, :valid_len, :])
+                if layer_idx in self.shared_kv_producers.values():
+                    shared_kv_states[layer_idx] = (new_k, new_v)
             else:
                 hidden_states = out
 
-        self.past_len = int(batch["valid_length"].item())
-
-        logits = self.lm_head(hidden_states[:, self.past_len - 1 : self.past_len, :])
-        logits = logits[:, -1, :]
-        return self._apply_final_logit_softcapping(logits)
+        self.past_len = valid_len
+        return hidden_states
 
     def build_decode_masks_and_rope(
         self, batch_size: int, dtype: torch.dtype
@@ -862,7 +960,7 @@ class StaticGemma4Runtime:
 
         # Store layers build fixed ``max_seq`` shared K/V tensors before later
         # shared consumers of the same layer type execute.
-        shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        shared_kv_states: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
         for layer_idx, layer in enumerate(self.decode_layers):
             layer_type = self.text_config.layer_types[layer_idx]
@@ -873,9 +971,9 @@ class StaticGemma4Runtime:
             )
 
             # Check if this layer is a shared-KV consumer
-            attn = cast(QuantGemma4TextDecoderLayer, layer.wrapped).self_attn.wrapped
-            is_shared = bool(getattr(attn, "is_kv_shared_layer", False))
-            shared_kv = shared_kv_states.get(layer_type, None) if is_shared else None
+            producer = self.shared_kv_producers.get(layer_idx)
+            is_shared = producer is not None
+            shared_kv = shared_kv_states.get(producer) if producer is not None else None
             if is_shared and shared_kv is None:
                 raise RuntimeError(
                     "Missing fixed shared K/V state for Gemma4 decode: "
@@ -900,8 +998,8 @@ class StaticGemma4Runtime:
 
                 # A shared consumer receives the same fixed physical layout as
                 # this layer's attention: past storage first, current delta last.
-                if bool(getattr(attn, "store_full_length_kv", False)):
-                    shared_kv_states[layer_type] = (
+                if layer_idx in self.shared_kv_producers.values():
+                    shared_kv_states[layer_idx] = (
                         torch.cat((cache.past_k, new_k), dim=2),
                         torch.cat((cache.past_v, new_v), dim=2),
                     )
@@ -1955,6 +2053,7 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         processor=processor,
         layout=layout,
         rope=cfg.rope,
+        last_token_only_prefill=cfg.last_token_only_prefill,
         vision_profile=vision_profile,
         device=cfg.device,
     )

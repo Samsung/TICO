@@ -966,6 +966,24 @@ nested model-specific structures.
 The [CLI override reference](../README.md#cli-overrides) covers numeric and named
 pipeline selectors and the convenience aliases.
 
+## Gemma4 static generation prefill
+
+`static_gemma4_runtime.yaml` and `static_gemma4_e4b_runtime.yaml` accept this
+field under `debug.static_gemma4_runtime`:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `last_token_only_prefill` | `false` | Finish a supported terminal shared-KV decoder suffix with one query at the final valid prompt position. Keeps full PLE prefill projection and all normal decode layers. Must be a boolean. |
+
+The option applies to initial generation prefill, with the existing batch-size-1,
+right-padding contract. A model without a shared suffix keeps full prefill;
+malformed producer bindings or unsupported quantized activation policies raise
+clear errors. Calibration and eager evaluation do not use this option. The
+inspector runs model-backed static adapters with a floating-point frontend. See the
+[artifact contract and commands](../../recipes/export/gemma4_artifacts.md#last-token-only-generation-prefill)
+for decode-adapter reuse, supported observer policies, comparison, and Circle
+parity coverage.
+
 ## Adding a new config preset
 
 1. Pick an existing config that is closest to the intended workflow.
