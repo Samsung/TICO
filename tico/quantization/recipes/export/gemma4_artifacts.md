@@ -540,6 +540,11 @@ remains the supported static layout. Window 1 uses a zero-length producer past
 input and retains no persistent tokens. Q>1 append,
 assistant masking and blockwise/chunked prefill retain their existing contracts.
 
+For `C_i=1`, unused empty past inputs may be unquantized FLOAT32 while current
+KV outputs retain the producer's affine storage grid. After validating the empty
+input shapes, the loader skips only their persistent input/output grid comparison.
+Prefill/decode output and producer/shared-consumer grid checks still apply.
+
 At `S=2048,W=512`, sliding past changes `2047 -> 511`, attention/shared/mask
 key extent changes `2048 -> 512`, and the current delta remains length 1.
 Persistent KV bytes are `2*B*sum_producers(Hkv_i*Dh_i*(C_i-1))*element_bytes`;

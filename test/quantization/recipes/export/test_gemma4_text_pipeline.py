@@ -20,8 +20,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, cast, ClassVar
+from unittest import mock
 
 import torch
+from circle_schema import circle
 
 from tico.circle import CircleDocument
 from tico.circle.analysis import effective_builtin_code
@@ -491,6 +493,40 @@ class TestGemma4SavedDecoderRuntime(unittest.TestCase):
                 root / manifest["lm_head_artifact"],
             )
             (root / "text_pipeline.json").write_text(json.dumps(manifest))
+            pipeline = load_gemma4_text_pipeline(root)
+            self.assertEqual(pipeline.decode_kv_policy, "compact_sliding_v1")
+            for index, spec in enumerate(pipeline.layers):
+                stage = cast(Gemma4CircleTextStage, pipeline.decode_layers[index])
+                inputs = dict(zip(stage.input_spec.names, stage.runtime.input_tensors))
+                capacity = spec["decode_capacity"]
+                if spec["layer_type"] == "full_attention":
+                    self.assertEqual(capacity, 10)
+                elif runtime.text_config.sliding_window == 1:
+                    self.assertEqual(capacity, 1)
+                    softmaxes = [
+                        op
+                        for op in stage.runtime.program.operators
+                        if op.name == "SOFTMAX"
+                    ]
+                    self.assertGreater(len(softmaxes), 0)
+                    for op in softmaxes:
+                        self.assertEqual(
+                            stage.runtime.program.tensor(op.outputs[0]).shape[-1], 1
+                        )
+                self.assertEqual(inputs["attention_mask"].shape, (1, 1, capacity))
+                role = "shared_key_value" if spec["is_shared"] else "past_key_value"
+                length = capacity if spec["is_shared"] else capacity - 1
+                for position in (0, 1):
+                    past = inputs[f"{role}_{position}"]
+                    self.assertEqual(past.shape[2], length)
+                    if not spec["is_shared"]:
+                        delta = stage.runtime.output_tensors[position + 1]
+                        self.assertEqual(delta.shape[2], 1)
+                        if quantized and capacity == 1:
+                            self.assertEqual(past.dtype.name, "float32")
+                            self.assertIsNone(past.quantization)
+                            self.assertEqual(delta.dtype.name, "uint8")
+                            self.assertTrue(delta.is_quantized_integer)
             runtime.use_text_pipeline(str(root))
 
             baseline = runtime.prefill_decoder(
@@ -537,21 +573,140 @@ class TestGemma4SavedDecoderRuntime(unittest.TestCase):
                 # A stale producer decode artifact can have compatible shapes
                 # but write a different grid into the persistent cache. Reject
                 # it before the first invocation, including producer outputs.
-                path = root / manifest["layers"][0]["decode_artifact"]
-                document = CircleDocument.load(path)
-                graph = document.model.subgraphs[0]
-                key = graph.tensors[int(graph.outputs[1])]
-                self.assertIsNotNone(key.quantization)
-                self.assertGreater(len(key.quantization.scale), 0)
-                key.quantization.scale = [
-                    float(scale) * 2 for scale in key.quantization.scale
-                ]
-                document.save(path)
-                with self.assertRaisesRegex(ValueError, "output qparams"):
-                    load_gemma4_text_pipeline(root)
+                self._reject_mismatched_cache_grids(root, pipeline)
+
+    def _reject_mismatched_cache_grids(self, root, pipeline):
+        # Keep the nonempty persistent read/write check strict, including when
+        # a stale artifact loses its affine input boundary altogether.
+        nonempty = next(
+            index
+            for index, layer in enumerate(pipeline.layers)
+            if not layer["is_shared"] and layer["decode_capacity"] > 1
+        )
+        stage = cast(Gemma4CircleTextStage, pipeline.decode_layers[nonempty])
+        path = root / pipeline.layers[nonempty]["decode_artifact"]
+        original = path.read_bytes()
+        for role in ("past_key_value_0", "past_key_value_1"):
+            for corruption in ("scale", "float_without_qparams"):
+                with self.subTest(role=role, corruption=corruption):
+                    try:
+                        document = CircleDocument.from_bytes(original)
+                        graph = document.model.subgraphs[0]
+                        position = stage.input_spec.names.index(role)
+                        value = graph.tensors[int(graph.inputs[position])]
+                        if corruption == "scale":
+                            value.quantization.scale = [
+                                float(s) * 2 for s in value.quantization.scale
+                            ]
+                        else:
+                            value.type = circle.TensorType.TensorType.FLOAT32
+                            value.quantization = None
+                        document.save(path)
+                        with self.assertRaisesRegex(
+                            ValueError, "persistent cache input/output qparams"
+                        ):
+                            load_gemma4_text_pipeline(root)
+                    finally:
+                        path.write_bytes(original)
+
+        producer = next(
+            index
+            for index, layer in enumerate(pipeline.layers)
+            if not layer["is_shared"]
+        )
+        path = root / pipeline.layers[producer]["decode_artifact"]
+        original = path.read_bytes()
+        for position in (1, 2):
+            with self.subTest(delta=position):
+                try:
+                    document = CircleDocument.from_bytes(original)
+                    graph = document.model.subgraphs[0]
+                    value = graph.tensors[int(graph.outputs[position])]
+                    value.quantization.scale = [
+                        float(s) * 2 for s in value.quantization.scale
+                    ]
+                    document.save(path)
+                    boundary = (
+                        "prefill/decode output qparams"
+                        if pipeline.decode_capacities[producer] == 1
+                        else "persistent cache input/output qparams"
+                    )
+                    with self.assertRaisesRegex(ValueError, boundary):
+                        load_gemma4_text_pipeline(root)
+                finally:
+                    path.write_bytes(original)
+
+        consumer = next(
+            index
+            for index, layer in enumerate(pipeline.layers)
+            if layer["producer_index"] == producer
+        )
+        paths = [
+            root / pipeline.layers[consumer][f"{phase}_artifact"]
+            for phase in ("prefill", "decode")
+        ]
+        originals = [path.read_bytes() for path in paths]
+        for role in ("shared_key_value_0", "shared_key_value_1"):
+            with self.subTest(shared=role):
+                try:
+                    # Change both phases alike to reach the shared-source check
+                    # rather than the earlier prefill/decode input comparison.
+                    for path, original, modules in zip(
+                        paths,
+                        originals,
+                        (pipeline.prefill_layers, pipeline.decode_layers),
+                    ):
+                        stage = cast(Gemma4CircleTextStage, modules[consumer])
+                        document = CircleDocument.from_bytes(original)
+                        graph = document.model.subgraphs[0]
+                        position = stage.input_spec.names.index(role)
+                        value = graph.tensors[int(graph.inputs[position])]
+                        value.quantization.scale = [
+                            float(s) * 2 for s in value.quantization.scale
+                        ]
+                        document.save(path)
+                    with self.assertRaisesRegex(
+                        ValueError, "shared-KV producer/consumer qparams"
+                    ):
+                        load_gemma4_text_pipeline(root)
+                finally:
+                    for path, original in zip(paths, originals):
+                        path.write_bytes(original)
+
+        if pipeline.decode_capacities[producer] == 1:
+            path = root / pipeline.layers[producer]["decode_artifact"]
+            original = path.read_bytes()
+            stage = cast(Gemma4CircleTextStage, pipeline.decode_layers[producer])
+            for role in ("past_key_value_0", "past_key_value_1"):
+                with self.subTest(nonempty_past=role):
+                    try:
+                        document = CircleDocument.from_bytes(original)
+                        graph = document.model.subgraphs[0]
+                        position = stage.input_spec.names.index(role)
+                        graph.tensors[int(graph.inputs[position])].shape[2] = 1
+                        document.save(path)
+                        with self.assertRaisesRegex(ValueError, "input contracts"):
+                            load_gemma4_text_pipeline(root)
+                    finally:
+                        path.write_bytes(original)
 
     def test_fp_export_load_prefill_and_rolling_decode(self):
         self._connected(False)
 
     def test_frozen_quantized_export_load_prefill_and_rolling_decode(self):
         self._connected(True)
+
+    def test_frozen_quantized_window_one_export_load_prefill_and_decode(self):
+        """Empty past has no storage grid; delta and shared KV keep theirs."""
+        from test.quantization.recipes.debug import (
+            test_static_gemma4_finalize as fixture,
+        )
+
+        original = fixture._make_text_config
+
+        def config(**kwargs):
+            kwargs["sliding_window"] = 1
+            return original(**kwargs)
+
+        with mock.patch.object(fixture, "_make_text_config", side_effect=config):
+            self._connected(True)

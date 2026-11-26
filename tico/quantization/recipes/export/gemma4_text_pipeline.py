@@ -322,7 +322,10 @@ def load_gemma4_text_pipeline(
                     outputs,
                 )
             )
-        if not layer["is_shared"]:
+        # Shapes above prove that C=1 has empty past inputs. No persistent
+        # samples cross steps in that case, so their unused FLOAT32 inputs may
+        # have no grid even when the current storage delta is affine-quantized.
+        if not layer["is_shared"] and decode_capacity > 1:
             input_domains = dict(
                 zip(decodes[-1].input_spec.names, decodes[-1].runtime.input_tensors)
             )
