@@ -4,6 +4,7 @@ debug:
     last_token_only_prefill: false
     ple_prefill_split: false  # Requires last_token_only_prefill=true.
     text_artifacts: null  # Optional directory with text_pipeline.json + Circle stages.
+    decode_kv_policy: null  # Model: compact; saved stages: recorded bundle policy.
     max_seq: 2048
     vision_profile: gemma4_66x36_264
     padding_side: right

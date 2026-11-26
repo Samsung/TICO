@@ -273,7 +273,7 @@ class TestStaticGemma4Finalize(unittest.TestCase):
                 self.assertEqual(runtime.past_len, 0)
                 self.assertEqual(runtime.layer_caches, [])
 
-    def test_suffix_receives_original_query_mask_rope_and_full_invocation_kv(self):
+    def test_suffix_preserves_query_mask_rope_with_compact_sliding_kv(self):
         runtime = make_runtime()
         batch = make_batch(4)
         ids = batch["llm_input_ids"]
@@ -302,9 +302,14 @@ class TestStaticGemma4Finalize(unittest.TestCase):
         torch.testing.assert_close(single, full[:, 3:4], atol=1e-5, rtol=1e-5)
         for i, actual in enumerate(suffix_inputs, start=2):
             kind = runtime.text_config.layer_types[i]
+            expected_mask = (
+                masks[kind][:, :, 3:4, [1, 2, 3]]
+                if kind == "sliding_attention"
+                else masks[kind][:, :, 3:4]
+            )
             torch.testing.assert_close(
                 actual["attention_mask"].unsqueeze(1),
-                masks[kind][:, :, 3:4],
+                expected_mask,
                 atol=0,
                 rtol=0,
             )
@@ -317,9 +322,14 @@ class TestStaticGemma4Finalize(unittest.TestCase):
             torch.testing.assert_close(
                 actual["per_layer_input"], ple[:, 3:4, i], atol=0, rtol=0
             )
-            self.assertEqual(actual["shared_key_value"][0].shape[2], 10)
+            capacity = 3 if kind == "sliding_attention" else 10
+            self.assertEqual(actual["shared_key_value"][0].shape[2], capacity)
+            current_slot = 2 if kind == "sliding_attention" else 3
             self.assertGreater(
-                torch.count_nonzero(actual["shared_key_value"][0][:, :, 3:4]).item(), 0
+                torch.count_nonzero(
+                    actual["shared_key_value"][0][:, :, current_slot : current_slot + 1]
+                ).item(),
+                0,
             )
             self.assertIsNone(actual.get("past_key_value"))
         self.assertEqual(len(suffix_inputs), 2)

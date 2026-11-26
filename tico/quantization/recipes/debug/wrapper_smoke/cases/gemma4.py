@@ -39,7 +39,10 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     Gemma4StaticVisionProfile,
     get_gemma4_static_vision_profile,
 )
-from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_layer_type_head_dim
+from tico.quantization.wrapq.wrappers.gemma4.utils import (
+    gemma4_decode_capacity,
+    gemma4_layer_type_head_dim,
+)
 
 if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
@@ -902,6 +905,10 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         )
         self.is_sliding_attention = bool(module.is_sliding)
         self.sliding_window = int(module.sliding_window or 0)
+        if self.export_mode == "decode":
+            self.decode_capacity = gemma4_decode_capacity(
+                self.max_seq, module.sliding_window if module.is_sliding else None
+            )
         return module, clone_module(module)
 
     def _shared_key_value(self, kv_len: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1029,17 +1036,17 @@ class Gemma4TextAttentionDecodeBaseCase(Gemma4TextAttentionBaseCase):
         """Return a fixed-capacity full or sliding single-token decode mask."""
         if self.is_sliding_attention:
             full_mask = _sliding_window_causal_mask(
-                self.max_seq,
+                self.decode_capacity,
                 self.sliding_window,
                 fill_value=-120.0,
             )
             return full_mask[..., -1:, :]
-        return _attention_mask(1, self.max_seq)
+        return _attention_mask(1, self.decode_capacity)
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic non-shared Gemma4 attention decode sample."""
         hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
-        past_len = self.max_seq - 1
+        past_len = self.decode_capacity - 1
         past_key = torch.randn(
             1,
             self.attention_num_kv_heads,
@@ -1251,7 +1258,7 @@ class Gemma4TextAttentionSharedKVDecodeCase(
     def _sample(self) -> ForwardInput:
         """Create one synthetic shared-KV single-token decode sample."""
         hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
-        shared_key_value = self._shared_key_value(self.max_seq)
+        shared_key_value = self._shared_key_value(self.decode_capacity)
         return ForwardInput(
             (),
             {
@@ -1364,6 +1371,15 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         self.attention_num_kv_heads = int(self.text_cfg.num_attention_heads) // int(
             module.self_attn.num_key_value_groups
         )
+        if self.export_mode == "decode":
+            self.decode_capacity = gemma4_decode_capacity(
+                self.max_seq,
+                (
+                    module.self_attn.sliding_window
+                    if module.self_attn.is_sliding
+                    else None
+                ),
+            )
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
@@ -1635,7 +1651,7 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
     def _sample(self) -> ForwardInput:
         """Create one synthetic single-token decoder-layer decode sample."""
         hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
-        past_len = self.max_seq - 1
+        past_len = self.decode_capacity - 1
         past = (
             torch.randn(
                 1,
@@ -1653,7 +1669,7 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
         kwargs: dict[str, Any] = {
             "hidden_states": hidden,
             "position_embeddings": _text_rope(1, 1, self.attention_head_dim),
-            "attention_mask": _attention_mask(1, self.max_seq),
+            "attention_mask": _attention_mask(1, self.decode_capacity),
             "past_key_value": past,
             "use_cache": True,
         }

@@ -30,6 +30,56 @@ from tico.quantization.wrapq.observers.identity import IdentityObserver
 PLEObserverFn = Callable[[torch.Tensor, Any], torch.Tensor]
 
 
+def gemma4_decode_capacity(
+    max_seq_len: int, sliding_window: Optional[int], *, compact: bool = True
+) -> int:
+    """Return the Q=1 causal key capacity, including the current token.
+
+    Prefill retains ``max_seq_len`` queries and keys. Only causal decode uses
+    this capacity; assistant and Q>1 append paths have different contracts.
+    Capacity 1 uses a zero-length persistent past and a current-only attention.
+    """
+    if max_seq_len <= 0:
+        raise ValueError("Gemma4 max_seq_len must be positive.")
+    if sliding_window is not None and sliding_window <= 0:
+        raise ValueError("Gemma4 sliding_window must be positive.")
+    capacity = (
+        min(max_seq_len, sliding_window)
+        if compact and sliding_window is not None
+        else max_seq_len
+    )
+    return capacity
+
+
+def validate_gemma4_compact_decode_quantization(layers: Iterable[nn.Module]) -> None:
+    """Reject sequence-dependent attention grids before shrinking the key axis.
+
+    Per-tensor affine and identity grids are independent of sequence geometry.
+    MX activation blocks and per-channel activation axes need a separate layout
+    proof. Weight/bias grids and the decoder's MLP policies remain unchanged.
+    No observer is collected, recalibrated, or replaced here.
+    """
+    attentions = []
+    for layer in layers:
+        decoder = getattr(layer, "wrapped", layer)
+        wrapper = getattr(decoder, "self_attn", decoder)
+        attention = getattr(wrapper, "wrapped", wrapper)
+        if not bool(getattr(attention, "is_sliding", False)):
+            continue
+        attentions.append(attention)
+    issue = _gemma4_single_token_quantization_issue(
+        attentions, per_layer_input_observer=None
+    )
+    if issue is not None:
+        raise ValueError(
+            "Gemma4 compact decode requires per-tensor affine or identity "
+            f"attention activation observers; unsupported policy at {issue!r}. "
+            "MX blocks and per-channel activation grids may depend on the key "
+            "sequence length; export with decode_kv_policy='full_capacity_v1' "
+            "or reprepare and recalibrate with supported activation policies."
+        )
+
+
 @dataclass(frozen=True)
 class StaticGemma4Layout:
     """Static layout information required by the dense Gemma4 runtime.
@@ -165,6 +215,13 @@ def resolve_gemma4_shared_kv_suffix(
                 f"Gemma4 shared-KV layer {index} and producer {source_index} "
                 "have incompatible head dimensions."
             )
+        if layer_type == "sliding_attention" and getattr(
+            attention, "sliding_window", None
+        ) != getattr(source, "sliding_window", None):
+            raise ValueError(
+                f"Gemma4 shared-KV layer {index} and producer {source_index} "
+                "have incompatible sliding windows."
+            )
         head_counts = []
         for owner in (attention, source):
             config = getattr(owner, "config", None)
@@ -231,7 +288,7 @@ def _gemma4_single_token_quantization_issue(
     quantized = False
     for layer in layers:
         decoder = getattr(layer, "wrapped", layer)
-        attention_wrapper = getattr(decoder, "self_attn", None)
+        attention_wrapper = getattr(decoder, "self_attn", decoder)
         attention = getattr(attention_wrapper, "wrapped", attention_wrapper)
         if (
             attention is not None

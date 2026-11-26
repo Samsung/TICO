@@ -82,8 +82,10 @@ class TestGemma4AttentionDecodeSmokeInputs(unittest.TestCase):
         past_key, past_value = kwargs["past_key_value"]
 
         self.assertEqual(kwargs["hidden_states"].shape[1], 1)
-        self.assertEqual(kwargs["attention_mask"].shape, (1, 1, 1, case.max_seq))
-        self.assertEqual(past_key.shape[2], case.max_seq - 1)
+        self.assertEqual(
+            kwargs["attention_mask"].shape, (1, 1, 1, case.decode_capacity)
+        )
+        self.assertEqual(past_key.shape[2], case.decode_capacity - 1)
         self.assertEqual(past_value.shape, past_key.shape)
         self.assertTrue(kwargs["use_cache"])
 
@@ -97,7 +99,7 @@ class TestGemma4AttentionDecodeSmokeInputs(unittest.TestCase):
 
         self.assertNotIn("past_key_value", kwargs)
         self.assertEqual(kwargs["hidden_states"].shape[1], 1)
-        self.assertEqual(shared_key.shape[2], case.max_seq)
+        self.assertEqual(shared_key.shape[2], case.decode_capacity)
         self.assertEqual(shared_value.shape, shared_key.shape)
 
     def test_sliding_prefill_masks_tokens_before_the_window(self):
@@ -110,15 +112,61 @@ class TestGemma4AttentionDecodeSmokeInputs(unittest.TestCase):
         self.assertTrue((mask[0, 0, -1, :4] == -120.0).all())
         self.assertTrue((mask[0, 0, -1, 4:] == 0.0).all())
 
-    def test_sliding_decode_uses_the_last_sliding_mask_row(self):
-        """Use a single decode row with the same fixed sliding-window policy."""
+    def test_sliding_decode_compacts_past_and_attention_key_axes(self):
+        """Trace the real sliding key extent rather than masked full capacity."""
         case = Gemma4TextSlidingAttentionDecodeCase()
         module, _ = case.build({})
-        mask = case.eval_input(module, {}).kwargs["attention_mask"]
+        sample = case.eval_input(module, {})
+        mask = sample.kwargs["attention_mask"]
 
-        self.assertEqual(mask.shape, (1, 1, 1, case.max_seq))
-        self.assertTrue((mask[0, 0, 0, :4] == -120.0).all())
-        self.assertTrue((mask[0, 0, 0, 4:] == 0.0).all())
+        self.assertEqual(case.max_seq, 8)
+        self.assertEqual(case.decode_capacity, 4)
+        self.assertEqual(mask.shape, (1, 1, 1, case.decode_capacity))
+        self.assertTrue((mask == 0.0).all())
+        self.assertEqual(sample.kwargs["past_key_value"][0].shape[2], 3)
+
+    def test_window_one_circle_accepts_zero_length_past(self):
+        """Serialize current-only attention with real empty producer inputs."""
+        import numpy as np
+        import tico
+        import torch
+        from tico.circle import CircleDocument
+        from tico.circle.runtime import CircleReferenceRuntime
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+            QuantGemma4TextAttention,
+        )
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
+
+        from test.support.quantization.gemma_kv_cache import args, tiny_config
+
+        config = tiny_config("sliding_attention")
+        config.sliding_window = 1
+        module = (
+            QuantGemma4TextAttention(Gemma4TextAttention(config, layer_idx=0).eval())
+            .eval()
+            .as_export_module("decode")
+            .eval()
+        )
+        inputs = args(1, 1)
+        past = (torch.empty(1, 1, 0, 4), torch.empty(1, 1, 0, 4))
+        kwargs = {"past_key_value": past}
+        with torch.no_grad():
+            expected = module(*inputs, **kwargs)
+            exported = torch.export.export(module, inputs, kwargs=kwargs, strict=False)
+            converted = tico.convert_from_exported_program(exported)
+        document = CircleDocument.from_bytes(converted.circle_binary)
+        document.verify()
+        runtime = CircleReferenceRuntime(document)
+        shapes = [
+            runtime.program.tensor(index).shape for index in runtime.program.inputs
+        ]
+        self.assertEqual(shapes[-2:], [(1, 1, 0, 4), (1, 1, 0, 4)])
+        flattened, _ = torch.utils._pytree.tree_flatten((inputs, kwargs))
+        outputs = runtime.run([tensor.detach().numpy() for tensor in flattened]).outputs
+        for actual, reference in zip(outputs, expected):
+            np.testing.assert_allclose(
+                actual, reference.detach().numpy(), atol=2e-6, rtol=1e-5
+            )
 
 
 if __name__ == "__main__":

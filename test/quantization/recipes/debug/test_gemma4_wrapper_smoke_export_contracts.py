@@ -99,7 +99,7 @@ class TestGemma4WrapperSmokeExportContracts(unittest.TestCase):
                 )
 
                 decode = case.export_mode == "decode"
-                key_length = case.max_seq if decode else query
+                key_length = case.decode_capacity if decode else query
                 self.assertEqual(mask.shape[-1], key_length)
                 if "shared_kv" in name:
                     key, value = inputs["shared_key_value"]
