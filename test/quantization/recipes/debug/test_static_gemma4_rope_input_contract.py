@@ -119,7 +119,8 @@ class TestStaticGemma4RoPEInputContract(unittest.TestCase):
                     torch.testing.assert_close(positions, torch.tensor([[3]]))
                 self.assertEqual(masks["full_attention"][0, 0, 3], -37.5)
                 self.assertEqual(masks["full_attention"][0, 0, 7], 0.0)
-                self.assertEqual(masks["sliding_attention"][0, 0, 0], -37.5)
+                self.assertEqual(masks["sliding_attention"].shape, (1, 1, 3))
+                self.assertTrue(torch.all(masks["sliding_attention"] == 0.0))
 
     def test_missing_convention_is_not_silently_interpreted_as_hf(self):
         from tico.quantization.recipes.debug.static_gemma4_runtime import (

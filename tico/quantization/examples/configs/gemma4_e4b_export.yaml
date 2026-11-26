@@ -32,6 +32,7 @@ export:
   output_dir: ./out/gemma4_e4b_quantized/circle_layers
   max_seq_len: 2048
   prefill_decode: true
+  decode_kv_policy: compact_sliding_v1  # full_capacity_v1 preserves the legacy Q=1 ABI.
   ple_prefill_split: false  # Requires .pt lookup and last-token-only runtime prefill.
   strict: false
   vision:

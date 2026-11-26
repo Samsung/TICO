@@ -29,6 +29,7 @@ import torch
 from torch import nn
 
 from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
+from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_decode_capacity
 from tico.utils.signature import ModelInputSpec
 
 
@@ -147,6 +148,8 @@ class Gemma4TextPipeline:
     hidden_size: int
     ple_dim: int
     rope_convention: str
+    decode_kv_policy: str
+    decode_capacities: tuple[int, ...]
 
 
 def load_gemma4_text_pipeline(
@@ -154,8 +157,9 @@ def load_gemma4_text_pipeline(
     *,
     expected_max_seq_len: int | None = None,
     expected_num_layers: int | None = None,
+    expected_decode_kv_policy: str | None = None,
 ) -> Gemma4TextPipeline:
-    """Load versioned text stages, rejecting absent/legacy or incompatible bundles."""
+    """Load compact or legacy-full stages, validating shape and frozen grids."""
     root = Path(directory)
     manifest_path = root / "text_pipeline.json"
     if not manifest_path.is_file():
@@ -164,9 +168,20 @@ def load_gemma4_text_pipeline(
             "Legacy artifacts remain usable through the existing full-prefill path."
         )
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema_version") != 1 or manifest.get("model_family") != "gemma4":
+    version = manifest.get("schema_version")
+    if version not in (1, 2) or manifest.get("model_family") != "gemma4":
         raise ValueError("Unsupported Gemma4 text pipeline schema.")
-    if manifest.get("finalize_contract") != "shared_consumer_decode_alias_v1":
+    policy = "full_capacity_v1" if version == 1 else manifest.get("decode_kv_policy")
+    if (
+        not isinstance(policy, str)
+        or (version == 1 and manifest.get("decode_kv_policy", policy) != policy)
+        or (version == 2 and policy not in {"compact_sliding_v1", "full_capacity_v1"})
+    ):
+        raise ValueError("Unsupported Gemma4 decode KV policy for pipeline schema.")
+    if expected_decode_kv_policy is not None and policy != expected_decode_kv_policy:
+        raise ValueError("Gemma4 decode KV policy does not match the runtime.")
+    expected_finalize = f"shared_consumer_decode_alias_v{version}"
+    if manifest.get("finalize_contract") != expected_finalize:
         raise ValueError("Unsupported Gemma4 finalize contract.")
     if type(manifest.get("finalize_supported")) is not bool:
         raise ValueError("Gemma4 finalize capability must be explicit.")
@@ -207,6 +222,7 @@ def load_gemma4_text_pipeline(
     sources: dict[str, int] = {}
     prefills: list[Gemma4CircleTextStage] = []
     decodes: list[Gemma4CircleTextStage] = []
+    decode_capacities: list[int] = []
 
     def stage(name, inputs, outputs) -> Gemma4CircleTextStage:
         if (
@@ -231,6 +247,23 @@ def load_gemma4_text_pipeline(
             for key in ("num_kv_heads", "head_dim")
         ):
             raise ValueError("Invalid Gemma4 layer attention geometry.")
+        window = layer.get("sliding_window")
+        if (
+            layer["layer_type"] == "sliding_attention"
+            and (type(window) is not int or window < 1)
+        ) or (layer["layer_type"] == "full_attention" and window is not None):
+            raise ValueError("Invalid Gemma4 layer sliding-window geometry.")
+        decode_capacity = gemma4_decode_capacity(
+            capacity, window, compact=policy == "compact_sliding_v1"
+        )
+        if version == 2 and (
+            type(layer.get("decode_capacity")) is not int
+            or layer["decode_capacity"] != decode_capacity
+        ):
+            raise ValueError("Gemma4 layer decode capacity does not match its policy.")
+        if version == 1 and layer.get("decode_capacity", capacity) != capacity:
+            raise ValueError("Legacy Gemma4 layer decode capacity must remain full.")
+        decode_capacities.append(decode_capacity)
         if layer["is_shared"]:
             if type(producer) is not int or not 0 <= producer < index:
                 raise ValueError("Invalid Gemma4 shared-KV producer index.")
@@ -240,7 +273,12 @@ def load_gemma4_text_pipeline(
                 or not source["store_full_length_kv"]
                 or any(
                     source[key] != layer[key]
-                    for key in ("layer_type", "num_kv_heads", "head_dim")
+                    for key in (
+                        "layer_type",
+                        "num_kv_heads",
+                        "head_dim",
+                        "sliding_window",
+                    )
                 )
             ):
                 raise ValueError("Incompatible Gemma4 shared-KV producer contract.")
@@ -268,7 +306,7 @@ def load_gemma4_text_pipeline(
             inputs = gemma4_text_stage_inputs(
                 layer,
                 query_length=qlen,
-                capacity=capacity,
+                capacity=decode_capacity if decode else capacity,
                 hidden_size=hidden,
                 ple_dim=ple_dim,
                 decode=decode,
@@ -284,6 +322,22 @@ def load_gemma4_text_pipeline(
                     outputs,
                 )
             )
+        if not layer["is_shared"]:
+            input_domains = dict(
+                zip(decodes[-1].input_spec.names, decodes[-1].runtime.input_tensors)
+            )
+            for position, role in enumerate(
+                ("past_key_value_0", "past_key_value_1"), start=1
+            ):
+                output = decodes[-1].runtime.output_tensors[position]
+                input_tensor = input_domains[role]
+                if (output.tensor_type, output.quantization) != (
+                    input_tensor.tensor_type,
+                    input_tensor.quantization,
+                ):
+                    raise ValueError(
+                        "Gemma4 persistent cache input/output qparams do not match."
+                    )
         # Shape specialization must keep every interface on the same frozen
         # grid. Comparing storage type/qparams also rejects mixed calibration
         # exports before a sliced prompt can enter the wrong domain.
@@ -346,4 +400,6 @@ def load_gemma4_text_pipeline(
         hidden,
         ple_dim,
         manifest["rope_convention"],
+        policy,
+        tuple(decode_capacities),
     )

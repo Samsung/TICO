@@ -982,9 +982,17 @@ fields under `debug.static_gemma4_runtime`:
 |---|---|---|
 | `last_token_only_prefill` | `false` | Finish a supported terminal shared-KV decoder suffix with one query at the final valid prompt position. All normal decode layers still execute. Must be a boolean. |
 | `ple_prefill_split` | `false` | Also compute PLE only for full-sequence prefix layers and the suffix final valid token. Requires `last_token_only_prefill: true`; uses range-aware model-backed lookup. Export uses the same `export.ple_prefill_split` flag with `prefill_decode: true` and `.pt` lookup. |
+| `decode_kv_policy` | `null` | Model-backed default is `compact_sliding_v1`; saved stages select their recorded policy. An explicit `compact_sliding_v1` or `full_capacity_v1` must match a loaded bundle. Export uses `export.decode_kv_policy`, default `compact_sliding_v1`. |
 | `text_artifacts` | `null` | Optional directory containing `text_pipeline.json` and matching decoder/LM-head Circle stages; selects CPU reference execution. Requires re-export for legacy directories lacking the manifest. |
 
-The option applies to initial generation prefill, with the existing batch-size-1,
+New static exports use layer-specific Q=1 key capacities: `min(max_seq_len,
+sliding_window)` for sliding attention and `max_seq_len` for full attention.
+Prefill retains the full static query/key length. Schema 1 saved bundles keep
+the legacy full-capacity decode ABI. `max_seq` still limits the full context;
+sliding eviction never resets absolute RoPE position. See the
+[compact cache shapes](../../recipes/export/gemma4_artifacts.md#compact-q1-cache-and-attention-shapes).
+
+The prefill option applies to initial generation prefill, with the existing batch-size-1,
 right-padding contract. A model without a shared suffix keeps full prefill;
 malformed producer bindings or unsupported quantized activation policies raise
 clear errors. Calibration and eager evaluation do not use this option. Saved

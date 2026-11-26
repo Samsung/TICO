@@ -374,6 +374,15 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                         ]
                         head_dim = 256 if layer_type == "sliding_attention" else 512
                         self.assertEqual(tuple(inputs[0].shape), (1, seq_len, hidden))
+                        key_capacity = (
+                            2
+                            if phase == "decode" and layer_type == "sliding_attention"
+                            else 4
+                        )
+                        self.assertEqual(
+                            tuple(kwargs["attention_mask"].shape),
+                            (1, 1, key_capacity) if phase == "decode" else (1, 1, 4, 4),
+                        )
                         self.assertEqual(
                             tuple(kwargs["position_embeddings"][0].shape),
                             (1, seq_len, head_dim),
@@ -383,16 +392,53 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                         )
                         if index >= layers - shared:
                             cache = kwargs["shared_key_value"]
-                            cache_len = 4
+                            cache_len = (
+                                2
+                                if phase == "decode"
+                                and layer_type == "sliding_attention"
+                                else 4
+                            )
                         elif phase == "decode":
                             cache = kwargs["past_key_value"]
-                            cache_len = 3
+                            cache_len = 1 if layer_type == "sliding_attention" else 3
                         else:
                             continue
                         for tensor in cache:
                             self.assertEqual(
                                 tuple(tensor.shape), (1, kv_heads, cache_len, head_dim)
                             )
+
+    def test_decode_capacity_policy_and_context_are_independent(self):
+        text = FakeText()
+        for length, expected in ((2, 2), (4, 2)):
+            manifest = gemma_export._gemma4_text_pipeline_manifest(
+                cast(gemma_export.QuantGemma4TextModel, text),
+                max_seq_len=length,
+                artifact_tag="f32",
+            )
+            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["max_seq_len"], length)
+            self.assertEqual(manifest["decode_kv_policy"], "compact_sliding_v1")
+            self.assertEqual(
+                [layer["decode_capacity"] for layer in manifest["layers"]],
+                [expected, expected],
+            )
+        manifest = gemma_export._gemma4_text_pipeline_manifest(
+            cast(gemma_export.QuantGemma4TextModel, text),
+            max_seq_len=4,
+            artifact_tag="f32",
+            decode_kv_policy="full_capacity_v1",
+        )
+        self.assertEqual(
+            [layer["decode_capacity"] for layer in manifest["layers"]], [4, 4]
+        )
+        with self.assertRaisesRegex(ValueError, "decode_kv_policy"):
+            gemma_export._gemma4_text_pipeline_manifest(
+                cast(gemma_export.QuantGemma4TextModel, text),
+                max_seq_len=4,
+                artifact_tag="f32",
+                decode_kv_policy="unknown",
+            )
 
     def test_unavailable_fusion_rejects_before_any_stage_write(self):
         class FusionOwner(QuantModuleBase):
@@ -1115,6 +1161,7 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             output_dir=gemma_adapter_mod.Path("./out/gemma4"),
             model_args=_model_args(),
             prefill_decode=True,
+            decode_kv_policy="compact_sliding_v1",
             strict=True,
             vision_granularity="monolithic",
             spatial_pooling=True,

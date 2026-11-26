@@ -81,7 +81,7 @@ subdirectory), keeping E2B artifacts separate. Eager quality evaluation uses
 | `ple_pipeline.json` | PLE manifest: chosen `ple_embedding` format (`pt`) and size estimate, projection input/output shapes, and the qparams of the three boundary observers (`per_layer_token_inputs`, `per_layer_projection`, `per_layer_inputs`). |
 | `multimodal_fusion_prefill.q.circle` | Fixed-slot fusion that writes the 264 visual embeddings into the text sequence starting at `visual_start_idx`. No weights. |
 | `decoder_layer_prefill_0..34.q.circle` | The 35 text decoder layers at `S = 2048`. Inputs: hidden states, attention mask, RoPE, `per_layer_input` `[1, 2048, 256]` (plus shared K/V for shared-KV consumers); outputs hidden states (plus K/V). |
-| `decoder_layer_decode_0..34.q.circle` | Single-token decode graphs of the same layers with 2047 past K/V slots as input. |
+| `decoder_layer_decode_0..34.q.circle` | Single-token decode graphs with layer-specific past K/V: 511 sliding slots or 2047 full-attention slots at S=2048, W=512. |
 | `text_pipeline.json` | Versioned decoder/LM-head manifest: static dimensions, producer indices, suffix boundary, and the single-token finalize capability/aliases. The loader validates shapes, dtypes and boundary grids from the referenced Circle files. |
 | `lm_head.q.circle` | Final RMSNorm plus LM head. Input `[1, 1, 1536]`, output logits `[1, 1, 262144]`. Final logit softcapping is applied on the host. |
 
@@ -472,34 +472,87 @@ causal and sliding visibility are preserved. Without `ple_prefill_split`, PLE pr
 `S` positions; it never switches to `ple_projection_decode` during finalize.
 
 The shared-consumer **decode Circle is reused** for finalize. Its ABI is hidden
-`[1,1,D]`, PLE `[1,1,P]`, RoPE `[1,1,head_dim]`, mask `[1,1,S]`, and full shared
-KV `[1,kv_heads,S,head_dim]`. It uses the same wrapper and frozen observers as
-prefill, has no K/V projection or append, and receives the selected prefill mask
-row rather than a newly constructed decode mask. Invocation-local shared KV
-retains all `S` producer output slots, including the final valid prompt token;
-the persistent decode cache separately keeps `S-1` slots. Finalize does not write
-cache or increase `past_len`. Normal decode starts at logical position `L` with
-the first generated token and runs every decoder layer.
+`[1,1,D]`, PLE `[1,1,P]`, RoPE `[1,1,head_dim]`, mask `[1,1,C_i]`, and shared
+KV `[1,Hkv_i,C_i,Dh_i]`, where `C_i=min(S,W_i)` for sliding layers and `C_i=S`
+for full layers. It has no K/V projection or append. For a sliding finalize,
+the host selects up to `C_i-1` valid past KV slots preceding `p=L-1`,
+places them chronologically in leading slots and the query token itself in fixed
+slot `C_i-1`, and masks the intervening empty slots. It selects the same key columns from the original prefill mask row,
+retaining additive bias and extra restrictions. A visible key outside that
+compact range is rejected. Full-query prefill consumers continue to receive
+all `S` invocation-local producer slots.
+
+Finalize neither writes cache nor increases absolute position. Only after
+preserving invocation-local KV does the host prepare the latest `C_i-1` prompt
+tokens as persistent past for normal decode at absolute position `L`.
+`last_token_only_prefill` and `ple_prefill_split` retain their existing support
+conditions and frozen observer domains.
 
 Quantized finalize supports identity/per-tensor affine activation observers,
-including the PLE boundary. Per-channel activation and MX activation policies
-are explicitly unsupported because their axes/groups need a separate proof for
-query slicing; disable this option for those checkpoints. Per-channel and MX
-weight policies remain independent. Existing frozen observer grids are reused
-without calibration, grid conversion, or an added slice observer. The manifest
-records `finalize_supported`; unsupported policies still permit ordinary full
-prefill/decode export. Circle reference execution validates fake-quant semantics,
-not bit-exact integer NPU behavior.
+including the PLE boundary. Per-channel and MX activation policies are rejected
+for query slicing. Compact sliding decode similarly requires sequence-independent
+identity/per-tensor affine attention activations; weights retain their existing
+policies. No grid is recalibrated or inferred from the reduced shape. Circle
+reference execution validates fake-quant semantics, not bit-exact integer NPU
+behavior.
 
-Export still writes full-prefill and normal decode artifacts for every layer.
-`text_pipeline.json` records `finalize_contract:
-shared_consumer_decode_alias_v1` and aliases eligible finalize stages to existing
-decode files. No duplicate suffix weights or finalize Circle files are created.
-The suffix's Q/projection/MLP activations change from `S` rows to 1 row and its
-attention query dimension changes from `S` to 1 while the KV dimension remains
-`S`. Without `ple_prefill_split`, prefix graphs, PLE projection and ordinary decode
-shapes are unchanged.
-This structural reduction does not establish an NPU latency or TTFT speedup.
+New exports use `text_pipeline.json` schema 2 with
+`decode_kv_policy: compact_sliding_v1`, per-layer `decode_capacity`, and
+`finalize_contract: shared_consumer_decode_alias_v2`. Eligible finalize stages
+alias existing decode files; no duplicate suffix weights are written. Schema 1
+bundles retain the full-capacity ABI and `shared_consumer_decode_alias_v1`.
+An explicit `export.decode_kv_policy: full_capacity_v1` retains full-capacity
+shapes for regression or sequence-dependent attention policies. The export
+preset defaults to compact; `max_seq_len` always remains `S`. Missing metadata
+never implies compact capacity. The loader verifies manifest
+capacities against actual graph input/output shapes and unchanged storage
+qparams, and rejects an explicit runtime policy mismatch.
+
+### Compact Q=1 cache and attention shapes
+
+Let `S` be the static context limit, `W_i` the causal window including the
+current token, and `C_i=min(S,W_i)` for sliding layers (`C_i=S` for full layers).
+The mask uses `k <= q` and `k > q-W_i`. These sequence lengths are independent
+of the storage/compute quantization domains described above.
+
+| Boundary | Shape |
+|---|---|
+| Full-query prefill producer output / consumer shared KV | `[B,Hkv_i,S,Dh_i]` |
+| Decode producer past KV | `[B,Hkv_i,C_i-1,Dh_i]` |
+| Decode producer current storage delta | `[B,Hkv_i,1,Dh_i]` |
+| Decode attention KV / consumer shared KV | `[B,Hkv_i,C_i,Dh_i]` |
+| Decode mask | `[B,1,C_i]` |
+| Persistent producer K and V backing storage | Each `[B,Hkv_i,C_i-1,Dh_i]` |
+
+There is no padding back to `S` inside sliding attention: QK, softmax and PV use
+key extent `C_i`. A short prompt leaves valid past in leading chronological
+slots, masked empty slots after it, and the producer's current token at fixed
+slot `C_i-1`. Once full, past evicts its oldest token on each step. Shared
+consumers read an invocation-owned snapshot of **old past plus current** before
+write-back; they do not append current again or own independent persistent KV.
+Snapshot storage remains valid through all consumers of that producer.
+
+Absolute position `T` counts all processed tokens and drives RoPE and the global
+context stop. `retained_len_i=min(T,C_i-1)` counts only stored past. Rolling a
+sliding cache never resets position or rotates already stored keys again. Full
+layers keep the original absolute write index. Batch size 1 with right padding
+remains the supported static layout. Window 1 uses a zero-length producer past
+input and retains no persistent tokens. Q>1 append,
+assistant masking and blockwise/chunked prefill retain their existing contracts.
+
+At `S=2048,W=512`, sliding past changes `2047 -> 511`, attention/shared/mask
+key extent changes `2048 -> 512`, and the current delta remains length 1.
+Persistent KV bytes are `2*B*sum_producers(Hkv_i*Dh_i*(C_i-1))*element_bytes`;
+shared consumers contribute no persistent KV backing. For E2B's actual 12
+sliding and 3 full producers (`Hkv=1`, `Dh=256/512`), this is 9,427,968 storage
+elements instead of 18,865,152 with full-capacity producer buffers. FP32
+semantic runtime backing is 37,711,872 bytes instead of 75,460,608 bytes.
+The old runtime additionally allocated unused full-capacity consumer buffers:
+all 35 layers occupied 176,074,752 FP32 bytes. An INT16 storage implementation
+would use 18,855,936 versus 37,730,304 producer bytes; saved Circle reference
+execution still returns FP32 semantic values. Invocation-local prefill and
+step snapshots are additional transient memory, not persistent cache. These
+shape and storage reductions are not a measured model latency improvement.
 
 To export and run the floating-point artifact path with a matching model-backed
 frontend:

@@ -24,10 +24,45 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
+    gemma4_decode_capacity,
     gemma4_single_token_quantization_supported,
     resolve_gemma4_shared_kv_suffix,
+    validate_gemma4_compact_decode_quantization,
     validate_gemma4_single_token_quantization,
 )
+
+
+class Gemma4DecodeCapacityTest(unittest.TestCase):
+    def test_context_and_window_are_separate(self):
+        for context, window, expected in ((2, 4, 2), (4, 4, 4), (8, 4, 4), (8, 1, 1)):
+            with self.subTest(context=context, window=window):
+                self.assertEqual(gemma4_decode_capacity(context, window), expected)
+                self.assertEqual(gemma4_decode_capacity(context, None), context)
+                self.assertEqual(
+                    gemma4_decode_capacity(context, window, compact=False), context
+                )
+
+    def test_nonpositive_dimensions_reject(self):
+        for context, window in ((0, 4), (8, 0), (8, -1)):
+            with self.subTest(context=context, window=window):
+                with self.assertRaisesRegex(ValueError, "must be positive"):
+                    gemma4_decode_capacity(context, window)
+
+    def test_only_sliding_attention_activation_grids_are_restricted(self):
+        layer: Any = nn.Module()
+        layer.self_attn = nn.Module()
+        layer.self_attn.is_sliding = True
+        layer.self_attn._mode = Mode.QUANT
+        layer.self_attn.obs_logits = MinMaxObserver(name="logits")
+        layer.self_attn.obs_weight = MXObserver(name="weight", axis=0)
+        layer.mlp = nn.Module()
+        layer.mlp.obs_act_in = MXObserver(name="act_in", axis=1)
+        validate_gemma4_compact_decode_quantization([layer])
+        layer.self_attn.obs_logits = MXObserver(name="logits", axis=-1)
+        with self.assertRaisesRegex(ValueError, "unsupported policy at 'obs_logits'"):
+            validate_gemma4_compact_decode_quantization([layer])
+        layer.self_attn.is_sliding = False
+        validate_gemma4_compact_decode_quantization([layer])
 
 
 def _layer(layer_type, *, shared=False, store=False, source=None):
@@ -113,6 +148,15 @@ class Gemma4SharedKVSuffixTest(unittest.TestCase):
         consumer.self_attn.config.num_key_value_heads = 2
         consumer.self_attn.k_proj = nn.Identity()
         with self.assertRaisesRegex(ValueError, "must not produce K/V"):
+            resolve_gemma4_shared_kv_suffix([source, consumer])
+
+    def test_shared_sliding_windows_must_match(self):
+        """A shared snapshot must have one capacity for producer and consumers."""
+        source = _layer("sliding_attention", store=True)
+        source.self_attn.sliding_window = 4
+        consumer = _layer("sliding_attention", shared=True, source=source.self_attn)
+        consumer.self_attn.sliding_window = 3
+        with self.assertRaisesRegex(ValueError, "incompatible sliding windows"):
             resolve_gemma4_shared_kv_suffix([source, consumer])
 
     def test_wrapped_layers_resolve_without_registering_source(self):

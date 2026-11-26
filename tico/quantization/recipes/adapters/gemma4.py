@@ -919,6 +919,9 @@ class Gemma4Adapter(ModelAdapter):
                 output_dir=output_dir,
                 model_args=model_args,
                 prefill_decode=bool(export_cfg.get("prefill_decode", True)),
+                decode_kv_policy=export_cfg.get(
+                    "decode_kv_policy", "compact_sliding_v1"
+                ),
                 strict=bool(export_cfg.get("strict", False)),
                 spatial_pooling=vision_export_cfg.get("spatial_pooling", True),
                 vision_granularity=str(

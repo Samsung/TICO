@@ -861,6 +861,7 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
             spatial_pooling=False,
             ple_embedding_format="auto",
             ple_prefill_split=False,
+            decode_kv_policy="compact_sliding_v1",
             compile_config=CompileConfigV1(),
         )
 

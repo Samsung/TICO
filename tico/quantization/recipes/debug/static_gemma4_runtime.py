@@ -76,9 +76,11 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_dense_no_moe,
     build_decode_attention_mask,
+    gemma4_decode_capacity,
     gemma4_layer_type_head_dim,
     resolve_gemma4_shared_kv_suffix,
     StaticGemma4Layout,
+    validate_gemma4_compact_decode_quantization,
     validate_gemma4_ple_slicing_state,
     validate_gemma4_single_token_quantization,
 )
@@ -251,6 +253,82 @@ def _build_sliding_window_attention_mask(
     return mask.unsqueeze(1)  # (B, 1, S, S)
 
 
+def _runtime_uses_compact_kv(runtime: Any) -> bool:
+    policy = getattr(runtime, "decode_kv_policy", "compact_sliding_v1")
+    if policy not in ("compact_sliding_v1", "full_capacity_v1"):
+        raise ValueError(f"Unsupported Gemma4 decode KV policy {policy!r}.")
+    return policy == "compact_sliding_v1"
+
+
+def _runtime_decode_capacity(runtime: Any, layer_idx: int) -> int:
+    pipeline = getattr(runtime, "_text_pipeline", None)
+    if pipeline is not None:
+        if pipeline.decode_kv_policy != getattr(
+            runtime, "decode_kv_policy", "compact_sliding_v1"
+        ):
+            raise ValueError(
+                "Gemma4 runtime decode KV policy does not match saved artifacts."
+            )
+        return int(pipeline.decode_capacities[layer_idx])
+    return gemma4_decode_capacity(
+        runtime.layout.max_seq,
+        _runtime_sliding_window(runtime, layer_idx),
+        compact=_runtime_uses_compact_kv(runtime),
+    )
+
+
+def _runtime_sliding_window(runtime: Any, layer_idx: int) -> Optional[int]:
+    if runtime.text_config.layer_types[layer_idx] != "sliding_attention":
+        return None
+    text = getattr(runtime, "text_model", None)
+    layers = getattr(text, "layers", None)
+    if layers is not None:
+        decoder = getattr(layers[layer_idx], "wrapped", layers[layer_idx])
+        wrapper = getattr(decoder, "self_attn", None)
+        attention = getattr(wrapper, "wrapped", wrapper)
+        if attention is not None:
+            return int(attention.sliding_window)
+    return int(getattr(runtime.text_config, "sliding_window", 1024))
+
+
+def _compact_finalize_kv(
+    shared_kv: tuple[torch.Tensor, torch.Tensor],
+    mask: torch.Tensor,
+    *,
+    valid_len: int,
+    capacity: int,
+    mask_value: float,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Map the last valid query to chronological past plus fixed current slot.
+
+    Full S-slot producer outputs stay invocation-owned until every full-query
+    consumer has run. These compact copies are finalize-only; persistent past
+    independently retains the latest C_i-1 tokens, including the prompt's last.
+    """
+    p = valid_len - 1
+    retained = min(p, capacity - 1)
+    start = p - retained
+    omitted = torch.ones(mask.shape[-1], dtype=torch.bool, device=mask.device)
+    omitted[start : p + 1] = False
+    # Finite mask fill is the existing forbidden-key convention. A custom mask
+    # may add restrictions/bias within the window, but may not reveal discarded
+    # keys. Do not silently reinterpret such a mask as causal sliding attention.
+    if torch.any(mask[..., omitted] > mask_value):
+        raise ValueError(
+            "Gemma4 compact finalize mask exposes keys outside the retained window."
+        )
+    compact_mask = mask.new_full((*mask.shape[:-1], capacity), mask_value)
+    compact_mask[..., :retained] = mask[..., start:p]
+    compact_mask[..., -1:] = mask[..., p : p + 1]
+    values = []
+    for value in shared_kv:
+        compact = value.new_zeros((*value.shape[:2], capacity, value.shape[-1]))
+        compact[:, :, :retained, :] = value[:, :, start:p, :]
+        compact[:, :, -1:, :] = value[:, :, p : p + 1, :]
+        values.append(compact)
+    return (values[0], values[1]), compact_mask
+
+
 # =============================================================================
 # Data Classes
 # =============================================================================
@@ -258,10 +336,11 @@ def _build_sliding_window_attention_mask(
 
 @dataclass
 class LayerCache:
-    """Static per-layer KV cache."""
+    """Chronological retained past; shared consumers own zero-length placeholders."""
 
     past_k: torch.Tensor
     past_v: torch.Tensor
+    retained_len: int = 0
 
 
 @dataclass
@@ -284,8 +363,15 @@ class StaticGemma4RuntimeConfig:
     last_token_only_prefill: bool = False
     ple_prefill_split: bool = False
     text_artifacts: Optional[str] = None
+    decode_kv_policy: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if self.decode_kv_policy not in (
+            None,
+            "compact_sliding_v1",
+            "full_capacity_v1",
+        ):
+            raise ValueError("Unsupported Gemma4 decode KV policy.")
         if type(self.last_token_only_prefill) is not bool:
             raise ValueError("last_token_only_prefill must be a boolean.")
         if type(self.ple_prefill_split) is not bool:
@@ -311,6 +397,7 @@ class StaticGemma4Runtime:
         last_token_only_prefill: bool = False,
         ple_prefill_split: bool = False,
         text_artifacts: Optional[str] = None,
+        decode_kv_policy: Optional[str] = None,
     ):
         """Create an NPU-profile runtime; ``rope="hf"`` is an explicit override."""
         layout.validate()
@@ -455,6 +542,11 @@ class StaticGemma4Runtime:
         self._model_backed_selective_ple_enabled = False
         if ple_prefill_split and self._has_split_ple():
             self._get_split_ple_stages()
+        self._requested_decode_kv_policy = decode_kv_policy
+        self.decode_kv_policy = (
+            "compact_sliding_v1" if decode_kv_policy is None else decode_kv_policy
+        )
+        _runtime_uses_compact_kv(self)
         self._text_pipeline: Optional["Gemma4TextPipeline"] = None
         if text_artifacts is not None:
             self.use_text_pipeline(text_artifacts)
@@ -482,6 +574,9 @@ class StaticGemma4Runtime:
             directory,
             expected_max_seq_len=self.layout.max_seq,
             expected_num_layers=len(self.text_model.layers),
+            expected_decode_kv_policy=getattr(
+                self, "_requested_decode_kv_policy", None
+            ),
         )
         if (
             pipeline.suffix_start != self.shared_kv_suffix_start
@@ -513,6 +608,7 @@ class StaticGemma4Runtime:
                 or spec["sliding_window"] != attention.sliding_window
             ):
                 raise ValueError("Gemma4 text pipeline attention geometry mismatch.")
+        self.decode_kv_policy = pipeline.decode_kv_policy
         self.prefill_layers = nn.ModuleList(pipeline.prefill_layers)
         self.decode_layers = nn.ModuleList(pipeline.decode_layers)
         self.lm_head = pipeline.lm_head
@@ -675,17 +771,11 @@ class StaticGemma4Runtime:
     def _allocate_empty_cache(
         self, batch_size: int, dtype: torch.dtype
     ) -> list[LayerCache]:
-        """Allocate the fixed ``max_seq - 1`` past-token KV storage.
+        """Allocate producer storage at C_i-1, without consumer backing copies.
 
-        Each decode graph appends its single-token K/V delta after this
-        persistent storage, so the attention K/V axis is always ``max_seq``.
-        Gemma4 has per-layer-type head dimensions:
-        - Sliding attention layers: ``head_dim = config.head_dim``
-        - Full attention layers: ``head_dim = config.global_head_dim``
-
-        The number of KV heads may also differ when
-        ``num_global_key_value_heads`` is set for alternative full attention.
-        Dense E2B/E4B use ``num_key_value_heads`` for all layers (one/two).
+        Float model execution and the saved fake-quantize reference interface use
+        semantic floating values, so vacant slots contain real zero. Integer
+        Circle storage and its zero point remain owned by the saved stage ABI.
         """
         caches = []
         for layer_idx in range(int(self.text_config.num_hidden_layers)):
@@ -709,10 +799,26 @@ class StaticGemma4Runtime:
             else:
                 num_kv_heads = int(self.text_config.num_key_value_heads)
 
+            # Prefer live producer geometry, including per-layer config
+            # overrides; the config path above also serves helper-only callers.
+            layers = getattr(getattr(self, "text_model", None), "layers", None)
+            if layers is not None:
+                decoder = getattr(layers[layer_idx], "wrapped", layers[layer_idx])
+                wrapper = getattr(decoder, "self_attn", None)
+                attention = getattr(wrapper, "wrapped", wrapper)
+                if attention is not None:
+                    head_dim = int(attention.head_dim)
+                    num_kv_heads = int(attention.config.num_attention_heads) // int(
+                        attention.num_key_value_groups
+                    )
             past_k = torch.zeros(
                 batch_size,
                 num_kv_heads,
-                self.layout.max_seq - 1,
+                (
+                    0
+                    if layer_idx in getattr(self, "shared_kv_producers", {})
+                    else _runtime_decode_capacity(self, layer_idx) - 1
+                ),
                 head_dim,
                 device=self.device,
                 dtype=dtype,
@@ -1078,10 +1184,19 @@ class StaticGemma4Runtime:
                 raise ValueError(
                     "Split PLE buffers do not match the shared-KV prefill topology."
                 )
+        if (
+            _runtime_uses_compact_kv(self)
+            and getattr(self, "_text_pipeline", None) is None
+        ):
+            validate_gemma4_compact_decode_quantization(
+                layer
+                for index, layer in enumerate(self.text_model.layers)
+                if _runtime_decode_capacity(self, index) < self.layout.max_seq
+            )
         self.layer_caches = self._allocate_empty_cache(
             hidden_states.shape[0], hidden_states.dtype
         )
-        # Keep invocation-local full S-slot KV separate from the S-1 persistent
+        # Keep invocation-local full S-slot KV separate from the C_i-1 persistent
         # cache: finalize includes the last valid prompt token's own KV.
         shared_kv_states: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         boundary = (
@@ -1117,12 +1232,27 @@ class StaticGemma4Runtime:
             if finalize:
                 if per_layer_input is not None and not split_ple:
                     per_layer_input = per_layer_input[:, p : p + 1, :]
-                # Match the existing decode artifact's rank-3 mask ABI while
-                # preserving the exact prefill query's key visibility.
+                # Keep the decode rank-3 ABI. Compact key selection below also
+                # preserves every retained additive bias and restriction.
                 mask = mask[..., p : p + 1, :].squeeze(1)
                 cos, sin = cos[:, p : p + 1, :], sin[:, p : p + 1, :]
             producer = self.shared_kv_producers.get(layer_idx)
             shared_kv = shared_kv_states[producer] if producer is not None else None
+            if (
+                finalize
+                and shared_kv is not None
+                and _runtime_uses_compact_kv(self)
+                and _runtime_decode_capacity(self, layer_idx) < self.layout.max_seq
+            ):
+                shared_kv, mask = _compact_finalize_kv(
+                    shared_kv,
+                    mask,
+                    valid_len=valid_len,
+                    capacity=_runtime_decode_capacity(self, layer_idx),
+                    mask_value=float(
+                        getattr(self, "attention_mask_fill_value", -120.0)
+                    ),
+                )
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=mask,
@@ -1133,8 +1263,11 @@ class StaticGemma4Runtime:
             if isinstance(out, tuple) and len(out) == 3:
                 hidden_states, new_k, new_v = out
                 cache = self.layer_caches[layer_idx]
-                cache.past_k[:, :, :valid_len, :].copy_(new_k[:, :, :valid_len, :])
-                cache.past_v[:, :, :valid_len, :].copy_(new_v[:, :, :valid_len, :])
+                retained = min(valid_len, cache.past_k.shape[2])
+                start = valid_len - retained
+                cache.past_k[:, :, :retained, :].copy_(new_k[:, :, start:valid_len, :])
+                cache.past_v[:, :, :retained, :].copy_(new_v[:, :, start:valid_len, :])
+                cache.retained_len = retained
                 if layer_idx in self.shared_kv_producers.values():
                     shared_kv_states[layer_idx] = (new_k, new_v)
             else:
@@ -1147,26 +1280,14 @@ class StaticGemma4Runtime:
     def build_decode_masks_and_rope(
         self, batch_size: int, dtype: torch.dtype
     ) -> tuple[dict[str, torch.Tensor], dict[str, tuple[torch.Tensor, torch.Tensor]]]:
-        """Build CPU-owned static masks and RoPE tensors for one decode step.
+        """Build fixed C_i masks and absolute-position RoPE for Q=1 decode.
 
-        Produces per-layer-type decode masks and RoPE:
-
-        - **Full attention mask**: ``(B, 1, max_seq)`` additive bias.
-          Valid past-cache slots ``[0, past_len)`` and the fixed current-token
-          slot ``max_seq - 1`` are allowed.
-
-        - **Sliding attention mask**: ``(B, 1, max_seq)`` additive bias.
-          The most recent ``sliding_window - 1`` valid past slots and the fixed
-          current-token slot ``max_seq - 1`` are allowed.
-
-        - **RoPE**: ``(cos, sin)`` computed via the HF model's
-          ``Gemma4TextRotaryEmbedding`` at the current decode position
-          ``past_len``, per layer type. Sine follows ``rope_convention``.
+        Compact past is chronological in [0, retained_len); empty slots follow
+        it and current always occupies C_i-1. Legacy artifacts retain their
+        original S-slot placement and sliding visibility.
         """
         max_seq = self.layout.max_seq
         mask_value = float(getattr(self, "attention_mask_fill_value", -120.0))
-
-        # Full attention decode mask: attend to all past + current token
         full_mask = build_decode_attention_mask(
             batch_size=batch_size,
             past_len=self.past_len,
@@ -1175,21 +1296,46 @@ class StaticGemma4Runtime:
             dtype=dtype,
             mask_value=mask_value,
         )
-
-        # Sliding attention decode mask: attend to recent past slots and the
-        # current-token slot appended after the fixed past-cache storage.
         sliding_window = int(getattr(self.text_config, "sliding_window", 1024))
-        sliding_mask = torch.full(
-            (batch_size, 1, max_seq), float(mask_value), device=self.device, dtype=dtype
+        capacity = gemma4_decode_capacity(
+            max_seq, sliding_window, compact=_runtime_uses_compact_kv(self)
         )
-        window_start = max(0, self.past_len - sliding_window + 1)
-        sliding_mask[:, :, window_start : self.past_len] = 0.0
-        sliding_mask[:, :, max_seq - 1] = 0.0
-
+        sliding_mask = torch.full(
+            (batch_size, 1, capacity), mask_value, device=self.device, dtype=dtype
+        )
+        if _runtime_uses_compact_kv(self):
+            retained = min(self.past_len, capacity - 1)
+            sliding_mask[:, :, :retained] = 0.0
+        else:
+            window_start = max(0, self.past_len - sliding_window + 1)
+            sliding_mask[:, :, window_start : self.past_len] = 0.0
+        sliding_mask[:, :, capacity - 1] = 0.0
         attention_masks = {
             "full_attention": full_mask,
             "sliding_attention": sliding_mask,
         }
+
+        for index, kind in enumerate(self.text_config.layer_types):
+            layer_capacity = _runtime_decode_capacity(self, index)
+            window = _runtime_sliding_window(self, index)
+            if kind == "sliding_attention" and (
+                layer_capacity != capacity or window != sliding_window
+            ):
+                layer_mask = torch.full(
+                    (batch_size, 1, layer_capacity),
+                    mask_value,
+                    device=self.device,
+                    dtype=dtype,
+                )
+                if _runtime_uses_compact_kv(self):
+                    layer_mask[:, :, : min(self.past_len, layer_capacity - 1)] = 0.0
+                else:
+                    assert window is not None
+                    layer_mask[
+                        :, :, max(0, self.past_len - window + 1) : self.past_len
+                    ] = 0.0
+                layer_mask[:, :, -1] = 0.0
+                attention_masks[f"layer_{index}"] = layer_mask
 
         # RoPE at the current decode position
         rotary_emb = self.model.model.language_model.rotary_emb
@@ -1211,9 +1357,9 @@ class StaticGemma4Runtime:
     def decode_one(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Run one fixed-shape decode step and return next-token logits.
 
-        The decoder graphs always receive ``max_seq - 1`` past-cache slots and
-        append the current-token K/V delta as the final attention slot. Dynamic
-        metadata such as ``past_len`` only controls masks and cache write-back.
+        Producers append current to C_i-1 fixed past slots. ``past_len`` is the
+        absolute next-token position; each cache tracks its own retained length.
+        The global S-1 generation boundary is independent of sliding eviction.
         """
         if input_ids.dim() != 2 or input_ids.size(1) != 1:
             raise ValueError(
@@ -1242,7 +1388,7 @@ class StaticGemma4Runtime:
         # shared ``ple_embedding`` lookup then the ``ple_projection_decode`` stage.
         per_layer_inputs = self._build_per_layer_inputs(llm_input_ids, hidden_states)
 
-        # Store layers build fixed ``max_seq`` shared K/V tensors before later
+        # Store layers build fixed ``C_i`` shared K/V snapshots before later
         # shared consumers of the same layer type execute.
         shared_kv_states: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -1268,7 +1414,9 @@ class StaticGemma4Runtime:
 
             out = layer(
                 hidden_states=hidden_states,
-                attention_mask=attention_masks[layer_type],
+                attention_mask=attention_masks.get(
+                    f"layer_{layer_idx}", attention_masks[layer_type]
+                ),
                 position_embeddings=position_embeddings[layer_type],
                 past_key_value=(
                     (cache.past_k, cache.past_v) if not is_shared else None
@@ -1288,10 +1436,24 @@ class StaticGemma4Runtime:
                         torch.cat((cache.past_v, new_v), dim=2),
                     )
 
-                # Persist the current delta at its logical sequence position for
-                # the next decode invocation. This write-back remains CPU-owned.
-                cache.past_k[:, :, self.past_len : self.past_len + 1, :].copy_(new_k)
-                cache.past_v[:, :, self.past_len : self.past_len + 1, :].copy_(new_v)
+                # The cat above owns a snapshot before eviction/write-back;
+                # every later consumer sees the producer's original past+current.
+                capacity = cache.past_k.shape[2]
+                retained = min(self.past_len, capacity)
+                if capacity:
+                    if retained == capacity:
+                        cache.past_k[:, :, :-1, :].copy_(
+                            cache.past_k[:, :, 1:, :].clone()
+                        )
+                        cache.past_v[:, :, :-1, :].copy_(
+                            cache.past_v[:, :, 1:, :].clone()
+                        )
+                        write_index = capacity - 1
+                    else:
+                        write_index = retained
+                    cache.past_k[:, :, write_index : write_index + 1, :].copy_(new_k)
+                    cache.past_v[:, :, write_index : write_index + 1, :].copy_(new_v)
+                    cache.retained_len = min(capacity, retained + 1)
             else:
                 hidden_states = out
 
@@ -2340,6 +2502,7 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         last_token_only_prefill=cfg.last_token_only_prefill,
         ple_prefill_split=cfg.ple_prefill_split,
         text_artifacts=cfg.text_artifacts,
+        decode_kv_policy=cfg.decode_kv_policy,
         vision_profile=vision_profile,
         device=cfg.device,
     )

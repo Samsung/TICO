@@ -625,7 +625,7 @@ class TestAttentionMaskFillValue(unittest.TestCase):
         )
         self.assertEqual(
             decode_masks["sliding_attention"][0, 0, 0].item(),
-            fill_value,
+            0.0,
         )
         self.assertEqual(
             decode_masks["full_attention"][0, 0, max_seq - 1].item(),
@@ -812,14 +812,10 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
         mask_value = -120.0
 
-        # window_start = max(0, past_len - sliding_window + 1) = 100 - 32 + 1 = 69
-        window_start = max(0, past_len - sliding_window + 1)
-
-        # Allow the most recent W-1 past slots and the fixed current slot.
-        self.assertTrue(torch.all(mask[window_start:past_len] == 0.0))
-        self.assertTrue(torch.all(mask[:window_start] == mask_value))
-        self.assertTrue(torch.all(mask[past_len : max_seq - 1] == mask_value))
-        self.assertEqual(mask[max_seq - 1].item(), 0.0)
+        # Retained W-1 past tokens occupy the beginning of the compact
+        # buffer, followed immediately by current when the window is full.
+        self.assertEqual(mask.shape, (sliding_window,))
+        self.assertTrue(torch.all(mask == 0.0))
 
     def test_sliding_window_mask_first_step(self):
         """At past_len=0 only the fixed current-token slot should be allowed."""
@@ -863,8 +859,9 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         mask_value = -120.0
 
         # At past_len=0, only the final current-token slot is allowed.
-        self.assertTrue(torch.all(mask[: max_seq - 1] == mask_value))
-        self.assertEqual(mask[max_seq - 1].item(), 0.0)
+        self.assertEqual(mask.shape, (sliding_window,))
+        self.assertTrue(torch.all(mask[:-1] == mask_value))
+        self.assertEqual(mask[-1].item(), 0.0)
 
     def test_rope_computed_at_past_len(self):
         """RoPE should be computed at position past_len."""
@@ -1090,6 +1087,7 @@ def _make_ple_runtime(*, max_seq: int, num_layers: int, ple_dim: int):
     runtime.ple_projection = _CountingPLEStage(_make_packed_ple)  # type: ignore[assignment]
     runtime.prefill_layers = [_SliceRecordingLayer() for _ in range(num_layers)]  # type: ignore[assignment]
     runtime.decode_layers = [_SliceRecordingLayer() for _ in range(num_layers)]  # type: ignore[assignment]
+    setattr(runtime.text_model, "layers", runtime.prefill_layers)
     runtime.shared_kv_suffix_start = num_layers
     runtime.shared_kv_producers = {}
     runtime.last_token_only_prefill = False

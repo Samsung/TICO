@@ -67,8 +67,10 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_dense_no_moe,
+    gemma4_decode_capacity,
     gemma4_single_token_quantization_supported,
     resolve_gemma4_shared_kv_suffix,
+    validate_gemma4_compact_decode_quantization,
 )
 from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
     build_gemma4_vision_split_export_bundle,
@@ -1136,15 +1138,23 @@ def _gemma4_text_pipeline_manifest(
     *,
     max_seq_len: int,
     artifact_tag: str,
+    decode_kv_policy: str = "compact_sliding_v1",
 ) -> dict[str, Any]:
     """Describe the existing Q=1 consumer graph as a prefill-finalize alias.
 
     Both adapters execute the same wrapped consumer and frozen observers. They
-    read external storage K/V of length S, return no K/V and perform no writes.
+    read external storage K/V of layer capacity C, return no K/V and perform
+    no writes.
     The host supplies the original prefill query row/RoPE/PLE, rather than the
     normal decode mask or a new logical position. No new graph or qparam owner
     is needed for this alias.
     """
+    if not isinstance(decode_kv_policy, str) or decode_kv_policy not in {
+        "compact_sliding_v1",
+        "full_capacity_v1",
+    }:
+        raise ValueError("Unsupported Gemma4 export.decode_kv_policy.")
+    compact = decode_kv_policy == "compact_sliding_v1"
     boundary, producers = resolve_gemma4_shared_kv_suffix(qtext.layers)
     finalize_supported = gemma4_single_token_quantization_supported(
         qtext.layers[boundary:],
@@ -1166,6 +1176,9 @@ def _gemma4_text_pipeline_manifest(
                 "num_kv_heads": heads,
                 "head_dim": head_dim,
                 "sliding_window": window,
+                "decode_capacity": gemma4_decode_capacity(
+                    max_seq_len, window, compact=compact
+                ),
                 "prefill_artifact": _circle_name(
                     f"decoder_layer_prefill_{index}", artifact_tag
                 ),
@@ -1180,9 +1193,10 @@ def _gemma4_text_pipeline_manifest(
             }
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_family": "gemma4",
-        "finalize_contract": "shared_consumer_decode_alias_v1",
+        "decode_kv_policy": decode_kv_policy,
+        "finalize_contract": "shared_consumer_decode_alias_v2",
         "finalize_supported": finalize_supported,
         "finalize_unsupported_reason": (
             None
@@ -1213,6 +1227,7 @@ def export_gemma4_per_layer(
     spatial_pooling: bool = True,
     ple_embedding_format: str = "auto",
     ple_prefill_split: bool = False,
+    decode_kv_policy: str = "compact_sliding_v1",
     compile_config: CompileConfigBase | None = None,
 ) -> None:
     """Export a floating-point or PTQ-wrapped dense Gemma4 E2B/E4B by runtime stage.
@@ -1247,11 +1262,19 @@ def export_gemma4_per_layer(
     prefill and once for single-token decode. The CPU runtime orchestrates the
     PLE lookup and slices the packed projection output; each decoder Circle
     receives only its ``per_layer_input`` slice, matching
-    ``StaticGemma4Runtime``.
+    ``StaticGemma4Runtime``. ``decode_kv_policy="compact_sliding_v1"`` uses
+    C=min(S,W) keys for causal sliding decode; ``"full_capacity_v1"`` retains
+    the full key capacity for comparison and shape-dependent observer policies.
     """
     if max_seq_len < 1:
         raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
 
+    if not isinstance(decode_kv_policy, str) or decode_kv_policy not in {
+        "compact_sliding_v1",
+        "full_capacity_v1",
+    }:
+        raise ValueError("Unsupported Gemma4 export.decode_kv_policy.")
+    compact_decode = decode_kv_policy == "compact_sliding_v1"
     if type(ple_prefill_split) is not bool:
         raise TypeError("export.ple_prefill_split must be a boolean.")
     if ple_prefill_split and not prefill_decode:
@@ -1280,10 +1303,20 @@ def export_gemma4_per_layer(
             qtext,
             max_seq_len=max_seq_len,
             artifact_tag=artifact_tag,
+            decode_kv_policy=decode_kv_policy,
         )
         if prefill_decode
         else None
     )
+
+    if prefill_decode and compact_decode:
+        assert text_manifest is not None
+        shrinking_layers = [
+            layer
+            for layer, contract in zip(qtext.layers, text_manifest["layers"])
+            if contract["decode_capacity"] < max_seq_len
+        ]
+        validate_gemma4_compact_decode_quantization(shrinking_layers)
 
     text_capacity = int(qtext.config.max_position_embeddings)
     if max_seq_len > text_capacity:
@@ -1531,9 +1564,12 @@ def export_gemma4_per_layer(
         if not prefill_decode:
             continue
 
+        decode_capacity = gemma4_decode_capacity(
+            max_seq_len, sliding_window, compact=compact_decode
+        )
         decode_kwargs: dict[str, Any] = {
             "attention_mask": _make_decode_attention_mask(
-                max_seq_len=max_seq_len,
+                max_seq_len=decode_capacity,
                 sliding_window=sliding_window,
             ),
             "position_embeddings": _make_position_embeddings(
@@ -1552,7 +1588,7 @@ def export_gemma4_per_layer(
             shared_key = torch.randn(
                 1,
                 num_kv_heads,
-                max_seq_len,
+                decode_capacity,
                 head_dim,
                 device="cpu",
             )
@@ -1564,7 +1600,7 @@ def export_gemma4_per_layer(
             past_key = torch.randn(
                 1,
                 num_kv_heads,
-                max_seq_len - 1,
+                decode_capacity - 1,
                 head_dim,
                 device="cpu",
             )

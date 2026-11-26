@@ -367,6 +367,8 @@ class TestStaticGemma4SplitPLE(unittest.TestCase):
                 decode_layers=replacement.decode_layers,
                 lm_head=replacement.lm_head,
                 finalize_supported=True,
+                decode_kv_policy="compact_sliding_v1",
+                decode_capacities=(3, 10, 3, 10),
             )
             with mock.patch(
                 "tico.quantization.recipes.export.gemma4_text_pipeline.load_gemma4_text_pipeline",
@@ -374,7 +376,10 @@ class TestStaticGemma4SplitPLE(unittest.TestCase):
             ) as loader:
                 runtime.use_text_pipeline("calibrated-artifacts")
             loader.assert_called_once_with(
-                "calibrated-artifacts", expected_max_seq_len=10, expected_num_layers=4
+                "calibrated-artifacts",
+                expected_max_seq_len=10,
+                expected_num_layers=4,
+                expected_decode_kv_policy=None,
             )
             self.assertEqual(runtime.past_len, 0)
             self.assertEqual(runtime.layer_caches, [])
