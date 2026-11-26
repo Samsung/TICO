@@ -21,6 +21,7 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mse import MSEObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
@@ -29,6 +30,7 @@ from tico.quantization.wrapq.qscheme import QScheme
 _AFFINE_OBSERVER_REGISTRY = {
     "minmax": MinMaxObserver,
     "ema": EMAObserver,
+    "mse": MSEObserver,
     "percentile": PercentileObserver,
 }
 
@@ -37,7 +39,7 @@ def _resolve_affine_observer(name: str) -> type[ObserverBase]:
     """Resolve an affine observer name to its class.
 
     Args:
-        name: Observer name such as ``"minmax"``, ``"ema"``, or
+        name: Observer name such as ``"minmax"``, ``"ema"``, ``"mse"``, or
             ``"percentile"`` (case-insensitive).
 
     Returns:

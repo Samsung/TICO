@@ -25,6 +25,7 @@ from tico.quantization.wrapq.observers.base import ObserverNotReadyError
 from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mse import MSEObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
@@ -37,7 +38,7 @@ def _tensor(value: Optional[torch.Tensor]) -> torch.Tensor:
 
 class FrozenObserverStateTest(unittest.TestCase):
     def test_missing_empty_and_zero_are_distinct(self):
-        for cls in (MinMaxObserver, EMAObserver, PercentileObserver):
+        for cls in (MinMaxObserver, EMAObserver, MSEObserver, PercentileObserver):
             for dtype, scheme in (
                 (UINT8, QScheme.PER_TENSOR_ASYMM),
                 (INT16, QScheme.PER_TENSOR_SYMM),
@@ -59,7 +60,7 @@ class FrozenObserverStateTest(unittest.TestCase):
 
     def test_nonfinite_is_invalid_not_missing(self):
         for values in ([float("nan"), 1.0], [float("-inf"), float("inf")]):
-            for cls in (MinMaxObserver, EMAObserver):
+            for cls in (MinMaxObserver, EMAObserver, MSEObserver):
                 with self.subTest(observer=cls.__name__, values=values):
                     obs = cls(name="bad")
                     obs.collect(torch.tensor(values))
@@ -73,7 +74,7 @@ class FrozenObserverStateTest(unittest.TestCase):
         self.assertEqual(percentile.derive_candidate().provenance, "calibrated")
 
     def test_every_affine_subtype_prefers_locked_grid(self):
-        for cls in (MinMaxObserver, EMAObserver, PercentileObserver):
+        for cls in (MinMaxObserver, EMAObserver, MSEObserver, PercentileObserver):
             with self.subTest(observer=cls.__name__):
                 obs = cls(name="locked")
                 scale, zp = torch.tensor(0.3), torch.tensor(7)
@@ -278,7 +279,7 @@ class FrozenObserverStateTest(unittest.TestCase):
             invalid_axis.load_qparams(torch.ones(2), torch.zeros(2))
 
     def test_exact_calibrated_and_imported_state_roundtrip(self):
-        for cls in (MinMaxObserver, EMAObserver, PercentileObserver):
+        for cls in (MinMaxObserver, EMAObserver, MSEObserver, PercentileObserver):
             for imported in (False, True):
                 with self.subTest(observer=cls.__name__, imported=imported):
                     obs = cls(name="roundtrip")
