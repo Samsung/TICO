@@ -92,12 +92,14 @@ def _normalize_filter_config(filter_cfg: Any, *, context: str) -> dict[str, Any]
     """Normalize a per-dataset ``filter`` block.
 
     Expected keys (all optional except ``n_per_class``):
-      - ``n_per_class`` (int, >= 0; required for the filter to activate)
+      - ``n_per_class`` (int, >= 0; required for the filter to activate unless
+        ``question_ids`` is provided)
       - ``field`` (str, default ``"image_classes"``)
       - ``classes`` (list[str] | None)
       - ``max_classes`` (int | None)
       - ``distinct_images`` (bool, default True)
       - ``verbose`` (bool, default True)
+      - ``question_ids`` (list[int | str] | None; pins exact rows)
     """
     if not isinstance(filter_cfg, Mapping):
         raise TypeError(
@@ -136,6 +138,24 @@ def _normalize_filter_config(filter_cfg: Any, *, context: str) -> dict[str, Any]
 
     normalized["distinct_images"] = bool(filter_cfg.get("distinct_images", True))
     normalized["verbose"] = bool(filter_cfg.get("verbose", True))
+
+    question_ids = filter_cfg.get("question_ids")
+    if question_ids is not None:
+        if not isinstance(question_ids, (list, tuple)):
+            raise TypeError(
+                f"{context}.filter.question_ids must be a list or null, "
+                f"got {type(question_ids).__name__}."
+            )
+        if not question_ids:
+            raise ValueError(
+                f"{context}.filter.question_ids must be a non-empty list or "
+                f"null, got an empty list."
+            )
+        normalized["question_ids"] = [
+            q if isinstance(q, str) else int(q) for q in question_ids
+        ]
+    else:
+        normalized["question_ids"] = None
 
     return normalized
 

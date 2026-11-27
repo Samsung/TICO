@@ -21,7 +21,7 @@ import string
 import tempfile
 from dataclasses import dataclass, field
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, TypedDict
 
 import torch
 from datasets import Dataset, IterableDataset, load_dataset
@@ -58,6 +58,12 @@ class CalibFilterConfig:
             appears at most once in the calibration set.
         filter_field: Name of the dataset field that holds the list of
             classes for each example.  Defaults to ``"image_classes"``.
+        question_ids: Optional explicit list of ``question_id`` values.  When
+            provided, only rows whose ``question_id`` is in this list are
+            considered as selection candidates; all other rules (class quotas,
+            ``classes``/``max_classes``, ``distinct_images``) still apply to
+            that restricted candidate pool.  Activates the filter path even
+            when ``n_per_class`` is ``0``.
         verbose: When ``True``, print progress information about discovered
                     classes, selected samples, and per-class counts.  Defaults to
                     ``False`` (silent).
@@ -68,12 +74,13 @@ class CalibFilterConfig:
     max_classes: Optional[int] = None
     distinct_images: bool = True
     filter_field: str = "image_classes"
+    question_ids: Optional[List[Any]] = None
     verbose: bool = False
 
     @property
     def is_active(self) -> bool:
         """Return ``True`` when class filtering should be applied."""
-        return self.n_per_class > 0
+        return self.n_per_class > 0 or bool(self.question_ids)
 
 
 def normalize_answer(s: str) -> str:
@@ -1750,6 +1757,7 @@ def get_mixed_calib_inputs(
           classes: null           # optional list of class names
           max_classes: null        # optional cap
           distinct_images: true    # dedup by image_id
+          question_ids: null       # optional list of question_id values pinning exact rows
           verbose: true
 
     Args:
@@ -1790,20 +1798,30 @@ def get_mixed_calib_inputs(
 
         # --- Per-dataset filter block (e.g. TextVQA class filtering) ---
         filter_dict: Optional[Dict[str, Any]] = config.get("filter")
-        if filter_dict and filter_dict.get("n_per_class", 0) > 0:
+        if filter_dict and (
+            filter_dict.get("n_per_class", 0) > 0 or filter_dict.get("question_ids")
+        ):
             fc = CalibFilterConfig(
-                n_per_class=int(filter_dict["n_per_class"]),
+                n_per_class=int(filter_dict.get("n_per_class", 0) or 0),
                 classes=filter_dict.get("classes"),
                 max_classes=filter_dict.get("max_classes"),
                 distinct_images=filter_dict.get("distinct_images", True),
                 filter_field=filter_dict.get("field", "image_classes"),
+                question_ids=filter_dict.get("question_ids"),
                 verbose=filter_dict.get("verbose", True),
             )
 
-            print(
-                f"[info] Filtering '{dataset}' by {fc.filter_field} "
-                f"(n_per_class={fc.n_per_class}) in mixed mode"
-            )
+            if fc.question_ids is not None:
+                print(
+                    f"[info] Filtering '{dataset}' by {fc.filter_field} "
+                    f"(n_per_class={fc.n_per_class}, "
+                    f"{len(fc.question_ids)} pinned question_ids) in mixed mode"
+                )
+            else:
+                print(
+                    f"[info] Filtering '{dataset}' by {fc.filter_field} "
+                    f"(n_per_class={fc.n_per_class}) in mixed mode"
+                )
             class_inputs = get_calib_inputs(
                 dataset=dataset,
                 processor=processor,
@@ -1929,9 +1947,13 @@ def dataset_filter_indices(
             deduplication when ``filter_config.distinct_images`` is True.
             Pass None when the dataset has no ``image_id`` column.
         filter_config: Filtering configuration.  When None or inactive
-            (``n_per_class <= 0``), all indices are returned.
+            (``n_per_class <= 0`` and no ``question_ids``), all indices are
+            returned.
         dataset_name: Dataset name for log/error messages.
-        question_ids: Optional per-row question ids (verbose logging only).
+        question_ids: Optional per-row ``question_id`` values.  When
+            ``filter_config.question_ids`` is set, these are used to restrict
+            the candidate pool to the pinned rows; otherwise they are used for
+            verbose logging only.
         questions: Optional per-row question texts (verbose logging only).
 
     Returns:
@@ -1941,9 +1963,37 @@ def dataset_filter_indices(
     if filter_config is None or not filter_config.is_active:
         return list(range(n_rows))
 
+    # --- Question-id pinning: restrict the candidate pool to exact rows ---
+    if filter_config.question_ids is not None and question_ids is None:
+        raise ValueError(
+            f"filter.question_ids was set for dataset '{dataset_name}' but "
+            f"the dataset has no 'question_id' column. Please remove "
+            f"'question_ids' from the filter configuration."
+        )
+    allowed_question_ids: Optional[Set[str]] = None
+    row_question_ids: List[Any] = question_ids if question_ids is not None else []
+    if filter_config.question_ids is not None:
+        allowed_question_ids = {str(q) for q in filter_config.question_ids}
+        if filter_config.verbose:
+            present = {str(q) for q in row_question_ids}
+            missing_pinned = allowed_question_ids - present
+            if missing_pinned:
+                print(
+                    f"[warn] {len(missing_pinned)} pinned question_ids were not "
+                    f"found in dataset '{dataset_name}': "
+                    f"{sorted(missing_pinned)[:20]}"
+                )
+
     # --- Phase 1: discover classes and their frequencies ---
+    # When question_ids are pinned, class discovery is restricted to the pinned
+    # rows so that the pin fully defines the candidate pool (classes that only
+    # occur outside the pinned rows must not affect selection).
     class_freq: Dict[str, int] = {}
-    for filter_classes in class_values:
+    for idx, filter_classes in enumerate(class_values):
+        if allowed_question_ids is not None and (
+            str(row_question_ids[idx]) not in allowed_question_ids
+        ):
+            continue
         if not filter_classes:
             continue
         for cls in filter_classes:
@@ -1951,8 +2001,22 @@ def dataset_filter_indices(
             class_freq[cls_str] = class_freq.get(cls_str, 0) + 1
 
     if not class_freq:
-        # The field exists but no sample carries any class value (or the input
-        # is empty): there is nothing to filter by, so keep the data as-is.
+        # The field exists but no (pinned) sample carries any class value.
+        if allowed_question_ids is not None:
+            # Pinning alone still selects the pinned rows.
+            pinned = [
+                idx
+                for idx in range(n_rows)
+                if str(row_question_ids[idx]) in allowed_question_ids
+            ]
+            if filter_config.verbose:
+                print(
+                    f"[warn] Filter field '{filter_config.filter_field}' contains no "
+                    f"class values among pinned samples of dataset '{dataset_name}'; "
+                    f"returning all {len(pinned)} pinned samples."
+                )
+            return pinned
+        # There is nothing to filter by, so keep the data as-is.
         if filter_config.verbose:
             print(
                 f"[warn] Filter field '{filter_config.filter_field}' contains no "
@@ -1992,9 +2056,27 @@ def dataset_filter_indices(
     selected_indices: List[int] = []
     seen_image_ids: set = set()
     skipped_dup_images = 0
+    # When question_ids are pinned without a per-class quota (n_per_class <= 0),
+    # class quotas must not restrict selection.
+    per_class_quota: Optional[int] = (
+        filter_config.n_per_class if filter_config.n_per_class > 0 else None
+    )
 
     for idx, filter_classes in enumerate(class_values):
+        if allowed_question_ids is not None and (
+            str(row_question_ids[idx]) not in allowed_question_ids
+        ):
+            continue
+
         if not filter_classes:
+            if allowed_question_ids is None:
+                continue
+            # A pinned row without class values is kept as-is: the pin fully
+            # defines the candidate pool and quotas cannot apply to it.
+            if filter_config.verbose:
+                qid = row_question_ids[idx]
+                print(f"  [selected] question_id={qid}  classes=[]  Q: (pinned row)")
+            selected_indices.append(idx)
             continue
 
         # Deduplicated target classes carried by this sample (order preserved).
@@ -2002,13 +2084,21 @@ def dataset_filter_indices(
             dict.fromkeys(str(c) for c in filter_classes if str(c) in target_set)
         )
         if not sample_classes:
+            if allowed_question_ids is None:
+                continue
+            # A pinned row without any target class is kept as-is: the pin
+            # fully defines the candidate pool and quotas cannot apply to it.
+            if filter_config.verbose:
+                qid = row_question_ids[idx]
+                print(f"  [selected] question_id={qid}  classes=[]  Q: (pinned row)")
+            selected_indices.append(idx)
             continue
 
         # Strict per-class cap: a multi-label sample is selected only when ALL
         # of its target classes are still under quota.  This keeps class_counts
         # equal to the actual selected-set distribution.
-        if any(
-            class_counts[cls] >= filter_config.n_per_class for cls in sample_classes
+        if per_class_quota is not None and any(
+            class_counts[cls] >= per_class_quota for cls in sample_classes
         ):
             continue
 

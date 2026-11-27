@@ -26,7 +26,7 @@ except ModuleNotFoundError:
 install_optional_dependency_stubs()
 
 import unittest
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from unittest.mock import MagicMock, patch
 
@@ -512,7 +512,7 @@ class TestMixedModeClassFiltering(unittest.TestCase):
 class TestDatasetFilterIndices(unittest.TestCase):
     """dataset_filter_indices must match dataset_filter's selection exactly."""
 
-    def _examples(self):
+    def _examples(self) -> List[Dict[str, Any]]:
         return [
             {
                 "image_classes": ["cat"],
@@ -594,6 +594,118 @@ class TestDatasetFilterIndices(unittest.TestCase):
             [[], []], filter_config=CalibFilterConfig(n_per_class=1, verbose=False)
         )
         self.assertEqual(indices, [0, 1])
+
+
+class TestQuestionIdPinning(unittest.TestCase):
+    """filter.question_ids must pin exact rows and restrict the candidate pool."""
+
+    def _indices_with_pin(self, filter_config) -> List[int]:
+        examples: List[Dict[str, Any]] = [
+            {
+                "image_classes": ["cat"],
+                "image_id": 1,
+                "question_id": 11,
+                "question": "q1",
+            },
+            {
+                "image_classes": ["dog"],
+                "image_id": 2,
+                "question_id": 12,
+                "question": "q2",
+            },
+            {
+                "image_classes": ["cat"],
+                "image_id": 3,
+                "question_id": 13,
+                "question": "q3",
+            },
+            {
+                "image_classes": ["cat", "dog"],
+                "image_id": 4,
+                "question_id": 14,
+                "question": "q4",
+            },
+            {
+                "image_classes": [],
+                "image_id": 5,
+                "question_id": 15,
+                "question": "q5",
+            },
+        ]
+        selected = dataset_filter(examples, filter_config, dataset_name="toy")
+        indices = dataset_filter_indices(
+            class_values=[ex["image_classes"] for ex in examples],
+            image_ids=[ex["image_id"] for ex in examples],
+            filter_config=filter_config,
+            dataset_name="toy",
+            question_ids=[ex["question_id"] for ex in examples],
+            questions=[ex["question"] for ex in examples],
+        )
+        self.assertEqual(indices, [examples.index(ex) for ex in selected])
+        return indices
+
+    def test_pin_with_quota_selects_exact_rows(self):
+        indices = self._indices_with_pin(
+            CalibFilterConfig(
+                n_per_class=2,
+                max_classes=50,
+                distinct_images=True,
+                question_ids=[11, 12, 14],
+                verbose=False,
+            )
+        )
+        # Class discovery is restricted to pinned rows, so quotas computed
+        # there cannot reject any pinned row with distinct quota room.
+        self.assertEqual(indices, [0, 1, 3])
+
+    def test_pin_without_quota_selects_all_pinned_rows(self):
+        indices = self._indices_with_pin(
+            CalibFilterConfig(
+                n_per_class=0,
+                distinct_images=True,
+                question_ids=[12, 14, 15],
+                verbose=False,
+            )
+        )
+        self.assertEqual(indices, [1, 3, 4])
+
+    def test_pin_ignores_rows_outside_pin(self):
+        indices = self._indices_with_pin(
+            CalibFilterConfig(
+                n_per_class=1,
+                distinct_images=True,
+                question_ids=[13],
+                verbose=False,
+            )
+        )
+        self.assertEqual(indices, [2])
+
+    def test_pin_missing_ids_are_skipped(self):
+        indices = self._indices_with_pin(
+            CalibFilterConfig(
+                n_per_class=2,
+                distinct_images=True,
+                question_ids=[11, 999],
+                verbose=False,
+            )
+        )
+        self.assertEqual(indices, [0])
+
+    def test_pin_activates_filter_without_quota(self):
+        self.assertTrue(CalibFilterConfig(n_per_class=0, question_ids=[1]).is_active)
+        self.assertFalse(CalibFilterConfig(n_per_class=0).is_active)
+
+    def test_pin_without_question_id_column_raises(self):
+        with self.assertRaises(ValueError):
+            dataset_filter_indices(
+                class_values=[["cat"]],
+                image_ids=[1],
+                filter_config=CalibFilterConfig(
+                    n_per_class=1, question_ids=[11], verbose=False
+                ),
+                dataset_name="toy",
+                question_ids=None,
+            )
 
 
 class TestGetCalibInputsLazyFilter(unittest.TestCase):
