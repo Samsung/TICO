@@ -24,6 +24,7 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mse import MSEObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -264,6 +265,21 @@ class TestObserverSelection(unittest.TestCase):
         self.assertEqual(spec.observer, PercentileObserver)
         self.assertEqual(spec.kwargs["percentile"], 99.9)
         self.assertEqual(spec.kwargs["max_samples"], 65536)
+
+    def test_mse_observer_name_and_kwargs_pass_through(self):
+        spec = quant_spec_from_config(
+            {
+                "kind": "affine",
+                "dtype": "uint8",
+                "observer": "mse",
+                "num_grid": 40,
+                "alternating_search": False,
+            }
+        )
+        assert spec is not None
+        self.assertEqual(spec.observer, MSEObserver)
+        self.assertEqual(spec.kwargs["num_grid"], 40)
+        self.assertIs(spec.kwargs["alternating_search"], False)
 
     def test_unknown_observer_raises(self):
         with self.assertRaisesRegex(ValueError, "Unknown affine observer"):
