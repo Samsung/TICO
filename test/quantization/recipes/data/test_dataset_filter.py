@@ -26,7 +26,7 @@ except ModuleNotFoundError:
 install_optional_dependency_stubs()
 
 import unittest
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from unittest.mock import MagicMock, patch
 
@@ -512,7 +512,7 @@ class TestMixedModeClassFiltering(unittest.TestCase):
 class TestDatasetFilterIndices(unittest.TestCase):
     """dataset_filter_indices must match dataset_filter's selection exactly."""
 
-    def _examples(self):
+    def _examples(self) -> List[Dict[str, Any]]:
         return [
             {
                 "image_classes": ["cat"],
@@ -599,8 +599,8 @@ class TestDatasetFilterIndices(unittest.TestCase):
 class TestQuestionIdPinning(unittest.TestCase):
     """filter.question_ids must pin exact rows and restrict the candidate pool."""
 
-    def _indices_with_pin(self, filter_config):
-        examples = [
+    def _indices_with_pin(self, filter_config) -> List[int]:
+        examples: List[Dict[str, Any]] = [
             {
                 "image_classes": ["cat"],
                 "image_id": 1,
